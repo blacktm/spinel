@@ -13773,7 +13773,14 @@ void analyze_program(Compiler *c) {
      infer_write_types) as a focused fixpoint; this touches only proc-return
      metadata, never the widened slot types, so it cannot undo the widen.
      A factory's ret_proc_ret feeds a caller's proc_ret, hence the loop. */
-  if (g_promote_mode) {
+  /* Not only in promote mode. A proc's parameter is typed from its `.call`
+     sites, and a parameter that settles LATE -- an empty-array local argument
+     types it only in the post-convergence pass -- leaves proc_ret derived from
+     the body as it read before, so `->(acc){ acc + [1] }.call(e)` with
+     `e = []` answered an Integer where the body plainly builds an array
+     (#4296). The re-derivation below is the same one, and it only touches
+     proc-return metadata. */
+  {
     const NodeTable *nt = c->nt;
     int changed = 1, iters = 0;
     while (changed && iters++ < 32) {
