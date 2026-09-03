@@ -58,9 +58,16 @@ endif
 # exit code (124 on timeout), regardless of which `timeout` is on PATH.
 # The bench target keys on 124 to mark a run as SKIP; busybox uses 143
 # and BSDs use 399, which would be misclassified. Built once from C.
-# `TIMEOUT_BIN` is the wrapper path, so the existing `$(TIMEOUT_BIN)`
-# emptiness checks (which print a "no time limit" warning) still work.
-SPINEL_TIMEOUT := scripts/spinel-timeout
+# It is a build ARTEFACT, so it belongs under build/ with the rest of them --
+# not beside its source in scripts/, where it would need its own ignore rule
+# and would survive `make clean`.
+#
+# TIMEOUT_BIN stays defined because targets still test it, but it can no longer
+# be empty: the wrapper is always built, so the "no time limit" warning those
+# checks print is now unreachable. It is left in place rather than deleted --
+# it is one line, and it is the thing to restore if the wrapper ever becomes
+# optional again.
+SPINEL_TIMEOUT := build/spinel-timeout
 TIMEOUT_BIN := $(SPINEL_TIMEOUT)
 TIMEOUT10 := $(SPINEL_TIMEOUT) 10
 TIMEOUT60 := $(SPINEL_TIMEOUT) 60

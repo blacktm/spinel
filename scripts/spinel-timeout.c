@@ -34,23 +34,18 @@ static void on_alarm(int sig) {
 
 int main(int argc, char **argv) {
   if (argc < 3) {
-    const char *u = "usage: spinel-timeout SECONDS COMMAND [ARG...]\n";
-    write(2, u, strlen(u));
+    fputs("usage: spinel-timeout SECONDS COMMAND [ARG...]\n", stderr);
     return 2;
   }
   long secs = atol(argv[1]);
   if (secs <= 0) secs = 1;
 
-  struct sigaction sa = {0};
-  sa.sa_handler = on_alarm;
-  sigaction(SIGALRM, &sa, NULL);
-  alarm((unsigned)secs);
-
   pid_t pid = fork();
   if (pid < 0) { perror("fork"); return 1; }
   if (pid == 0) {
-    /* child: reset alarm disposition, exec the command */
-    alarm(0);
+    /* child: the alarm is armed in the PARENT after this fork, so there is
+       nothing pending here; put SIGALRM back to its default in case the
+       command inherits an expectation about it. */
     struct sigaction dfl = {0};
     dfl.sa_handler = SIG_DFL;
     sigaction(SIGALRM, &dfl, NULL);
@@ -59,10 +54,30 @@ int main(int argc, char **argv) {
     _exit(127);
   }
 
-  int status;
-  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  /* Arm AFTER the fork: armed before it, an alarm that fired in the window
+     between alarm() and fork() would set timed_out with no child to blame. */
+  struct sigaction sa = {0};
+  sa.sa_handler = on_alarm;   /* no SA_RESTART: the wait below must be cut short */
+  sigaction(SIGALRM, &sa, NULL);
+  alarm((unsigned)secs);
 
-  if (timed_out) {
+  /* The alarm has to END the wait, not just interrupt it. Retrying waitpid on
+     every EINTR -- which is what a plain `while (waitpid(...) < 0 && errno ==
+     EINTR)` does -- goes straight back to waiting, so the child runs to
+     completion and the wrapper reports 124 having enforced nothing: a 15s
+     sleep under a 2s limit took 15s and then said it had timed out. `reaped`
+     is what tells the two apart, rather than timed_out, so a child that exits
+     in the same instant the alarm fires still reports its own status. */
+  int status = 0, reaped = 0;
+  for (;;) {
+    pid_t r = waitpid(pid, &status, 0);
+    if (r == pid) { reaped = 1; break; }
+    if (r < 0 && errno == EINTR) { if (timed_out) break; continue; }
+    break;   /* ECHILD or another error: nothing left to wait for */
+  }
+  alarm(0);
+
+  if (!reaped) {
     /* give the child a moment to exit on SIGTERM, then force it */
     kill(pid, SIGTERM);
     struct timespec grace = {0, 100 * 1000 * 1000};  /* 100ms */

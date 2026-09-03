@@ -289,6 +289,7 @@ $(SPINEL): $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(R
 # The bench target keys on 124 to mark a run as SKIP; busybox uses 143
 # and BSDs use 399, which would be misclassified. Built once from C.
 $(SPINEL_TIMEOUT): scripts/spinel-timeout.c
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $< -o $@
 
 # ---- RBS extractor ----
@@ -775,7 +776,7 @@ reject-test: $(SPINEL)
 # only by the map between the write and the read -- under SPINEL_GC_MINOR=1.
 # It costs a fifth of a second, and it is the leg that was missing when a
 # barrier pointed at the wrong object shipped.
-gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB)
+gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcminor.XXXXXX); ok=1; \
 	src=test/gc_minor_thread_local_slot.rb; \
 	$(SPINEL) "$$src" -o "$$tmp/m" >/dev/null 2>&1 || \
@@ -871,7 +872,7 @@ ifeq ($(wildcard $(RBS_INC)/rbs/parser.h),)
 rbs-seed-test:
 	@echo "rbs-seed-test: skipped (vendor/rbs not fetched; run 'make deps')"
 else
-rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB)
+rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@cp -f $(RBS_EXTRACT_BIN) $(dir $(SPINEL))spinel_rbs_extract
 	@tmp=$$(mktemp -d /tmp/spinel-rbsseed.XXXXXX); ok=1; \
 	$(SPINEL) test/rbs-seed/nested_ivar.rb --rbs test/rbs-seed/sig \
@@ -1181,12 +1182,12 @@ endef
 # Per-package test rules (one pattern rule per bundled package: GNU Make
 # patterns allow a single %, so the package name is fixed per rule).
 define PKG_TEST_RULE
-build/test-results/pkg.$(1).%.ok: packages/$(1)/test/%.rb $$(SP_RT_LIB) $$(SP_RT_MT_LIB) $$(BUNDLED_NATIVE_OBJS) $$(PCH_PLAIN) $$(PCH_NOPOLY) | $$(SPINEL)
+build/test-results/pkg.$(1).%.ok: packages/$(1)/test/%.rb $$(SP_RT_LIB) $$(SP_RT_MT_LIB) $$(BUNDLED_NATIVE_OBJS) $$(PCH_PLAIN) $$(PCH_NOPOLY) | $$(SPINEL) $$(SPINEL_TIMEOUT)
 	$$(RUN_ONE_TEST)
 endef
 $(foreach d,$(wildcard packages/*/test),$(eval $(call PKG_TEST_RULE,$(patsubst packages/%/test,%,$(d)))))
 
-build/test-results/%.ok: test/%.rb $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS) $(PCH_PLAIN) $(PCH_NOPOLY) | $(SPINEL)
+build/test-results/%.ok: test/%.rb $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS) $(PCH_PLAIN) $(PCH_NOPOLY) | $(SPINEL) $(SPINEL_TIMEOUT)
 	$(RUN_ONE_TEST)
 
 clean-test-results:
@@ -1213,7 +1214,7 @@ BENCH_EXPECTED_FILES := $(patsubst %.rb,%.rb.expected,$(wildcard benchmark/*.rb)
 regen-bench-expected: $(BENCH_EXPECTED_FILES)
 # Not regen-snapshot: benches need the 60s oracle budget (bm_range_each runs
 # ~25s under CRuby), not the 10s test budget.
-benchmark/%.rb.expected: benchmark/%.rb
+benchmark/%.rb.expected: benchmark/%.rb | $(SPINEL_TIMEOUT)
 	@rc=0; $(TIMEOUT60) $(REF_RUBY) $< >$@.tmp 2>/dev/null || rc=$$?; \
 	if [ $$rc -ne 0 ] && [ "$(REF_RUBY)" != "ruby" ]; then \
 	  rc=0; $(TIMEOUT60) ruby $< >$@.tmp 2>/dev/null || rc=$$?; \
@@ -1256,7 +1257,7 @@ test/%.rb.err.expected: test/%.rb
 # collide) AND stable across runs, so the generated C's embedded __FILE__ stays
 # constant and the cc (ccache) cache keeps hitting -- a per-run mktemp path would
 # defeat it. Verdicts are aggregated in benchmark order (deterministic).
-bench: $(SPINEL) $(SP_RT_LIB)
+bench: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@rm -rf build/bench-results; mkdir -p build/bench-results
 	@ls benchmark/*.rb | xargs -P $(BENCH_PJOBS) -n 1 sh -c '\
@@ -1357,7 +1358,7 @@ OPTCARROT_DIR  := build/optcarrot
 OPTCARROT_REPO := https://github.com/mame/optcarrot.git
 OPTCARROT_BRANCH := experiment/spinel
 
-optcarrot: $(SPINEL) $(SP_RT_LIB)
+optcarrot: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@if [ ! -d $(OPTCARROT_DIR) ]; then \
 	  git clone --depth=1 --branch=$(OPTCARROT_BRANCH) $(OPTCARROT_REPO) $(OPTCARROT_DIR); \
 	fi
