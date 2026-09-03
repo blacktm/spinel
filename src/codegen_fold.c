@@ -3518,6 +3518,25 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
 
 /* Recognise the chain; fill *out_arr (the source array node) and *out_off (the
    with_index offset arg node, or -1). Returns 1 on match. */
+/* True if the block body carries a `next` that is not inside a nested block
+   of its own -- that next leaves THIS block, and its value is the block's
+   answer. Nested blocks own their own next, so the walk stops at them. */
+static int fold_body_has_next(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NextNode) return 1;
+  if (k == NK_BlockNode || k == NK_LambdaNode || k == NK_DefNode) return 0;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (fold_body_has_next(c, nt_ref_at(nt, node, i))) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) if (fold_body_has_next(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
 static int ewi_chain(Compiler *c, int id, int *out_arr, int *out_off) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
@@ -5657,14 +5676,36 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
         }
       }
     }
-    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndentP);
-    int saveIndentP = g_indent;
-    g_indent = bodyIndentP;
+    /* A `next <value>` leaves the block WITH that value, which is the
+       predicate's answer. Emitting the leading statements and then the tail
+       expression drops it: the next became a bare `continue` and the
+       condition read the tail, so `any? { next true; false }` answered false
+       (#4301). emit_block_value_into is the machinery for exactly this --
+       it wraps the body so a next assigns the slot and falls through. */
+    int nx_used = 0;
     Buf vb; memset(&vb, 0, sizeof vb);
-    emit_expr(c, bb[bn - 1], &vb);
-    g_indent = saveIndentP;
+    int saveIndentP = g_indent;
+    if (fold_body_has_next(c, body)) {
+      int tnv = ++g_tmp;
+      emit_indent(g_pre, bodyIndentP);
+      buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil();\n", tnv);
+      emit_indent(g_pre, bodyIndentP);
+      buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tnv);
+      char dest[24]; snprintf(dest, sizeof dest, "_t%d", tnv);
+      g_indent = bodyIndentP;
+      emit_block_value_into(c, block, dest, 1, bodyIndentP);
+      g_indent = saveIndentP;
+      buf_printf(&vb, "sp_poly_truthy(_t%d)", tnv);
+      nx_used = 1;
+    }
+    if (!nx_used) {
+      for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndentP);
+      g_indent = bodyIndentP;
+      emit_expr(c, bb[bn - 1], &vb);
+      g_indent = saveIndentP;
+    }
     emit_indent(g_pre, bodyIndentP);
-    emit_pred_cond(g_pre, pred_kind, vb.p ? vb.p : "0", tcnt);
+    emit_pred_cond(g_pre, nx_used ? 0 : pred_kind, vb.p ? vb.p : "0", tcnt);
     free(vb.p);
     emit_indent(g_pre, g_indent);
     buf_puts(g_pre, "}\n");
@@ -5714,14 +5755,32 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
       buf_printf(g_pre, "lv_%s = %s;\n", p0, es_pr);
     }
   }
-  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndent);
-  int saveIndent = g_indent;
-  g_indent = bodyIndent;
+  /* see the sibling above: a `next <value>` is the block's answer, and
+     emitting the leading statements plus the tail expression drops it */
+  int nx2 = 0;
   Buf vb; memset(&vb, 0, sizeof vb);
-  emit_expr(c, bb[bn - 1], &vb);
-  g_indent = saveIndent;
+  int saveIndent = g_indent;
+  if (fold_body_has_next(c, body)) {
+    int tnv2 = ++g_tmp;
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil();\n", tnv2);
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tnv2);
+    char dest2[24]; snprintf(dest2, sizeof dest2, "_t%d", tnv2);
+    g_indent = bodyIndent;
+    emit_block_value_into(c, block, dest2, 1, bodyIndent);
+    g_indent = saveIndent;
+    buf_printf(&vb, "sp_poly_truthy(_t%d)", tnv2);
+    nx2 = 1;
+  }
+  if (!nx2) {
+    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndent);
+    g_indent = bodyIndent;
+    emit_expr(c, bb[bn - 1], &vb);
+    g_indent = saveIndent;
+  }
   emit_indent(g_pre, bodyIndent);
-  emit_pred_cond(g_pre, pred_kind, vb.p ? vb.p : "0", tcnt);
+  emit_pred_cond(g_pre, nx2 ? 0 : pred_kind, vb.p ? vb.p : "0", tcnt);
   free(vb.p);
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "}\n");
