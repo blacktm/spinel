@@ -12698,7 +12698,7 @@ void analyze_program(Compiler *c) {
       Scope *sc = &c->scopes[s];
       for (int i = 0; i < sc->nparams; i++) {
         LocalVar *p = scope_local(sc, sc->pnames[i]);
-        if (p && p->type == TY_POLY && !p->is_block_param) { p->type = TY_UNKNOWN; any = 1; }
+        if (p && p->type == TY_POLY && !p->is_block_param && !p->poly_dispatch_widened) { p->type = TY_UNKNOWN; any = 1; }
       }
     }
     /* Plain locals ratchet through the same monotonic unify, so a local read

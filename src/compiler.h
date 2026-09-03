@@ -65,6 +65,12 @@ typedef struct {
                        some element of which can be the sentinel, so reading an
                        element or binding a block parameter from it carries it
                        out (#3505) */
+  int poly_dispatch_widened; /* (params) a receiver that settled on no type
+                       reaches this parameter with an argument that settled on
+                       none either, so the value arrives BOXED and the arm's
+                       conversion would take it apart as whatever another call
+                       site pinned. It must stay POLY -- and survive the
+                       re-narrow reset, which clears poly params (#4294) */
   int push_widened; /* (params) a push through this parameter carried an element
                        its bound type could not hold, so it must stay the POLY
                        ARRAY: the call-site unification would otherwise collapse

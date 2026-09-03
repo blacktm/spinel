@@ -4019,6 +4019,44 @@ int infer_param_types(Compiler *c) {
     }
     /* obj.method -> instance method params */
     TyKind rt = infer_type(c, recv);
+    /* A receiver that settled on NO type is emitted BOXED, exactly as a poly
+       one is, so the call is a runtime dispatch that can reach any user method
+       of this name -- but neither branch below runs for it, so the call bound
+       nothing and the callee's parameters were left to the OTHER call sites.
+       The arm then took the boxed argument apart as whatever type those
+       settled on: a String's payload arrived as an Integer (#4294).
+
+       An argument with no type of its own says nothing to ty_unify, so the
+       widening is stated here rather than through the binding. Post-
+       convergence only -- during the fixpoint both the receiver and the
+       argument may still settle, and this is not reversible -- and the flag
+       carries it through the re-narrow reset, which clears poly parameters. */
+    if (g_final_bind_pass && (rt == TY_UNKNOWN || rt == TY_POLY) && name) {
+      int uargs = nt_ref(nt, id, "arguments");
+      int uac = 0; const int *uav = uargs >= 0 ? nt_arr(nt, uargs, "arguments", &uac) : NULL;
+      for (int a4 = 0; a4 < uac; a4++) {
+        TyKind uat = infer_type(c, uav[a4]);
+        if (uat != TY_UNKNOWN && uat != TY_POLY) continue;
+        for (int k4 = 0; k4 < c->nclasses; k4++) {
+          int umi = comp_method_in_chain(c, k4, name, NULL);
+          if (umi < 0) continue;
+          Scope *um = &c->scopes[umi];
+          if (a4 >= um->nparams || (um->rest_idx >= 0 && a4 >= um->rest_idx)) continue;
+          LocalVar *up = um->pnames[a4] ? scope_local(um, um->pnames[a4]) : NULL;
+          if (!up || up->rbs_seeded) continue;
+          /* Only a MACHINE SCALAR parameter. Unboxing into one is a hard type
+             pun -- the payload word read as a number -- and nothing downstream
+             can recover. A pointer-typed parameter is left alone on purpose:
+             widening every one of them turned out to widen a parameter from
+             an argument that is unsettled only because it is the very
+             parameter under derivation (an mspec matcher's `o` in
+             `@v.include?(o)`), and the rule then fed itself. */
+          if (up->type != TY_INT && up->type != TY_FLOAT &&
+              up->type != TY_BOOL && up->type != TY_SYMBOL) continue;
+          up->type = TY_POLY; up->poly_dispatch_widened = 1; changed = 1;
+        }
+      }
+    }
     if (ty_is_object(rt)) {
       int cid3 = ty_object_class(rt);
       int mi3 = comp_method_in_chain(c, cid3, name, NULL);
