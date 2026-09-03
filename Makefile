@@ -42,7 +42,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
+.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench \
         gate-optcarrot clean install uninstall deps tools
@@ -663,7 +663,7 @@ test:
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -759,6 +759,30 @@ reject-test: $(SPINEL)
 	  { echo "reject-test: FAIL (#4309: rejected without saying why)"; sed -n 1,5p "$$tmp/s.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
+
+# ---- Minor-mark leg (#4311) ----
+# The suite runs with the generational mark OFF, which is the default, so a
+# missed write barrier is invisible to it: the value stays reachable because
+# every collection is a full one. This runs the one program that is built to
+# catch that -- a young value stored into a long-lived thread-local map, held
+# only by the map between the write and the read -- under SPINEL_GC_MINOR=1.
+# It costs a fifth of a second, and it is the leg that was missing when a
+# barrier pointed at the wrong object shipped.
+gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB)
+	@tmp=$$(mktemp -d /tmp/spinel-gcminor.XXXXXX); ok=1; \
+	src=test/gc_minor_thread_local_slot.rb; \
+	$(SPINEL) "$$src" -o "$$tmp/m" >/dev/null 2>&1 || \
+	  { echo "gc-minor-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	for mode in 0 1; do \
+	  SPINEL_GC_MINOR=$$mode $(TIMEOUT60) "$$tmp/m" > "$$tmp/out.$$mode" 2>&1; \
+	  rc=$$?; \
+	  if [ $$rc -ne 0 ]; then echo "gc-minor-test: FAIL (SPINEL_GC_MINOR=$$mode exited $$rc)"; tail -3 "$$tmp/out.$$mode"; ok=0; \
+	  elif ! cmp -s "$$tmp/out.$$mode" "$$src.expected"; then \
+	    echo "gc-minor-test: FAIL (SPINEL_GC_MINOR=$$mode output mismatch)"; \
+	    diff -u "$$src.expected" "$$tmp/out.$$mode" | head -10; ok=0; fi; \
+	done; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 
 # ---- Rescued-exception backtrace (#4310) ----
 # The frame substrate is a DEBUG build's: sp_bt_enabled is set by a --debug

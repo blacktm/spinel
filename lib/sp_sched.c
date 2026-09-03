@@ -336,7 +336,17 @@ static void sp_stw_collect_impl(int force) {
 }
 
 /* ---- scheduler state (single OS worker, so plain globals) ---- */
-static sp_thread  g_main_thread;         /* the main thread: runs on root, fiber == NULL */
+/* The main thread is a STATIC, not a GC allocation -- but `Thread.current`
+   hands it to user code and to the runtime's own thread ops, and both the mark
+   and the write barrier decide what a pointer is from the byte in FRONT of it.
+   Without a guard that read is one byte before a global (ASAN reports it), and
+   the barrier goes further: it fabricates a header there and writes a dirty bit
+   into whatever .bss happens to precede this one. Lay the same 0xfd skip byte
+   the root fiber uses, exactly one alignment unit wide so no padding can slip
+   in between. */
+static struct { char guard[_Alignof(sp_thread)]; sp_thread t; } g_main_thread_box
+    = { .guard = { [_Alignof(sp_thread) - 1] = (char)0xfd }, .t = {0} };
+#define g_main_thread (g_main_thread_box.t)   /* the main thread: runs on root, fiber == NULL */
 static SP_TLS sp_thread *g_current = NULL;   /* per-worker: the green thread this worker runs now */
 /* Run queues (design 3.1). A worker requeues a thread it just ran onto its OWN
    local queue (g_lrq[wid]) so a yielding thread reruns on the same worker (warm
@@ -992,14 +1002,24 @@ sp_RbVal sp_Thread_tls_get(sp_thread *t, sp_sym k) {
   if (m) for (sp_int i = 0; i < m->len; i++) if (m->keys[i] == k) return m->vals[i];
   return sp_box_nil();
 }
-sp_bool sp_Thread_tls_key(sp_thread *t, sp_sym k) { sp_gc_wb((void*)t);
+sp_bool sp_Thread_tls_key(sp_thread *t, sp_sym k) {
+  /* A READ needs no barrier, and this one was pointed at the thread anyway --
+     which for the main thread is a static struct, so the barrier read the byte
+     in front of a global to decide whether it had a header. */
   sp_tls_map *m = (sp_tls_map *)t->tls;
   if (m) for (sp_int i = 0; i < m->len; i++) if (m->keys[i] == k) return 1;
   return 0;
 }
-sp_RbVal sp_Thread_tls_set(sp_thread *t, sp_sym k, sp_RbVal v) { sp_gc_wb((void*)t);
+/* The barrier belongs on the MAP, which is the object that ends up holding the
+   new reference. It was on the thread: a minor mark then reached the map
+   through the thread's scan and MARKED it, but an old object is not re-scanned
+   unless it is in the remembered set, so a young value stored into a long-lived
+   map was swept out from under it. `Thread.current[:slots] = {}` per request,
+   on a main thread whose map has been alive since boot, is exactly that shape:
+   the next read of the slot faulted in sp_PolyPolyHash_get (#4311). */
+sp_RbVal sp_Thread_tls_set(sp_thread *t, sp_sym k, sp_RbVal v) {
   sp_tls_map *m = (sp_tls_map *)t->tls;
-  if (m) for (sp_int i = 0; i < m->len; i++) if (m->keys[i] == k) { m->vals[i] = v; return v; }
+  if (m) for (sp_int i = 0; i < m->len; i++) if (m->keys[i] == k) { m->vals[i] = v; sp_gc_wb((void *)m); return v; }
   if (!m) {
     SP_GC_ROOT(t); SP_GC_ROOT_RBVAL(v);
     m = (sp_tls_map *)sp_gc_alloc(sizeof(sp_tls_map), sp_tls_fin, sp_tls_scan);
@@ -1019,6 +1039,7 @@ sp_RbVal sp_Thread_tls_set(sp_thread *t, sp_sym k, sp_RbVal v) { sp_gc_wb((void*
     m->vals = nv; m->cap = nc;
   }
   m->keys[m->len] = k; m->vals[m->len] = v; m->len++;
+  sp_gc_wb((void *)m);
   return v;
 }
 
