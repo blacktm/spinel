@@ -2180,6 +2180,12 @@ static inline sp_String *sp_poly_as_strbuf(sp_RbVal v) {
 static inline sp_bool sp_poly_is_strbuf(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STRBUF;
 }
+/* The object pointer a boxed value carries, for a slot that holds pointers
+   rather than sp_RbVal (a PtrArray of one user class). nil is a NULL element,
+   which is how that slot spells nil already. */
+static inline void *sp_poly_obj_ptr(sp_RbVal v) {
+  return v.tag == SP_TAG_OBJ ? v.v.p : NULL;
+}
 typedef sp_RbVal (*sp_user_binop_fn)(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled);
 static sp_user_binop_fn sp_user_binop_hook = NULL;
 /* The numeric coerce protocol from the other side: `5 + obj` asks obj for
