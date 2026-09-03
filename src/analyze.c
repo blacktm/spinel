@@ -5137,6 +5137,32 @@ int desugar_enum_method_recv(Compiler *c) {
         continue;
       }
     }
+    /* `arr.each_index.reverse_each { }` / `.each_with_index.reverse_each { }`:
+       the blockless inner call answers an Enumerator, and reverse_each has no
+       arm for one, so the whole chain was refused -- though `.each` on the
+       same Enumerator works and `.to_a` on it answers the right elements.
+       Interpose to_a, exactly as the Range chains below do, and the array
+       machinery serves it (#4302). */
+    if (nm && sp_streq(nm, "reverse_each")) {
+      int rr = nt_ref(nt, id, "receiver");
+      if (rr >= 0 && nt_kind(nt, rr) == NK_CallNode && nt_ref(nt, rr, "block") < 0 &&
+          infer_type(c, rr) == TY_ENUMERATOR) {
+        const char *rrn = nt_str(nt, rr, "name");
+        int rra = nt_ref(nt, rr, "arguments"); int rrac = 0;
+        if (rra >= 0) nt_arr(nt, rra, "arguments", &rrac);
+        if (rrn && rrac == 0 &&
+            (sp_streq(rrn, "each_index") || sp_streq(rrn, "each_with_index"))) {
+          int toa2 = nt_new_node(nt, "CallNode");
+          nt_node_set_str(nt, toa2, "name", "to_a");
+          nt_node_set_ref(nt, toa2, "receiver", rr);
+          nt_node_set_ref(nt, id, "receiver", toa2);
+          comp_grow_node_arrays(c);
+          c->nscope[toa2] = c->nscope[id];
+          changed = 1;
+          continue;
+        }
+      }
+    }
     /* Range no-block enumerator chains: interpose to_a so the array machinery
        serves them ((1..5).each_with_index.to_a, (1..3).map.with_index { },
        (1..3).cycle.first(7)). Blockless `each` (and each_slice/each_cons,
