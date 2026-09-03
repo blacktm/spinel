@@ -138,7 +138,17 @@ static void sp_sysmon_wake(void) {
 #define SP_PREEMPT_TICK    0.005   /* monitor re-checks worker timeslices this often while busy */
 static int g_npreempt = 0;         /* preempt_requests set but not yet consumed */
 static int g_preempt_sig = SIGURG; /* the signal the monitor sends; SPINEL_PREEMPT_SIGNAL overrides */
-typedef struct { pthread_t tid; sp_thread *cur; double since; int active; } sp_wslot;
+typedef struct { pthread_t tid; sp_thread *cur; double since; int active;
+                 /* A STARTED green thread is pinned to its home worker, so the wake
+                    that readies it has exactly one worker to reach. Waiting on one
+                    shared condvar meant that wake had to BROADCAST -- every idle
+                    worker rose, serialised on the scheduler lock, found nothing and
+                    slept again, with the monitor (the only thing that readies I/O
+                    waiters) queued behind them. Adding workers then subtracted
+                    throughput (#4305). Each helper waits on its own condvar instead;
+                    `idle` says it is on it, and is written only under the lock, so a
+                    wake that lands between the enqueue and the wait is not lost. */
+                 pthread_cond_t cv; int idle; } sp_wslot;
 static sp_wslot   g_wslot[SP_MAX_WORKERS];   /* per-worker: the green thread it runs + when it started */
 static void sp_recompute_safepoint_flag(void) {   /* PRE: g_sched_lock held */
   SP_SAFEPOINT_SET(g_stw_active || g_npreempt > 0);
@@ -148,8 +158,35 @@ static void sp_recompute_safepoint_flag(void) {   /* PRE: g_sched_lock held */
    the actual yield happens cooperatively at the next safepoint poll (kept minimal
    and async-signal-safe -- a lone relaxed atomic store). */
 static void sp_preempt_handler(int sig) { (void)sig; SP_SAFEPOINT_SET(1); }
-#define SCHED_WAKE()    pthread_cond_signal(&g_sched_work)   /* nudge one idle worker after enqueue/wake */
-#define SCHED_WAKE_ALL() pthread_cond_broadcast(&g_sched_work)  /* wake every waiter to re-check state */
+/* Wake one helper that can take unpinned work; main (worker 0, on g_sched_work)
+   is the fallback when no helper is idle. */
+static void sched_wake_idle_helper(void) {   /* PRE: sched lock held */
+  for (int i = 1; i < sp_active_workers; i++)
+    if (g_wslot[i].idle) { pthread_cond_signal(&g_wslot[i].cv); return; }
+  pthread_cond_signal(&g_sched_work);
+}
+/* Every waiter re-checks state: helpers on their own condvars, main on its
+   pump. Used where the state change is not one thread becoming runnable --
+   shutdown, the STW barrier, quiescence. */
+static void sched_wake_all_workers(void) {   /* PRE: sched lock held */
+  for (int i = 1; i < sp_active_workers; i++)
+    if (g_wslot[i].idle) pthread_cond_signal(&g_wslot[i].cv);
+  pthread_cond_broadcast(&g_sched_work);
+}
+/* Wake the one worker that can run a thread pinned to `wid` (see home_wid).
+   Main's worker (0) waits in its pump on the shared condvar, and a signal
+   there could be taken by a helper instead, so it gets the broadcast. */
+static void sched_wake_home(int wid) {   /* PRE: sched lock held */
+  if (wid > 0) {
+    if (g_wslot[wid].idle) pthread_cond_signal(&g_wslot[wid].cv);
+    return;
+  }
+  if (wid == 0) { pthread_cond_broadcast(&g_sched_work); return; }
+  sched_wake_idle_helper();   /* unpinned: any worker will do */
+}
+#define SCHED_WAKE()    sched_wake_idle_helper()
+#define SCHED_WAKE_ALL() sched_wake_all_workers()
+#define SCHED_WAKE_MAIN() pthread_cond_broadcast(&g_sched_work)  /* main's pump alone */
 
 /* Park the calling worker at the barrier until the collection finishes,
    publishing its running green thread's roots first. PRE: g_sched_lock held. */
@@ -210,6 +247,8 @@ static void sp_stw_park_locked(void) {
 #define SCHED_UNLOCK()  ((void)0)
 #define SCHED_WAKE()    ((void)0)
 #define SCHED_WAKE_ALL() ((void)0)
+#define SCHED_WAKE_MAIN() ((void)0)
+#define sched_wake_home(w) ((void)(w))
 #endif
 
 #ifdef SP_THREADS
@@ -268,7 +307,7 @@ static void sp_stw_collect_impl(int force) {
   SP_SAFEPOINT_SET(1);
   /* wake idle workers (and main waiting in its pump) so they park at the barrier
      rather than sit through the collection without publishing their roots. */
-  pthread_cond_broadcast(&g_sched_work);
+  sched_wake_all_workers();
   while (g_nparked < sp_active_workers - 1) pthread_cond_wait(&g_stw_request, &g_sched_lock);
   /* Our own root fiber holds this worker's suspended context (the main thread's
      top-level locals if it triggered the collection while pumping a green
@@ -390,15 +429,14 @@ static sp_thread *sched_pick(int wid) {
 }
 
 /* Wake worker(s) after enqueueing t. A STARTED thread is pinned to its home
-   worker (see home_wid) and sched_pick's stealing skips pinned threads -- yet
-   every idle worker waits on the one g_sched_work condvar, so a plain signal
-   could wake only a worker that cannot run t; it finds nothing and re-sleeps,
-   and the wakeup is lost while t's home worker stays parked. Broadcast for
-   pinned threads so the home worker always rechecks; an unstarted thread can
-   run anywhere, so a single signal suffices. PRE: sched lock held. */
+   worker (see home_wid) and sched_pick's stealing skips pinned threads, so the
+   wake has exactly one worker to reach; an unstarted thread can run anywhere.
+   This used to have to BROADCAST for a pinned thread, because every idle
+   worker waited on the one g_sched_work condvar and a plain signal could take
+   a worker that cannot run t -- see the per-worker condvar in sp_wslot, which
+   is what lets the wake be addressed (#4305). PRE: sched lock held. */
 static void sp_sched_wake_for(sp_thread *t) {
-  if (t->home_wid >= 0) SCHED_WAKE_ALL();
-  else SCHED_WAKE();
+  sched_wake_home(t->home_wid);
 }
 
 static void reg_add(sp_thread *t) {
@@ -583,7 +621,11 @@ static void sp_thread_wake_joiners(sp_thread *t) {
    a worker that merely wakes spuriously and re-idles never touches g_nrunning,
    so it cannot momentarily perturb the predicate the way an idle count would. */
 static void sp_sched_signal_if_quiescent(void) {
-  if (g_nrunning == 0 && g_runnable == 0) SCHED_WAKE_ALL();
+  /* Only main is waiting on this. Quiescent means there is nothing for a
+     helper to find, so waking the helpers here was pure cost -- and in a
+     park-heavy program (every green thread blocked on I/O between hops) it
+     fired on every hop, which is most of what adding workers cost (#4305). */
+  if (g_nrunning == 0 && g_runnable == 0) SCHED_WAKE_MAIN();
 }
 
 static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: sched lock held */
@@ -652,7 +694,7 @@ static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: s
       t->wake_pending = 0;
       t->state = SP_TH_RUNNABLE;
       runq_requeue(t);
-      SCHED_WAKE();
+      sched_wake_home(t->home_wid);   /* pinned to us: our own loop re-picks it */
     }
   }
   else {
@@ -661,7 +703,7 @@ static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: s
        queued work still runs first, and the 61-tick global check keeps the
        global queue from starving. */
     runq_requeue(t);
-    SCHED_WAKE();
+    sched_wake_home(t->home_wid);   /* pinned to us: our own loop re-picks it */
   }
   g_nrunning--;
   sp_sched_signal_if_quiescent();   /* this thread blocked/passed; if nothing else runs, wake a waiting main */
@@ -1235,7 +1277,11 @@ static void *sp_worker_main(void *arg) {
     if (g_shutdown) break;
     sp_thread *t = sched_pick(wid);   /* own queue, then global, then steal */
     if (t) { run_thread_once(t); continue; }  /* run_thread_once signals quiescence on the last one */
-    pthread_cond_wait(&g_sched_work, &g_sched_lock);   /* idle; woken by an enqueue (SCHED_WAKE) or shutdown */
+    /* `idle` is set under the lock the enqueue also holds, so a wake issued
+       between our sched_pick and this wait cannot be lost. */
+    g_wslot[wid].idle = 1;
+    pthread_cond_wait(&g_wslot[wid].cv, &g_sched_lock);   /* woken for work meant for us, or shutdown */
+    g_wslot[wid].idle = 0;
   }
   SCHED_UNLOCK();
   return NULL;
@@ -1319,6 +1365,8 @@ static void sp_sched_start_workers(void) {
 static void sp_sched_spawn_helper(void) {
   int wid = g_helpers_spawned + 1;
   if (wid > g_worker_cap || wid >= SP_MAX_WORKERS) return;
+  g_wslot[wid].idle = 0;
+  if (pthread_cond_init(&g_wslot[wid].cv, NULL) != 0) return;
   if (pthread_create(&g_worker_threads[wid], NULL, sp_worker_main, (void *)(intptr_t)wid) != 0) return;
   g_helpers_spawned = wid;
   sp_active_workers = g_helpers_spawned + 1;   /* participants: main (0) + helpers */
@@ -1353,7 +1401,7 @@ void sp_sched_drain(void) {
   sp_sched_pump(NULL, 1);
 #ifdef SP_THREADS
   g_shutdown = 1;
-  pthread_cond_broadcast(&g_sched_work);
+  sched_wake_all_workers();
   sp_sysmon_wake();   /* wake the monitor (idle or in poll) so it sees shutdown */
   int sysmon_running = g_sysmon_started;
   SCHED_UNLOCK();
