@@ -12980,6 +12980,17 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
      the arm answered the receiver's #to_s where CRuby entered the method, and
      nothing was reported (#4071). The dispatch below builds the cls_id switch
      with an arm for the class and keeps a builtin one for the arrays. */
+  /* ...but a NUMERIC argument cannot be a separator (Array#join(5) is a
+     TypeError in CRuby), so it is Thread#join(limit) and answers the thread
+     or nil rather than a string (#4287). */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "join") && argc == 1 &&
+      ty_is_numeric(comp_ntype(c, argv[0])) && !user_defines_or_reads(c, name)) {
+    buf_puts(b, "sp_poly_join_timeout("); emit_expr(c, recv, b);
+    buf_puts(b, ", "); emit_float_expr(c, argv[0], b);
+    { TyKind at0 = comp_ntype(c, argv[0]);
+      buf_printf(b, ", \"%s\"", at0 == TY_FLOAT ? "Float" : at0 == TY_BIGINT ? "Integer" : "Integer"); }
+    buf_puts(b, ")"); return 1;
+  }
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "join") &&
       !user_defines_or_reads(c, name)) {
     buf_puts(b, "sp_poly_join("); emit_expr(c, recv, b);

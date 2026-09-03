@@ -4182,6 +4182,10 @@ else {
       }
       if (sp_streq(name, "to_s") || sp_streq(name, "inspect")) return an_poly_concrete(c, name, TY_STRING);
       if ((sp_streq(name, "gsub") || sp_streq(name, "sub")) && argc == 2) return an_poly_concrete(c, name, TY_STRING);
+      /* a numeric argument makes it Thread#join(limit), whose answer is the
+         thread or nil, not a joined string (#4287) */
+      if (sp_streq(name, "join") && argc == 1 && ty_is_numeric(infer_type(c, argv[0])))
+        return TY_POLY;
       if (sp_streq(name, "join")) return an_poly_concrete(c, name, TY_STRING);
       /* The multi-set forms of String#count/#delete/#squeeze, and
          Hash#store, on a boxed value: the runtime helper answers the

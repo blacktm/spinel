@@ -7799,6 +7799,22 @@ static sp_RbVal sp_poly_fiber_value(sp_RbVal v) {
    the signatures must be visible here. */
 sp_thread *sp_Thread_join_timeout(sp_thread *t, double seconds);
 
+/* `poly.join(<number>)` can only be Thread#join(limit): Array#join with a
+   numeric separator is a TypeError in CRuby, so a numeric argument leaves no
+   other reading. Answers the thread (boxed) when it finished inside the
+   limit and nil when it did not, which is why this returns sp_RbVal where
+   sp_poly_join returns the joined string. A non-Thread receiver gets the
+   TypeError the separator slot would have raised. */
+static sp_RbVal sp_poly_join_timeout(sp_RbVal v, double seconds, const char *argcls) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD)
+    return sp_Thread_join_timeout((sp_thread *)v.v.p, seconds) ? v : sp_box_nil();
+  /* the separator slot's own refusal, naming the class the argument was
+     WRITTEN as -- the double this took it as would say Float for an Integer */
+  sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into String",
+                                       argcls ? argcls : "Numeric"));
+  return sp_box_nil();
+}
+
 static sp_RbVal sp_poly_fiber_join(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) {
     sp_Thread_join((sp_thread *)v.v.p);
