@@ -2352,15 +2352,14 @@ static int emit_concurrency_call(Compiler *c, int id, Buf *b) {
     }
     if (sp_streq(name, "join") && argc == 1) {
       /* CRuby: Thread#join(limit) -- wait at most `limit` seconds, return
-         self on completion, nil on timeout. The runtime polls state via
-         short sleeps (1ms granularity) that yield to the scheduler. The
-         arg is emitted as a general expression and implicitly converted
-         to double at the call site. The return type is sp_RbVal (not
-         sp_thread*) because nil is a possible result; callers that
-         use both forms on the same receiver need a wider slot. */
+         self on completion, nil on timeout. The runtime parks the caller
+         via sp_sleep for the deadline. The arg is emitted via
+         emit_float_expr so a poly value is unboxed through sp_poly_to_f
+         (matching CRuby's "can't convert X into Float" for non-numerics)
+         while a native float passes through unchanged. */
       buf_puts(b, "sp_Thread_join_timeout("); emit_expr(c, recv, b);
-      buf_puts(b, ", (double)("); emit_expr(c, argv[0], b);
-      buf_puts(b, "))"); return 1;
+      buf_puts(b, ", "); emit_float_expr(c, argv[0], b);
+      buf_puts(b, ")"); return 1;
     }
     if (sp_streq(name, "alive?") && argc == 0) {
       buf_puts(b, "sp_Thread_alive("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
