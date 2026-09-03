@@ -872,8 +872,12 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
      the program defines a #to_str to reach: a narrowing lands wherever the
      analysis put it, including a hot loop, and the test is not free there.
      bool keeps the plain form: an object in a bool slot is truthy. */
-  const char *fn = (slot == TY_INT || slot == TY_BOOL) ? "sp_poly_to_i"
-                 : slot == TY_FLOAT  ? "sp_poly_to_f"
+  /* A nil narrowed into an int or float slot is that slot's nil sentinel, not
+     the 0 under the tag (#4288). TY_BOOL keeps the plain form: nil in a bool
+     slot is false, and the int sentinel would read truthy. */
+  const char *fn = slot == TY_INT   ? "sp_poly_to_i_or_nil"
+                 : slot == TY_BOOL  ? "sp_poly_to_i"
+                 : slot == TY_FLOAT ? "sp_poly_to_f_or_nil"
                  : slot == TY_STRING
                      ? (prog_has_conv_method(c, "to_str", TY_STRING) ? "sp_poly_arg_str" : "sp_poly_to_s") : NULL;
   if (!fn) return 0;

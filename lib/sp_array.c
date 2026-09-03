@@ -363,8 +363,8 @@ sp_FloatArray*sp_FloatArray_from_step(sp_float beg,sp_float end,sp_float step,sp
   }
   return a;
 }
-sp_float sp_FloatArray_min(sp_FloatArray*a){if(a->len==0)return 0;sp_float m=a->data[0];for(sp_int i=1;i<a->len;i++)if(a->data[i]<m)m=a->data[i];return m;}
-sp_float sp_FloatArray_max(sp_FloatArray*a){if(a->len==0)return 0;sp_float m=a->data[0];for(sp_int i=1;i<a->len;i++)if(a->data[i]>m)m=a->data[i];return m;}
+sp_float sp_FloatArray_min(sp_FloatArray*a){if(!a||a->len==0)return sp_float_nil();  /* CRuby: nil on empty (#4288) */ sp_float m=a->data[0];for(sp_int i=1;i<a->len;i++)if(a->data[i]<m)m=a->data[i];return m;}
+sp_float sp_FloatArray_max(sp_FloatArray*a){if(!a||a->len==0)return sp_float_nil();  /* CRuby: nil on empty (#4288) */ sp_float m=a->data[0];for(sp_int i=1;i<a->len;i++)if(a->data[i]>m)m=a->data[i];return m;}
 /* Array#sum for floats: Kahan-Babuska-Neumaier compensated summation,
    matching CRuby (float addition isn't associative, so a naive fold of
    [0.1,0.2,0.3] yields 0.6000000000000001 instead of 0.6). `c` accumulates
