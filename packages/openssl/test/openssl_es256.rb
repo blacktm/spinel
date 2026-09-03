@@ -47,7 +47,11 @@ p pub.verify_raw("SHA256", sig2, signing_input)
 # --- what must NOT verify ---
 
 p pub.verify_raw("SHA256", sig, signing_input + "x")   # different data
-p pub.verify_raw("SHA256", hx("00") + sig.byteslice(1, 63), signing_input)  # mangled r
+# Mangle r by FLIPPING its first byte, not by zeroing it: r is random per
+# signature, so about one signature in 256 already begins with 0x00 and the
+# "mangled" one was the original -- it verified, and this test failed roughly
+# that often. An xor always changes the byte.
+p pub.verify_raw("SHA256", ((sig.getbyte(0) ^ 0xff).chr) + sig.byteslice(1, 63), signing_input)  # mangled r
 p pub.verify_raw("SHA256", sig.byteslice(0, 63), signing_input)  # wrong length
 p pub.verify_raw("SHA256", "", signing_input)
 # Another key's signature over the same bytes.
