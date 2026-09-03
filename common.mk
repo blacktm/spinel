@@ -54,11 +54,19 @@ else
   GC_FLAGS = -Wl,--gc-sections
 endif
 
-# `timeout` is GNU coreutils — present on Linux, named `gtimeout` on macOS
-# (brew coreutils). Detect both; if neither is found run without limits.
-TIMEOUT_BIN := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
-TIMEOUT10 := $(if $(TIMEOUT_BIN),$(TIMEOUT_BIN) 10,)
-TIMEOUT60 := $(if $(TIMEOUT_BIN),$(TIMEOUT_BIN) 60,)
+# `timeout` is GNU coreutils on Linux, `gtimeout` on macOS (brew coreutils).
+# Busybox also ships a `timeout` applet with a different syntax
+# (`-t SECS PROG ARGS` instead of `SECS PROG ARGS`). Pick the form that
+# works: probe with `timeout 1 sh -c true`; if it succeeds, the GNU form
+# is available; if it fails with "can't execute", busybox is the only
+# `timeout` on PATH and we need `-t SECS`. If no `timeout` is found, run
+# without limits. The result is the full prefix including the duration
+# argument (e.g. `timeout 10`), so callers can append the command directly.
+TIMEOUT_BIN := $(shell { timeout 1 sh -c true; } 2>/dev/null >/dev/null && echo 'timeout 1' || \
+           { command -v timeout >/dev/null && echo 'timeout -t 1'; } || \
+           { command -v gtimeout >/dev/null && gtimeout 1 sh -c true && echo 'gtimeout 1'; } || echo '')
+TIMEOUT10 := $(if $(TIMEOUT_BIN),$(subst 1,10,$(TIMEOUT_BIN)),)
+TIMEOUT60 := $(if $(TIMEOUT_BIN),$(subst 1,60,$(TIMEOUT_BIN)),)
 
 # Default to a parallel build at the logical CPU count, unless the
 # invocation already asked for a job count. Applied ONLY at the top level
