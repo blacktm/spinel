@@ -28,6 +28,8 @@ typedef struct {
   unsigned char frozen;        /* Object#freeze; kept here, not in the GC header,
                                   because the standard streams are static storage
                                   with no header to flip (sp_io_stdout) */
+  unsigned char wnonblock;     /* write side of this handle is O_NONBLOCK:
+                                  0 not asked, 1 yes, 2 could not (#4307) */
   unsigned char park;          /* readiness-park kind, computed on the first
                                   read: 0 not yet asked, 1 never (a regular
                                   file is always ready), 2 park before a read

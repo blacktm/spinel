@@ -214,11 +214,26 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
 static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
   int fd = fileno(f->fp);
   size_t off = 0;
+  /* A pipe's WRITE end is write-only -- nothing reads through its stream -- so
+     it can be O_NONBLOCK, and then a write that would block says so instead of
+     blocking. That is the cheap shape: no probe on the way in, and the park
+     only on the attempt that actually could not proceed. A socket shares its
+     descriptor with the stdio READ side, where fgets treats EAGAIN as EOF
+     (see sp_io_fdopen_sock), so it keeps the probe. */
+  int nb = 0;
+  if (!f->is_sock) {
+    if (!f->wnonblock) {
+      int fl = fcntl(fd, F_GETFL);
+      f->wnonblock = (fl >= 0 && (fl & O_NONBLOCK ? 1 : fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0)) ? 1 : 2;
+    }
+    nb = f->wnonblock == 1;
+  }
   while (off < n) {
-    sp_io_wait_writable(f);   /* frees the worker while the buffer is full */
+    if (!nb) sp_io_wait_writable(f);   /* frees the worker while the buffer is full */
     ssize_t put = write(fd, s + off, n - off);
     if (put < 0) {
       if (errno == EINTR) continue;
+      if (nb && (errno == EAGAIN || errno == EWOULDBLOCK)) { sp_io_wait_writable(f); continue; }
       sp_file_raise_errno("write", f->is_sock ? "socket" : "pipe");
     }
     off += (size_t)put;
