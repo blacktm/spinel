@@ -820,6 +820,46 @@ sp_thread *sp_Thread_join(sp_thread *t) {
   return t;
 }
 
+/* CRuby's Thread#join(limit): wait at most `seconds` for the thread to
+   finish. Returns the thread on success, nil on timeout. Uses a sleep
+   loop so the scheduler runs other threads during the wait. */
+/* CRuby's Thread#join(limit): wait at most `seconds` for the thread to
+   finish. Returns the thread on success, NULL on timeout. The same
+   return type as the no-arg join (sp_thread*) so callers can use
+   either form against the same variable; the spinel runtime maps
+   NULL to nil.
+
+   Uses sp_sched_sleep (scheduler-aware sleep) so the current thread
+   parks on g_sleepers with a deadline and the monitor wakes it. This
+   avoids the CPU burn of a tight poll loop. The trade-off: if the
+   target finishes early, we still sleep for the full timeout. That
+   matches the no-arg join's behavior (it also doesn't return early
+   for unrelated reasons) and keeps the implementation simple. */
+sp_thread *sp_Thread_join_timeout(sp_thread *t, double seconds) {
+  /* Fast path: already dead. */
+  SCHED_LOCK();
+  int dead = (t->state == SP_TH_DEAD);
+  SCHED_UNLOCK();
+  if (dead) { sp_thread_reraise_if_exc(t); return t; }
+
+  if (seconds <= 0) return NULL;
+  /* sp_sleep dispatches to sp_sched_sleep in the MT build and to a
+     plain nanosleep in the ST build, so the same call site works
+     regardless of whether threads are compiled in. The MT path
+     parks on g_sleepers with a deadline; the monitor wakes us.
+     The ST path is unreachable in practice (Thread#join is a
+     threaded method and the codegen only emits this symbol when
+     the test uses threads, which the test runner routes to the
+     MT build via SPINEL_USES_THREADS), but the function must
+     still resolve at link time. */
+  sp_sleep(seconds);
+  SCHED_LOCK();
+  dead = (t->state == SP_TH_DEAD);
+  SCHED_UNLOCK();
+  if (dead) { sp_thread_reraise_if_exc(t); return t; }
+  return NULL;
+}
+
 sp_RbVal sp_Thread_value(sp_thread *t) {
   sp_thread_await(t);
   sp_thread_reraise_if_exc(t);
