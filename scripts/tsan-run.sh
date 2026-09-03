@@ -60,11 +60,41 @@ bin="$(mktemp /tmp/tsan-run-XXXXXX.bin)"
 trap 'rm -f "$c" "$bin"' EXIT
 
 "$SPINEL" $sp_flags "$rb" -S > "$c"
+
+# The spinel driver adds two things to its own link line that no flag string
+# carries, because both are read out of the generated C: the libraries an
+# ffi_lib declared, and the bundled package objects a require pulled in. A
+# program that binds a library or uses a bundled package -- which is every
+# application -- did not link here without them (#4315).
+ffi_libs="$(sed -n 's#^.*/\* SPINEL_LINK: \(.*\) \*/.*$#\1#p' "$c" | tr '\n' ' ')"
+pkg_objs=""
+for o in $(sed -n 's#^.*/\* SPINEL_LINK_OBJ: \(.*\) \*/.*$#\1#p' "$c"); do
+  # This build is always -DSP_THREADS, so take the _mt variant: a package
+  # object built without it names the runtime's per-worker globals as non-TLS
+  # and the link fails.
+  mt="${o%.o}_mt.o"
+  cand=""
+  for p in "$mt" "$o"; do
+    for base in "." ".."; do
+      [ -f "$base/$p" ] && { cand="$base/$p"; break 2; }
+    done
+  done
+  [ -n "$cand" ] || { echo "tsan-run: cannot find $o (build it first)" >&2; exit 2; }
+  # Skip one spin already put on the line: the same object under both names is
+  # a multiple definition. Compare basenames with the _mt marker removed, the
+  # way the driver does.
+  cb="$(basename "$cand" | sed 's/_mt\.o$/.o/')"
+  dup=0
+  for l in $link_objs; do
+    [ "$(basename "$l" | sed 's/_mt\.o$/.o/')" = "$cb" ] && dup=1
+  done
+  [ "$dup" = 1 ] || pkg_objs="$pkg_objs $cand"
+done
 # -Wno-all matches the production cc driver (src/main.c): the generated C
 # carries benign patterns (e.g. a fiber body's dead deferred-return epilogue)
 # that newer clangs otherwise reject by default.
 cc -O1 -g -Wno-all -fsanitize=thread -DSP_THREADS -ftls-model=initial-exec \
-   -Ilib -Ilib/regexp "$c" $link_objs "$ARCHIVE" -lm -lcrypt -lpthread -o "$bin"
+   -Ilib -Ilib/regexp "$c" $link_objs $pkg_objs "$ARCHIVE" -lm -lcrypt -lpthread $ffi_libs -o "$bin"
 
 # halt_on_error keeps the first race fatal (a clean exit means TSan saw none).
 TSAN_OPTIONS="halt_on_error=1 ${TSAN_OPTIONS:-}" "$bin" "$@"
