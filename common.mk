@@ -54,19 +54,16 @@ else
   GC_FLAGS = -Wl,--gc-sections
 endif
 
-# `timeout` is GNU coreutils on Linux, `gtimeout` on macOS (brew coreutils).
-# Busybox also ships a `timeout` applet with a different syntax
-# (`-t SECS PROG ARGS` instead of `SECS PROG ARGS`). Pick the form that
-# works: probe with `timeout 1 sh -c true`; if it succeeds, the GNU form
-# is available; if it fails with "can't execute", busybox is the only
-# `timeout` on PATH and we need `-t SECS`. If no `timeout` is found, run
-# without limits. The result is the full prefix including the duration
-# argument (e.g. `timeout 10`), so callers can append the command directly.
-TIMEOUT_BIN := $(shell { timeout 1 sh -c true; } 2>/dev/null >/dev/null && echo 'timeout 1' || \
-           { command -v timeout >/dev/null && echo 'timeout -t 1'; } || \
-           { command -v gtimeout >/dev/null && gtimeout 1 sh -c true && echo 'gtimeout 1'; } || echo '')
-TIMEOUT10 := $(if $(TIMEOUT_BIN),$(subst 1,10,$(TIMEOUT_BIN)),)
-TIMEOUT60 := $(if $(TIMEOUT_BIN),$(subst 1,60,$(TIMEOUT_BIN)),)
+# Wrapper around the system `timeout` that always returns GNU coreutils'
+# exit code (124 on timeout), regardless of which `timeout` is on PATH.
+# The bench target keys on 124 to mark a run as SKIP; busybox uses 143
+# and BSDs use 399, which would be misclassified. Built once from C.
+# `TIMEOUT_BIN` is the wrapper path, so the existing `$(TIMEOUT_BIN)`
+# emptiness checks (which print a "no time limit" warning) still work.
+SPINEL_TIMEOUT := scripts/spinel-timeout
+TIMEOUT_BIN := $(SPINEL_TIMEOUT)
+TIMEOUT10 := $(SPINEL_TIMEOUT) 10
+TIMEOUT60 := $(SPINEL_TIMEOUT) 60
 
 # Default to a parallel build at the logical CPU count, unless the
 # invocation already asked for a job count. Applied ONLY at the top level
