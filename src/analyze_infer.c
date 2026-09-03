@@ -2497,7 +2497,22 @@ else {
           Scope *hs = comp_scope_of(c, id);
           if (hs && hs->body >= 0) {
             int hbn = 0; const int *hbb = nt_arr(nt, hs->body, "body", &hbn);
-            if (hbb && hbn > 0 && hbb[hbn - 1] == id) return TY_POLY_POLY_HASH;
+            /* ...but only when nothing else settles the method. The CALLERS
+               narrow a returned Hash.new -- `h = str_hash; h["k"] = "v"`
+               gives Hash[String, String] -- and answering the widest variant
+               here overrode that narrowing rather than filling in an unknown,
+               re-emitting every such helper as a poly hash (#4304).
+
+               Both halves below are load-bearing, and neither alone fixes it.
+               The wait: the callers' narrowing happens during the optimistic
+               rounds, so answering there latches the widest variant before
+               there is anything to stand aside for. The concrete test: once
+               the rounds have settled, a return that reached a real variant
+               is not the "nothing narrows it" case, and without this test the
+               final round widens it straight back. */
+            int narrowed = g_infer_optimistic ||
+                           (ty_is_hash(hs->ret) && hs->ret != TY_POLY_POLY_HASH);
+            if (hbb && hbn > 0 && hbb[hbn - 1] == id && !narrowed) return TY_POLY_POLY_HASH;
           }
         }
         return TY_UNKNOWN;

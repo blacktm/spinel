@@ -61,3 +61,25 @@ h = Holder.new
 p h.get("absent")
 p h.put("a", "b")["a"]
 p h.get("still absent")
+
+# The tail-position rule fills in a type where inference had none; it must not
+# override one the CALLERS already narrowed. `str_hash` here is Hash[String,
+# String] from the writes below, and answering the widest variant for it
+# re-emitted every such helper as a poly hash (#4304).
+def str_hash
+  Hash.new("")
+end
+
+sh = str_hash
+sh["k"] = "v"
+p sh["k"].upcase
+p sh["missing"].length
+p sh.size
+
+def int_hash
+  Hash.new(0)
+end
+
+ih = int_hash
+ih["n"] = 3
+p ih["n"] + ih["absent"]
