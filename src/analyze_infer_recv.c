@@ -1934,6 +1934,15 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (recv >= 0 && rt == TY_POLY && argc == 0 && !an_user_defines_method(c, name) &&
       sp_streq(name, "sort") && nt_ref(nt, id, "block") < 0)
     { *out = TY_POLY_ARRAY; return 1; }
+  /* ...and with a COMPARATOR block, which the emitter re-dispatches through
+     the array path. Without the type the method emitted as void and answered
+     nil, having sorted correctly on the way (#4290). min / max with one pick
+     an element, so they answer boxed. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && !an_user_defines_method(c, name) &&
+      nt_ref(nt, id, "block") >= 0) {
+    if (sp_streq(name, "sort")) { *out = TY_POLY_ARRAY; return 1; }
+    if (sp_streq(name, "min") || sp_streq(name, "max")) { *out = TY_POLY; return 1; }
+  }
   /* Data#with on a poly value (a Data read out of a container) returns a new
      Data instance, boxed poly (#2890). */
   if (recv >= 0 && rt == TY_POLY && argc == 1 && sp_streq(name, "with") &&

@@ -1307,6 +1307,14 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       g_poly_redispatch_id != id &&
       ((nt_ref(nt, id, "block") >= 0 &&
         (sp_streq(name, "sort_by") || sp_streq(name, "max_by") || sp_streq(name, "min_by"))) ||
+       /* and the COMPARATOR-block forms. `sort` blockless has an arm of its
+          own above; with a block it had none, so a method whose parameter
+          sees two element types -- which is what makes it poly rather than a
+          poly ARRAY -- raised NoMethodError naming Array, on the first call,
+          having printed nothing (#4290). The array emitters serve the
+          comparator block on a poly array. */
+       (nt_ref(nt, id, "block") >= 0 && argc == 0 && !user_defines_or_reads(c, name) &&
+        (sp_streq(name, "sort") || sp_streq(name, "min") || sp_streq(name, "max"))) ||
        (nt_ref(nt, id, "block") < 0 && argc == 1 && !user_defines_or_reads(c, name) &&
         (sp_streq(name, "each_cons") || sp_streq(name, "each_slice") ||
          sp_streq(name, "combination") || sp_streq(name, "permutation"))) ||
