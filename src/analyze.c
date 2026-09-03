@@ -11735,6 +11735,12 @@ static void expand_static_splat_args(Compiler *c) {
     for (int j = 0; fixed_arity_builtins[j]; j++)
       if (sp_streq(cnm, fixed_arity_builtins[j])) { listed = 1; break; }
     if (!listed) continue;
+    /* ...but the name has to BE the builtin. A receiverless call to a
+       top-level `def count(*args)` is the user's own variadic method, and
+       expanding its splat to the builtin's arity handed it one element where
+       the program passed none: `count(*[])` answered 1 (#4298). A call with a
+       receiver still reaches the builtin, so only the bare form declines. */
+    if (nt_ref(nt, id, "receiver") < 0 && comp_method_index(c, cnm) >= 0) continue;
     int ex = nt_ref(nt, argv[sp_at], "expression");
     if (ex < 0) continue;
     const char *ext = nt_type(nt, ex);

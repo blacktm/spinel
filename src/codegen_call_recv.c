@@ -1374,6 +1374,51 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
        TypeError ("no implicit conversion of nil into Array") -- concat fell
        to NoMethodError, product answered [] -- with every argument still
        evaluated in order first, as a real call would */
+    /* `product(*xs)` spreads xs across the ARGUMENT LIST, one operand array
+       per element. The arms below read a splat as a single operand instead,
+       so `[1,2].product(*[])` answered [] where CRuby answers [[1],[2]], and
+       `product(*[[3]])` nested the operand. Spreading a runtime-length list
+       needs a variadic helper these arms do not have; refuse rather than
+       answer wrongly (#4298). A splat of a literal empty array is the one
+       case with an answer here: no operands at all. */
+    if (sp_streq(name, "product") && argc >= 1) {
+      int spl = -1;
+      for (int ai = 0; ai < argc; ai++)
+        if (nt_kind(nt, argv[ai]) == NK_SplatNode) { spl = ai; break; }
+      if (spl >= 0) {
+        int se = nt_ref(nt, argv[spl], "expression");
+        int sen = 0;
+        int empty_lit = se >= 0 && nt_kind(nt, se) == NK_ArrayNode &&
+                        (nt_arr(nt, se, "elements", &sen), sen == 0);
+        /* ...and a local whose every write is an empty literal is the same
+           empty list, which is the shape the report is about. */
+        if (!empty_lit && se >= 0 && nt_kind(nt, se) == NK_LocalVariableReadNode) {
+          const char *sn = nt_str(nt, se, "name");
+          Scope *ssc = sn ? comp_scope_of(c, se) : NULL;
+          if (sn && ssc && local_all_writes_empty_array(c, ssc, sn)) empty_lit = 1;
+        }
+        if (!(argc == 1 && empty_lit)) {
+          unsupported_feature(c, id, "Array#product with a splatted argument list");
+          return 1;
+        }
+        /* an empty splat is no operands at all: `[1,2].product` -- each
+           element wrapped in a one-element array */
+        {
+          int tp = ++g_tmp, ti2 = ++g_tmp;
+          buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tp, tp);
+          buf_printf(b, " sp_RbVal _t%d = ", ti2); emit_boxed(c, recv, b);
+          buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);", ti2);
+          int tk = ++g_tmp;
+          buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_poly_length(_t%d); _t%d++) {"
+                        " sp_PolyArray *_t%d_e = sp_PolyArray_new();"
+                        " sp_PolyArray_push(_t%d_e, sp_poly_arr_get(_t%d, _t%d));"
+                        " sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d_e)); }",
+                     tk, tk, ti2, tk, tk, tk, ti2, tk, tp, tk);
+          buf_printf(b, " _t%d; })", tp);
+          return 1;
+        }
+      }
+    }
     if ((sp_streq(name, "concat") || sp_streq(name, "replace") ||
          sp_streq(name, "product") || sp_streq(name, "union") ||
          sp_streq(name, "difference") || sp_streq(name, "intersection")) &&
