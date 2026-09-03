@@ -3055,6 +3055,25 @@ static char *rewrite_syntax_sugar(char *source) {
              (source[i] >= 'A' && source[i] <= 'Z') || (source[i] >= '0' && source[i] <= '9') ||
              source[i] == '?' || source[i] == '!')) i++;
       size_t name_len = i - ns;
+      /* The UNARY operator symbols name real methods -- `:-@`, `:+@`, `:~`
+         -- but `_spx.-@` is not something Ruby can parse, so they take the
+         prefix spelling instead: `{ |_spx| -_spx }`. Without this they fell
+         through to Prism, where nothing lowers them, and `[1,2].map(&:-@)`
+         reported `map` itself as undefined (#4300). The BINARY operator
+         symbols still go to Prism, where the arithmetic reduce/inject
+         lowering handles them with two operands. */
+      const char *unary_pfx = NULL;
+      if (name_len == 0) {
+        static const char *const uo_sym[] = { "-@", "+@", "~", NULL };
+        static const char *const uo_pfx[] = { "-",  "+",  "~", NULL };
+        for (int uo = 0; uo_sym[uo]; uo++) {
+          size_t ul = strlen(uo_sym[uo]);
+          if (i + ul <= len && strncmp(source + i, uo_sym[uo], ul) == 0 &&
+              !(i + ul < len && sp_is_method_name_char(source[i + ul]))) {
+            unary_pfx = uo_pfx[uo]; i += ul; name_len = ul; break;
+          }
+        }
+      }
       if (name_len == 0) {
         /* Operator / empty symbol: leave `&:` for Prism's native path. */
         OUT_STR("&:");
@@ -3078,8 +3097,9 @@ static char *rewrite_syntax_sugar(char *source) {
                            source[i] == '\n' || source[i] == '\r')) i++;
         if (i < len && source[i] == ')') i++;
         else i = after_sym;
-        OUT_STR(" { |_spx| _spx.");
-        { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); }
+        if (unary_pfx) { OUT_STR(" { |_spx| "); OUT_STR(unary_pfx); OUT_STR("_spx"); }
+        else { OUT_STR(" { |_spx| _spx.");
+          { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); } }
         OUT_STR(" }");
         continue;
       }
@@ -3097,14 +3117,16 @@ static char *rewrite_syntax_sugar(char *source) {
         if (i < len && source[i] == ')') {
           i++;
           OUT_CHAR(')');
-          OUT_STR(" { |_spx| _spx.");
-          { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); }
+          if (unary_pfx) { OUT_STR(" { |_spx| "); OUT_STR(unary_pfx); OUT_STR("_spx"); }
+          else { OUT_STR(" { |_spx| _spx.");
+            { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); } }
           OUT_STR(" }");
         }
 else {
           i = after_sym;
-          OUT_STR(" do |_spx| _spx.");
-          { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); }
+          if (unary_pfx) { OUT_STR(" do |_spx| "); OUT_STR(unary_pfx); OUT_STR("_spx"); }
+          else { OUT_STR(" do |_spx| _spx.");
+            { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); } }
           OUT_STR(" end");
         }
         continue;
