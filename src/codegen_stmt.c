@@ -1220,6 +1220,13 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
                      : "sp_poly_as_str_poly_hash";
     buf_printf(b, "%s(", conv); emit_boxed(c, v, b); buf_puts(b, ")");
   }
+  /* A poly-array slot with a poly RHS: the hash slots two arms up already
+     convert, and the array one did not, so `kids = @focus.children` where the
+     ivar is poly (never assigned, so its reads dispatch at run time) put an
+     sp_RbVal into an sp_PolyArray * local and the C did not compile (#4303). */
+  else if (lv && lv->type == TY_POLY_ARRAY && comp_ntype(c, v) == TY_POLY) {
+    buf_puts(b, "sp_poly_to_poly_array("); emit_expr(c, v, b); buf_puts(b, ")");
+  }
   /* scalar/string slot with a poly RHS (`x = (a + b) * 2` over poly a/b, a
      string local read back from a poly call): unbox into the slot. */
   else if (lv && emit_poly_rhs_coerced(c, lv->type, v, b)) { }
