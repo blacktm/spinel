@@ -42,7 +42,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
+.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench \
         gate-optcarrot clean install uninstall deps tools
@@ -663,7 +663,7 @@ test:
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -759,6 +759,28 @@ reject-test: $(SPINEL)
 	  { echo "reject-test: FAIL (#4309: rejected without saying why)"; sed -n 1,5p "$$tmp/s.out"; ok=0; }; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
+
+# ---- Rescued-exception backtrace (#4310) ----
+# The frame substrate is a DEBUG build's: sp_bt_enabled is set by a --debug
+# main(), and a release build has no symbols to format, so the suite (which
+# builds release) can only assert that #backtrace answers an array. This builds
+# the fixture the way a debugging user does and checks the chain is really
+# there, innermost frame first, with the raising method named.
+backtrace-test: $(SPINEL) $(SP_RT_LIB)
+	@tmp=$$(mktemp -d /tmp/spinel-bt.XXXXXX); ok=1; \
+	$(SPINEL) --debug --no-inline-hot test/backtrace/rescued_chain.rb -o "$$tmp/bt" >/dev/null 2>&1 || \
+	  { echo "backtrace-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	"$$tmp/bt" > "$$tmp/out" 2>&1; \
+	grep -q "ArgumentError: bad -1" "$$tmp/out" || { echo "backtrace-test: FAIL (the rescue did not run)"; ok=0; }; \
+	for f in "Feeder#inner" "Feeder#feed" "Driver#run"; do \
+	  grep -q "$$f" "$$tmp/out" || { echo "backtrace-test: FAIL (#4310: frame $$f missing from a rescued backtrace)"; ok=0; }; \
+	done; \
+	[ "$$(grep -c "rescued_chain.rb" "$$tmp/out")" -ge 4 ] || \
+	  { echo "backtrace-test: FAIL (#4310: fewer than 4 frames)"; cat "$$tmp/out"; ok=0; }; \
+	head -2 "$$tmp/out" | tail -1 | grep -q "Feeder#inner" || \
+	  { echo "backtrace-test: FAIL (#4310: the raising frame is not first)"; cat "$$tmp/out"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "backtrace-test: pass"; else exit 1; fi
 
 # ---- RBS extractor golden tests ----
 RBS_TEST_SRCS := $(sort $(wildcard test/rbs/*.rbs))

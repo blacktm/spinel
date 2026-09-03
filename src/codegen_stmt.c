@@ -5779,18 +5779,25 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
    * object both for $! and for the rescue binding, so $!.equal?(e) is true. */
   buf_printf(b, "sp_rescue_push((void *)_ce_%d);\n", rc);
   emit_indent(b, indent);
-  /* A rescued exception's #backtrace returns [] (not nil) so that
-   * chained methods like .first / .length / .empty? work without nil
-   * checks. Spinel doesn't track per-exception frames (#895), so
-   * the backtrace is an empty array unless the raise site attached
-   * one. The fill is idempotent: the catch-site object (whether
-   * carried from the raise or materialized here) starts with
-   * backtrace == NULL and set_backtrace explicitly writes it.
-   * Skipping the backfill when the carry slot is present would
-   * leave a re-raised object with whatever backtrace its previous
-   * owner set, which is what #895 documents. The array allocation is
+  /* A rescued exception's #backtrace returns the frames of the raise that
+   * landed here, and [] (not nil) when there are none -- so chained methods
+   * like .first / .length / .empty? work without nil checks.
+   *
+   * sp_raise_cls has captured the frames into sp_bt_buf since #3974, but only
+   * the uncaught-drain formatter ever read them: a RESCUED exception answered
+   * an empty array, so a program that logs e.backtrace saw its own message and
+   * nothing about where it came from (#4310). sp_backtrace_captured formats
+   * that same buffer, and answers an empty array when the substrate is off --
+   * a release build has no frame symbols, so it costs nothing there and the
+   * old behaviour is what it keeps.
+   *
+   * The fill is idempotent: the catch-site object (whether carried from the
+   * raise or materialized here) starts with backtrace == NULL and
+   * set_backtrace explicitly writes it. Skipping the backfill when the carry
+   * slot is present would leave a re-raised object with whatever backtrace its
+   * previous owner set, which is what #895 documents. The array allocation is
    * why this stands after the push and not before it. */
-  buf_printf(b, "if (_ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_StrArray_new();\n", rc, rc);
+  buf_printf(b, "if (_ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_backtrace_captured();\n", rc, rc);
   emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
   buf_printf(b, "if (!_ce_%d->cause) _ce_%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", rc, rc);
