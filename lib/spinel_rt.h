@@ -1124,6 +1124,10 @@ const char *sp_slurp_stream(FILE *fp);
 static inline const char *sp_File_read(sp_File *f) {
   if (!f || !f->fp) return sp_str_empty;
   sp_io_wait_readable(f);
+  /* A handle whose read can block fills to EOF through the parking slurp: the
+     plain one asks fread for a whole buffer and sits in the kernel between a
+     pipe writer's chunks, holding the OS worker (#4307). */
+  if (f->park == 2) return sp_slurp_stream_parked(f);
   /* One reader for every stream: the seek size is a hint, so a seekable file
      reporting 0 (a /proc entry) and a non-seekable one (a pipe end, a socket,
      a FIFO) both read to EOF (#3411). */

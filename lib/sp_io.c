@@ -112,8 +112,24 @@ SP_NORETURN static void sp_file_raise_errno(const char *op, const char *path);
    on SPINEL_WORKERS=1 (#4307). A character device (a tty, /dev/urandom) is
    the same shape. A regular file is always ready and pays only the one
    fstat, once per handle. */
-void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
-  if (!f || !f->fp) return;
+/* Bytes stdio has already buffered for this stream. They are readable without
+   a read(2), so a drain of exactly this many cannot block -- which is what
+   lets a slurp fill from a pipe without ever sitting in the kernel. */
+size_t sp_io_stdio_buffered(FILE *fp) {
+  if (!fp) return 0;
+#if defined(__GLIBC__)
+  return fp->_IO_read_end > fp->_IO_read_ptr ? (size_t)(fp->_IO_read_end - fp->_IO_read_ptr) : 0;
+#elif defined(__APPLE__)
+  return fp->_r > 0 ? (size_t)fp->_r : 0;
+#else
+  return __freadahead(fp);   /* musl */
+#endif
+}
+
+/* Can this handle's I/O block indefinitely? Asked once per handle, from an
+   fstat on first use: a FIFO, a socket and a character device can; a regular
+   file is always ready. */
+static int sp_io_parkable(sp_File *f) {
   if (!f->park) {
     struct stat st;
     int pfd = fileno(f->fp);
@@ -121,7 +137,45 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
                (pfd >= 0 && fstat(pfd, &st) == 0 &&
                 (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode) || S_ISCHR(st.st_mode)))) ? 2 : 1;
   }
-  if (f->park != 2) return;
+  return f->park == 2;
+}
+
+/* Park until the descriptor can take bytes. A write into a full pipe or socket
+   buffer sits in the kernel holding the OS worker, and the READER that would
+   drain it is often a green thread on that same worker -- so it never runs and
+   the two deadlock, the write-side twin of the read park. Only for the handles
+   whose peer is that reader: a socket, and the write end of an IO.pipe (which
+   spinel marks sync and leaves unbuffered). A file and the standard streams
+   keep their plain path, and their write cost with it. */
+void sp_io_wait_writable(sp_File *f) {SP_GC_ROOT(f);
+  if (!f || !f->fp || !sp_io_parkable(f)) return;
+  int wfd = fileno(f->fp);
+  if (wfd < 0) return;
+  { struct pollfd wp; wp.fd = wfd; wp.events = POLLOUT; wp.revents = 0;
+    if (poll(&wp, 1, 0) > 0) return; }   /* room already: no park */
+#ifdef SP_THREADS
+  {
+    extern int sp_sched_wait_io(int fd, short events);
+    sp_sched_wait_io(wfd, POLLOUT);
+  }
+#else
+  {
+    extern void sp_Thread_pass(void);
+    struct pollfd p;
+    p.fd = wfd; p.events = POLLOUT;
+    for (;;) {
+      p.revents = 0;
+      int r = poll(&p, 1, 1);
+      if (r > 0 || (r < 0 && errno != EINTR && errno != EAGAIN)) return;
+      sp_Thread_pass();
+    }
+  }
+#endif
+}
+
+void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
+  if (!f || !f->fp) return;
+  if (!sp_io_parkable(f)) return;
   /* Already readable: answer from one poll rather than a park. The park is a
      monitor round trip -- register the waiter, write the self-pipe to break
      the monitor out of ITS poll, wait to be requeued and rescheduled -- and
@@ -129,13 +183,7 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
      shape that reads right after an IO.select says the fd is ready. */
   { struct pollfd rp; rp.fd = fileno(f->fp); rp.events = POLLIN; rp.revents = 0;
     if (rp.fd >= 0 && poll(&rp, 1, 0) > 0) return; }
-#if defined(__GLIBC__)
-  if (f->fp->_IO_read_end > f->fp->_IO_read_ptr) return;
-#elif defined(__APPLE__)
-  if (f->fp->_r > 0) return;
-#else
-  if (__freadahead(f->fp) > 0) return;   /* musl */
-#endif
+  if (sp_io_stdio_buffered(f->fp) > 0) return;
 #ifdef SP_THREADS
   {
     extern int sp_sched_wait_io(int fd, short events);
@@ -167,10 +215,11 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
   int fd = fileno(f->fp);
   size_t off = 0;
   while (off < n) {
+    sp_io_wait_writable(f);   /* frees the worker while the buffer is full */
     ssize_t put = write(fd, s + off, n - off);
     if (put < 0) {
       if (errno == EINTR) continue;
-      sp_file_raise_errno("write", "socket");
+      sp_file_raise_errno("write", f->is_sock ? "socket" : "pipe");
     }
     off += (size_t)put;
   }
@@ -181,6 +230,10 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
 static sp_int sp_File_write_len(sp_File *f, const char *s, size_t n) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
   if (f->is_sock) return sp_sock_write(f, s, n);
+  /* An IO.pipe write end is sync, so setvbuf left it unbuffered and stdio
+     holds nothing between calls: the raw loop is what fwrite would do anyway,
+     and it can park between attempts. Every other handle keeps stdio. */
+  if (f->sync_on && sp_io_parkable(f)) return sp_sock_write(f, s, n);
   return (sp_int)fwrite(s, 1, n, f->fp);
 }
 

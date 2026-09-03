@@ -744,6 +744,51 @@ const char *sp_slurp_stream(FILE *fp) {
   return r;
 }
 
+/* IO#read with no count on a handle whose read can BLOCK -- a pipe, a socket,
+   a tty. sp_slurp_stream asks fread for a whole buffer at a time, and fread
+   does not come back until it has that many bytes or EOF: on a pipe that is a
+   sit in the kernel between the writer's chunks, holding the OS worker, so a
+   green thread slurping a pipe another green thread is still writing to never
+   finished on SPINEL_WORKERS=1 -- the writer had nowhere to run.
+
+   Park, then take exactly what arrived. The park frees the worker; the fgetc
+   after it triggers the read(2) that fills stdio's buffer; and draining
+   exactly what stdio then holds cannot block. Round again. (#4307) */
+const char *sp_slurp_stream_parked(sp_File *f) {SP_GC_ROOT(f);
+  if (!f || !f->fp) return &("\xff" "")[1];
+  size_t cap = 8192, len = 0;
+  char *buf = (char *)malloc(cap);
+  if (!buf) return &("\xff" "")[1];
+  for (;;) {
+    sp_io_wait_readable(f);
+    int ch = fgetc(f->fp);
+    if (ch == EOF) break;
+    if (len + 2 >= cap) {
+      char *nb = (char *)realloc(buf, cap * 2);
+      if (!nb) { free(buf); return &("\xff" "")[1]; }
+      buf = nb; cap *= 2;
+    }
+    buf[len++] = (char)ch;
+    /* whatever the same read(2) already delivered: no kernel wait for these */
+    for (size_t avail; (avail = sp_io_stdio_buffered(f->fp)) > 0; ) {
+      while (len + avail + 1 >= cap) {
+        char *nb = (char *)realloc(buf, cap * 2);
+        if (!nb) { free(buf); return &("\xff" "")[1]; }
+        buf = nb; cap *= 2;
+      }
+      size_t got = fread(buf + len, 1, avail, f->fp);
+      len += got;
+      if (got == 0) break;
+    }
+  }
+  char *r = sp_str_alloc(len);
+  if (len) memcpy(r, buf, len);
+  r[len] = 0;
+  sp_str_set_len(r, len);
+  free(buf);
+  return r;
+}
+
 const char *sp_file_read(const char *path) {SP_GC_ROOT_STR(path);
   if (sp_file_directory(path)) {
     sp_raise_cls("Errno::EISDIR", sp_sprintf("Is a directory @ io_fread - %s", path));
