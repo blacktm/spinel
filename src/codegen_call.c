@@ -5505,6 +5505,17 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        (#4071), so without this the Array case reached the raise. */
     int is_pjoin = sp_streq(name, "join") && argc <= 1 && !has_splat_arg &&
                    nt_ref(nt, id, "block") < 0;
+    /* ...but only where the argument could BE a separator. The arm passes the
+       call's own argument temp into sp_poly_join's const char * slot, so a
+       user object there did not compile -- and this arm exists precisely
+       because a user class owns the name, which is the program that passes
+       one (#4292). Without the arm the builtin case reaches the raise, which
+       is what CRuby answers for a non-String separator anyway. */
+    if (is_pjoin && argc == 1) {
+      TyKind jat = comp_ntype(c, argv[0]);
+      if (!(jat == TY_STRING || jat == TY_POLY || jat == TY_NIL || jat == TY_UNKNOWN))
+        is_pjoin = 0;
+    }
     /* pack / unpack1 on a poly value that is a builtin container or string,
        alongside the user arms: their own arms stand down when a user class owns
        the name, and without these the builtin case reached the raise -- or, for
