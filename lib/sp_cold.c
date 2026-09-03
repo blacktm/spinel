@@ -3343,17 +3343,35 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
     do { pn = poll(pfs, (nfds_t)nfd, ms); } while (pn < 0 && errno == EINTR);
     if (pn < 0) { free(pfs); sp_raise_cls("IOError", "select failed"); }
     if (pn == 0) { free(pfs); return sp_box_nil(); }
+    /* Read back by DESCRIPTOR, not by entry. One IO can appear twice in a call
+       -- a wrapper answering #to_io beside the IO itself -- and then two
+       entries carry the same fd. Linux sets revents on both; macOS sets it on
+       one, so an entry-wise readback dropped the other and answered a shorter
+       array there than here (CRuby answers both).
+       The ready descriptors are collected once, and only an entry that came
+       back with nothing consults them -- so a call where nothing is ready
+       (the common one, and the one a server makes in a loop) does no scanning
+       at all, and neither does one where everything is. */
+    int *hot = (int *)malloc(sizeof(int) * (size_t)(nfd > 0 ? nfd : 1));
+    sp_int nhot = 0;
+    if (hot) for (sp_int i = 0; i < nfd; i++) if (pfs[i].revents) hot[nhot++] = pfs[i].fd;
     sp_PolyArray *out2 = sp_PolyArray_new();
     SP_GC_ROOT(out2);
     sp_int base = 0;
     for (int g = 0; g < 3; g++) {
       sp_PolyArray *part = sp_PolyArray_new();
       sp_int n = (g < 2 && src[g]) ? src[g]->len : 0;
-      for (sp_int i = 0; i < n; i++)
-        if (pfs[base + i].revents) sp_PolyArray_push(part, src[g]->data[i]);
+      for (sp_int i = 0; i < n; i++) {
+        int ready = pfs[base + i].revents != 0;
+        if (!ready && hot)
+          for (sp_int h = 0; h < nhot && !ready; h++)
+            if (hot[h] == pfs[base + i].fd) ready = 1;
+        if (ready) sp_PolyArray_push(part, src[g]->data[i]);
+      }
       base += n;
       sp_PolyArray_push(out2, sp_box_poly_array(part));
     }
+    free(hot);
     free(pfs);
     return sp_box_poly_array(out2);
   }
