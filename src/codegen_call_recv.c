@@ -12726,6 +12726,22 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       emit_expr(c, recv, b); buf_puts(b, ", \"unpack\"), ");
       emit_str_expr(c, argv[0], b); buf_puts(b, "))");
     }
+    else if (sp_streq(name, "byteslice") && argc == 1 &&
+             comp_ntype(c, argv[0]) == TY_RANGE) {
+      /* byteslice(RANGE) on a poly receiver. The arm emitted the single-index
+         helper whatever the argument was, so the Range reached emit_int_expr
+         and became an unconditional "no implicit conversion of Range into
+         Integer" -- the range was built, cast to void and thrown away, and
+         the raise ran (#4308). Same endpoint resolution the String receiver
+         uses. */
+      int trp = ++g_tmp;
+      buf_printf(b, "({ sp_Range _t%d = ", trp); emit_expr(c, argv[0], b);
+      buf_puts(b, "; sp_box_nullable_str(sp_str_byteslice_range(sp_poly_recv_s(");
+      emit_expr(c, recv, b);
+      buf_printf(b, ", \"byteslice\"), _t%d.first, _t%d.last, _t%d.excl,"
+                    " _t%d.first == INTPTR_MIN, _t%d.last == INTPTR_MAX)); })",
+                 trp, trp, trp, trp, trp);
+    }
     else if (sp_streq(name, "byteslice")) {
       buf_printf(b, "sp_box_nullable_str(sp_str_byteslice%s(sp_poly_recv_s(",
                  argc == 1 ? "1" : "");
