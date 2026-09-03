@@ -28,6 +28,10 @@ typedef struct {
   unsigned char frozen;        /* Object#freeze; kept here, not in the GC header,
                                   because the standard streams are static storage
                                   with no header to flip (sp_io_stdout) */
+  unsigned char park;          /* readiness-park kind, computed on the first
+                                  read: 0 not yet asked, 1 never (a regular
+                                  file is always ready), 2 park before a read
+                                  that could block (#4307) */
   int fno_plus1;               /* IO.for_fd(fd, autoclose: false) wraps a dup(2)
                                   of fd so close/fin never touch the caller's
                                   descriptor; this carries the ORIGINAL fd (+1,
@@ -54,7 +58,7 @@ sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm);
    CRuby sockets' sync = true. `kind` labels the handle ("tcp", "tcpserver",
    ...) for #class rendering. (#2922) */
 sp_File *sp_io_fdopen_sock(int fd, const char *kind);
-void sp_sock_wait_readable(sp_File *f);
+void sp_io_wait_readable(sp_File *f);
 sp_int sp_File_write(sp_File *f, const char *s);
 sp_int sp_File_write_bin(sp_File *f, const char *s);
 sp_int sp_File_close(sp_File *f);

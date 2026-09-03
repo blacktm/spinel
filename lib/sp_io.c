@@ -85,7 +85,7 @@ sp_File *sp_io_fdopen_sock(int fd, const char *kind) {SP_GC_ROOT_STR(kind);
   /* The scheduler-aware accept/connect helpers may hand us a non-blocking
      fd; the stdio read side must BLOCK (fgets treats EAGAIN as EOF), so
      clear O_NONBLOCK. Green threads still yield: every read entry point
-     parks on sp_sock_wait_readable below before touching the stream. */
+     parks on sp_io_wait_readable below before touching the stream. */
   { int fl = fcntl(fd, F_GETFL); if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK); }
   sp_File *f = (sp_File *)sp_gc_alloc(sizeof(sp_File), sp_File_fin, sp_File_scan);
   f->fp = fdopen(fd, "r+");
@@ -98,12 +98,30 @@ sp_File *sp_io_fdopen_sock(int fd, const char *kind) {SP_GC_ROOT_STR(kind);
 }
 
 SP_NORETURN static void sp_file_raise_errno(const char *op, const char *path);
-/* Park the calling green thread until the socket has readable data, so a
-   blocking fgets/fread does not pin its worker while a peer is idle. A no-op
-   when stdio already buffered data (waiting then would stall on the WIRE
-   while the answer sits in the buffer), and in the single-threaded build. */
-void sp_sock_wait_readable(sp_File *f) {SP_GC_ROOT(f);
-  if (!f || !f->is_sock || !f->fp) return;
+/* Park the calling green thread until the handle has readable data, so a
+   blocking fgets/fread does not pin its worker while the peer is idle. A
+   no-op when stdio already buffered data (waiting then would stall on the
+   WIRE while the answer sits in the buffer), and in the single-threaded
+   build.
+
+   WHICH handles: the ones whose read can block indefinitely. This was the
+   socket path and asked `is_sock`, so a PIPE went straight into fread and
+   blocked its OS worker in the kernel -- and the thread that would write to
+   that pipe is often a green thread on the very same worker, so it had
+   nowhere to run: two threads passing a byte back and forth never completed
+   on SPINEL_WORKERS=1 (#4307). A character device (a tty, /dev/urandom) is
+   the same shape. A regular file is always ready and pays only the one
+   fstat, once per handle. */
+void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
+  if (!f || !f->fp) return;
+  if (!f->park) {
+    struct stat st;
+    int pfd = fileno(f->fp);
+    f->park = (f->is_sock ||
+               (pfd >= 0 && fstat(pfd, &st) == 0 &&
+                (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode) || S_ISCHR(st.st_mode)))) ? 2 : 1;
+  }
+  if (f->park != 2) return;
 #if defined(__GLIBC__)
   if (f->fp->_IO_read_end > f->fp->_IO_read_ptr) return;
 #elif defined(__APPLE__)
@@ -661,7 +679,7 @@ sp_int sp_sock_listen(sp_File *f, sp_int backlog) {SP_GC_ROOT(f);
    both its Errno parent and the IO::Wait* module (see lib/sp_exc.c). */
 /* Bytes stdio already buffered for this handle. A #gets followed by a
    #read_nonblock must see them: the raw read(2) below goes straight to the
-   descriptor and would skip the buffer. Same platform probe sp_sock_wait_readable
+   descriptor and would skip the buffer. Same platform probe sp_io_wait_readable
    uses. */
 static long sp_io_buffered(sp_File *f) {
 #if defined(__GLIBC__)
@@ -866,7 +884,7 @@ sp_File *sp_sock_accept(sp_File *f) {SP_GC_ROOT(f);
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method 'accept' for an instance of %s", sp_io_kind_name(f)));
   if (!f->fp) sp_raise_cls("IOError", "closed stream");
-  sp_sock_wait_readable(f);
+  sp_io_wait_readable(f);
   return sp_io_fdopen_sock(sp_net_accept(fileno(f->fp)), "tcp");
 }
 

@@ -1047,7 +1047,7 @@ const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *v
 #include "sp_io.h"
 static inline const char *sp_File_gets(sp_File *f) {
   if (!f || !f->fp) return NULL;
-  if (f->is_sock) sp_sock_wait_readable(f);
+  sp_io_wait_readable(f);
   /* heap scratch, NOT a stack buffer: a green thread runs on a 64KB fiber
      stack (SP_FIBER_STACK_SIZE), which a 64KB local overran straight into
      the guard page -- `Thread.new { f.gets }` was an instant segfault. */
@@ -1123,7 +1123,7 @@ sp_int sp_io_copy_stream(const char *src, const char *dst);
 const char *sp_slurp_stream(FILE *fp);
 static inline const char *sp_File_read(sp_File *f) {
   if (!f || !f->fp) return sp_str_empty;
-  if (f->is_sock) sp_sock_wait_readable(f);
+  sp_io_wait_readable(f);
   /* One reader for every stream: the seek size is a hint, so a seekable file
      reporting 0 (a /proc entry) and a non-seekable one (a pipe end, a socket,
      a FIFO) both read to EOF (#3411). */
@@ -1135,7 +1135,7 @@ static inline const char *sp_File_read(sp_File *f) {
    string of the bytes actually read. */
 static inline const char *sp_File_read_n(sp_File *f, sp_int n) {
   if (!f || !f->fp) return NULL;
-  if (f->is_sock) sp_sock_wait_readable(f);
+  sp_io_wait_readable(f);
   if (n < 0) return sp_File_read(f);
   if (n == 0) return sp_str_empty;
   char *r = sp_str_alloc((size_t)n);

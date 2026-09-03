@@ -1527,7 +1527,7 @@ const char *sp_dir_home_user(const char *user);
 sp_StrArray *sp_dir_children(const char *path);
 
 const char *sp_File_gets_sep(sp_File *f, const char *sep, sp_int limit, sp_bool chomp) {SP_GC_ROOT(f);SP_GC_ROOT_STR(sep);
-  if (f && f->is_sock) sp_sock_wait_readable(f);
+  sp_io_wait_readable(f);
   if (!f || !f->fp) return NULL;
   size_t sl = sep ? strlen(sep) : 0;
   /* fast path: the default "\n" separator with no limit reads via fgets
