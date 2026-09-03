@@ -6061,7 +6061,23 @@ static int cs_type_params(Compiler *c, int create, const int *argv, int argc) {
     LocalVar *lv = scope_local(bs, p);
     if (!lv) continue;
     TyKind at = infer_type(c, argv[k]);
-    if (at == TY_UNKNOWN || at == lv->type) continue;
+    /* An empty `[]` / `{}` literal has no type of its own, so this skipped it
+       and the parameter kept the TY_INT default the literal-typing pass gives
+       an unpinned required. The argument is still BUILT as a container, so
+       `->(a){a}.call([])` put an sp_IntArray * into an sp_int slot and did not
+       compile (#4295). It is not an integer whatever else the program says:
+       poly holds either container. */
+    if (at == TY_UNKNOWN) {
+      const char *aty = nt_type(nt, argv[k]);
+      int en = 0;
+      if (aty && (sp_streq(aty, "ArrayNode") || sp_streq(aty, "HashNode") ||
+                  sp_streq(aty, "KeywordHashNode"))) {
+        nt_arr(nt, argv[k], "elements", &en);
+        if (en == 0 && lv->type != TY_POLY) { lv->type = TY_POLY; changed = 1; }
+      }
+      continue;
+    }
+    if (at == lv->type) continue;
     TyKind merged = (lv->type == TY_INT) ? at : ty_unify(lv->type, at);
     if (merged != lv->type) { lv->type = merged; changed = 1; }
   }

@@ -7868,6 +7868,33 @@ static void mark_empty_array_operands(Compiler *c) {
        and back-fills like a local: leave it */
     int seed = nt_ref(nt, id, "block") >= 0 && nm &&
                (sp_streq(nm, "each_with_object") || sp_streq(nm, "inject") || sp_streq(nm, "reduce"));
+    /* `f.call([])` on a Proc: the parameter takes its type from the argument,
+       and an empty literal has none of its own, so the parameter defaulted to
+       int and the literal was still built as a container -- an sp_IntArray *
+       into an sp_int slot, which did not compile (#4295). A plain method's
+       parameter already reads it as a container; give the proc parameter the
+       same poly layout. `.()` and `f[x]` parse to the same names. */
+    if (an > 0 && nm && !recv_empty &&
+        (sp_streq(nm, "call") || sp_streq(nm, "()") || sp_streq(nm, "yield") ||
+         sp_streq(nm, "[]")) &&
+        infer_type(c, recv) == TY_PROC) {
+      for (int k = 0; k < an; k++) {
+        if (is_empty_array_literal(nt, av[k], c->node_cap) && c->arr_want[av[k]] == TY_UNKNOWN)
+          c->arr_want[av[k]] = TY_POLY_ARRAY;
+        /* the same for `{}`: the proc-call argument emitter asks the node's
+           type to decide whether the value is storable, and an untyped empty
+           literal made it declare an sp_int temp and box nil, while the
+           literal itself still built a hash */
+        else if (c->hash_want && av[k] < c->node_cap && c->hash_want[av[k]] == TY_UNKNOWN) {
+          NodeKind hk = nt_kind(nt, av[k]);
+          int hen = 0;
+          if (hk == NK_HashNode || hk == NK_KeywordHashNode) {
+            nt_arr(nt, av[k], "elements", &hen);
+            if (hen == 0) c->hash_want[av[k]] = TY_STR_POLY_HASH;
+          }
+        }
+      }
+    }
     if (an > 0 && nm && !recv_empty) {
       TyKind rt = infer_type(c, recv);
       if ((ty_is_array(rt) && !seed) || ty_is_hash(rt)) {
