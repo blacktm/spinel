@@ -7794,6 +7794,11 @@ static sp_RbVal sp_poly_fiber_value(sp_RbVal v) {
   }
   return sp_box_nil();
 }
+/* Forward declarations for sp_sched.c functions used by codegen. The
+   codegen emits direct symbol references (sp_Thread_join_timeout) so
+   the signatures must be visible here. */
+sp_thread *sp_Thread_join_timeout(sp_thread *t, double seconds);
+
 static sp_RbVal sp_poly_fiber_join(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_THREAD) {
     sp_Thread_join((sp_thread *)v.v.p);
