@@ -284,6 +284,13 @@ $(SPINEL): $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(R
 	@# (the installed command is `spinel` too). Best-effort; gitignored.
 	@ln -sf $@ spinel 2>/dev/null || cp $@ spinel 2>/dev/null || true
 
+# Wrapper around the system `timeout` that always returns GNU coreutils'
+# exit code (124 on timeout), regardless of which `timeout` is on PATH.
+# The bench target keys on 124 to mark a run as SKIP; busybox uses 143
+# and BSDs use 399, which would be misclassified. Built once from C.
+$(SPINEL_TIMEOUT): scripts/spinel-timeout.c
+	$(CC) $(CFLAGS) $< -o $@
+
 # ---- RBS extractor ----
 # Reads sig/**/*.rbs, emits the seed-file format spinel_analyze consumes
 # when invoked with `spinel --rbs DIR`.
@@ -652,7 +659,7 @@ re-lit-test: $(SPINEL)
 # `make test` always runs fresh: it wipes the prior `.ok` stamps first,
 # then runs the suite. (The old incremental `test` + `retest` split is
 # gone — a stale `.ok` reading PASS was a recurring foot-gun.)
-test:
+test: $(SPINEL_TIMEOUT)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then \
 	  echo "WARNING: no 'timeout'/'gtimeout' on PATH -- tests run with NO time limit."; \
 	  echo "         A hanging test will hang this run until the CI job's own limit."; \

@@ -54,11 +54,16 @@ else
   GC_FLAGS = -Wl,--gc-sections
 endif
 
-# `timeout` is GNU coreutils — present on Linux, named `gtimeout` on macOS
-# (brew coreutils). Detect both; if neither is found run without limits.
-TIMEOUT_BIN := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
-TIMEOUT10 := $(if $(TIMEOUT_BIN),$(TIMEOUT_BIN) 10,)
-TIMEOUT60 := $(if $(TIMEOUT_BIN),$(TIMEOUT_BIN) 60,)
+# Wrapper around the system `timeout` that always returns GNU coreutils'
+# exit code (124 on timeout), regardless of which `timeout` is on PATH.
+# The bench target keys on 124 to mark a run as SKIP; busybox uses 143
+# and BSDs use 399, which would be misclassified. Built once from C.
+# `TIMEOUT_BIN` is the wrapper path, so the existing `$(TIMEOUT_BIN)`
+# emptiness checks (which print a "no time limit" warning) still work.
+SPINEL_TIMEOUT := scripts/spinel-timeout
+TIMEOUT_BIN := $(SPINEL_TIMEOUT)
+TIMEOUT10 := $(SPINEL_TIMEOUT) 10
+TIMEOUT60 := $(SPINEL_TIMEOUT) 60
 
 # Default to a parallel build at the logical CPU count, unless the
 # invocation already asked for a job count. Applied ONLY at the top level
