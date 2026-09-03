@@ -559,10 +559,19 @@ int emit_hash_reduce_scalar_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = ", trecv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p); }
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
+  /* The initial value is rendered into a side buffer FIRST, the way the
+     receiver above is. Written straight into g_pre it landed in the middle of
+     the line being built there: an empty array literal needs construction
+     statements, and those hoist into g_pre too, so `sum([]) { }` emitted
+     `sp_RbVal _t2 = sp_box_nullable_obj((void *)(  sp_PolyArray *_t7 = ...;`
+     and the program did not compile (#4289). Rendering first puts the hoists
+     ahead of the line instead of inside it. */
+  Buf sib; memset(&sib, 0, sizeof sib);
+  if (is_sum && sum_init >= 0) emit_boxed(c, sum_init, &sib);
   emit_indent(g_pre, g_indent);
   if (is_sum) {
     buf_printf(g_pre, "sp_RbVal _t%d = ", tacc);
-    if (sum_init >= 0) emit_boxed(c, sum_init, g_pre);
+    if (sum_init >= 0) buf_puts(g_pre, sib.p ? sib.p : "sp_box_nil()");
     else buf_puts(g_pre, "sp_box_int(0)");
     buf_puts(g_pre, ";\n");
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tacc);
@@ -571,6 +580,7 @@ int emit_hash_reduce_scalar_expr(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "sp_int _t%d = 0;\n", tacc);   /* one? tallies, checks == 1 */
   else
     buf_printf(g_pre, "sp_bool _t%d = %s;\n", tacc, (is_all || is_none) ? "TRUE" : "FALSE");
+  free(sib.p);
 
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
