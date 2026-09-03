@@ -3450,7 +3450,22 @@ static sp_RbVal sp_poly_bxor(sp_RbVal a, sp_RbVal b) {
   if (sp_poly_is_user_obj(a)) return sp_poly_binop_bad("^", a, b);
   return sp_box_int(sp_poly_to_i(a) ^ sp_poly_to_i(b));
 }
-static sp_RbVal sp_poly_neg(sp_RbVal a) { if (a.tag == SP_TAG_FLT) return sp_box_float(-a.v.f); return sp_box_int(-sp_poly_to_i(a)); }
+/* Unary minus on a boxed value. Only Float and Integer were handled, and
+   everything else fell to sp_poly_to_i -- which answers 0 for a Rational or a
+   Complex, so `[Rational(1,10)].map { |r| -r }` answered [0] with nothing
+   said (#4299). Each kind negates through its own helper, the way sp_poly_mul
+   dispatches its tower one line at a time. */
+static sp_RbVal sp_poly_neg(sp_RbVal a) {
+  if (a.tag == SP_TAG_FLT) return sp_box_float(-a.v.f);
+  if (a.tag == SP_TAG_INT) return sp_box_int(-a.v.i);
+  if (a.tag == SP_TAG_BIGINT)
+    return sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), (sp_Bigint *)a.v.p));
+  if (sp_poly_is_rational(a)) return sp_box_rational(sp_rational_neg(sp_poly_as_rational(a)));
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX)
+    return sp_box_complex(sp_complex_neg(sp_poly_as_complex(a)));
+  if (sp_poly_is_brat(a)) return sp_brat_sub_poly(sp_box_int(0), a);
+  return sp_box_int(-sp_poly_to_i(a));
+}
 
 /* sp_mark_rbval: inline helper in sp_gc.h. */
 /* Definition of the root-entry marker forward-declared near
