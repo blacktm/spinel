@@ -967,10 +967,16 @@ sp_File *sp_sock_accept(sp_File *f) {SP_GC_ROOT(f);
    standard stream. The path is what tells the two apart, the same way #class
    renders them (a stream's path is bracketed). */
 const char *sp_File_inspect(sp_File *f) {SP_GC_ROOT(f);
-  const char *p = f && f->path ? f->path : "";
+  /* A NULL handle IS nil -- the readiness family answers one on timeout -- so
+     it inspects as nil, the way sp_io_kind_name already names it NilClass. It
+     rendered as a closed IO instead, which reads wrong in a puts even though
+     nil? and truthiness were right (#4316). A handle that is merely CLOSED is
+     a different thing and keeps its own rendering below. */
+  if (!f) return SPL("nil");
+  const char *p = f->path ? f->path : "";
   const char *cls = (p[0] && p[0] != '<') ? "File" : "IO";
-  if (!f || !f->fp) return p[0] ? sp_sprintf("#<%s:%s (closed)>", cls, p)
-                                : sp_sprintf("#<IO:(closed)>");
+  if (!f->fp) return p[0] ? sp_sprintf("#<%s:%s (closed)>", cls, p)
+                          : sp_sprintf("#<IO:(closed)>");
   /* a pipe end or a wrapped descriptor has no path: CRuby names the fd */
   if (!p[0]) return sp_sprintf("#<IO:fd %d>", fileno(f->fp));
   return sp_sprintf("#<%s:%s>", cls, p);
