@@ -31,7 +31,7 @@ trap 'rm -f "$c" "$bin"' EXIT
 # carries benign patterns (e.g. a fiber body's dead deferred-return epilogue)
 # that newer clangs otherwise reject by default.
 cc -O1 -g -Wno-all -fsanitize=thread -DSP_THREADS -ftls-model=initial-exec \
-   -Ilib -Ilib/regexp "$c" "$ARCHIVE" -lm -lpthread -o "$bin"
+   -Ilib -Ilib/regexp "$c" "$ARCHIVE" -lm -lcrypt -lpthread -o "$bin"
 
 # halt_on_error keeps the first race fatal (a clean exit means TSan saw none).
 TSAN_OPTIONS="halt_on_error=1 ${TSAN_OPTIONS:-}" "$bin" "$@"
