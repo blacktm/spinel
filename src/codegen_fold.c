@@ -3662,7 +3662,22 @@ int emit_each_with_index_chain(Compiler *c, int id, Buf *b) {
     }
   }
   for (int j = 0; j < bn - 1; j++) { emit_stmt(c, bb[j], b, 0); buf_puts(b, " "); }
-  buf_printf(b, "_t%d = ", tacc); emit_expr(c, bb[bn - 1], b); buf_puts(b, "; } } ");
+  /* The tail is rendered with the prelude pointed INSIDE the loop. Left at
+     the caller's g_pre, a tail that hoists -- `acc + [pair]` builds the
+     one-element array as statements -- put that construction ahead of the
+     loop, where it read the pair local before any iteration had set it. So
+     every element folded the same stale value: [[9,9],[0,0],[0,0]] (#4297).
+     The loop body is a statement expression, so statements are valid here. */
+  { Buf tb; memset(&tb, 0, sizeof tb);
+    Buf inner; memset(&inner, 0, sizeof inner);
+    Buf *sv_pre = g_pre; g_pre = &inner;
+    emit_expr(c, bb[bn - 1], &tb);
+    g_pre = sv_pre;
+    if (inner.p) buf_puts(b, inner.p);
+    buf_printf(b, "_t%d = ", tacc);
+    buf_puts(b, tb.p ? tb.p : "0");
+    buf_puts(b, "; } } ");
+    free(tb.p); free(inner.p); }
   buf_printf(b, "_t%d; })", tacc);
 
   if (lacc) lacc->type = sacc;
