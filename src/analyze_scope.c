@@ -3211,8 +3211,66 @@ int infer_multiwrite_const_types(Compiler *c) {
   return changed;
 }
 
+/* The two redeclarations CRuby refuses to LOAD. Both built here with nothing
+   said, and each answered whatever its FIRST declaration was written with, so
+   the later one was silently dropped -- bodies and all (#4309).
+
+   A constant declared `class` in one place and `module` in another, and a
+   class reopened with a different superclass. Neither can be a running Ruby
+   program: CRuby raises TypeError as it loads the file. Reported here, at the
+   second declaration, with the position of the first.
+
+   Only an EXPLICIT superclass on both sides counts: a bare reopen (`class Foo`
+   with no `<`) is how a class is normally added to, and a computed one
+   (`class K < Struct.new(:a)`) has no name to compare. */
+static void check_class_redeclarations(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int n = nt->count;
+  for (int id = 0; id < n; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_ClassNode && k != NK_ModuleNode) continue;
+    int cp = nt_ref(nt, id, "constant_path");
+    const char *nm = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, id, "name");
+    if (!nm || !*nm) continue;
+    /* the FIRST declaration of this name; nothing to say if this is it */
+    int first = -1;
+    for (int j = 0; j < id && first < 0; j++) {
+      NodeKind jk = nt_kind(nt, j);
+      if (jk != NK_ClassNode && jk != NK_ModuleNode) continue;
+      int jcp = nt_ref(nt, j, "constant_path");
+      const char *jn = jcp >= 0 ? nt_str(nt, jcp, "name") : nt_str(nt, j, "name");
+      if (jn && sp_streq(jn, nm)) first = j;
+    }
+    if (first < 0) continue;
+    int fline = (int)nt_int(nt, first, "node_line", 0);
+    if (nt_kind(nt, first) != k) {
+      char msg[512];
+      snprintf(msg, sizeof msg,
+               "%s is not a %s (the first declaration, at line %d, is a %s)",
+               nm, k == NK_ModuleNode ? "module" : "class", fline,
+               nt_kind(nt, first) == NK_ModuleNode ? "module" : "class");
+      unsupported_feature(c, id, msg);
+    }
+    if (k != NK_ClassNode) continue;
+    int sc = nt_ref(nt, id, "superclass"), fs = nt_ref(nt, first, "superclass");
+    if (sc < 0 || fs < 0) continue;
+    const char *sty = nt_type(nt, sc), *fty = nt_type(nt, fs);
+    if (!sty || !fty) continue;
+    if (!(sp_streq(sty, "ConstantReadNode") || sp_streq(sty, "ConstantPathNode"))) continue;
+    if (!(sp_streq(fty, "ConstantReadNode") || sp_streq(fty, "ConstantPathNode"))) continue;
+    const char *sn = nt_str(nt, sc, "name"), *fn = nt_str(nt, fs, "name");
+    if (!sn || !fn || sp_streq(sn, fn)) continue;
+    char msg[512];
+    snprintf(msg, sizeof msg,
+             "superclass mismatch for class %s (%s here, %s at line %d)",
+             nm, sn, fn, fline);
+    unsupported_feature(c, id, msg);
+  }
+}
+
 /* Resolve each class's superclass index from its ClassNode. */
 void resolve_parents(Compiler *c) {
+  check_class_redeclarations(c);
   const NodeTable *nt = c->nt;
   for (int i = 0; i < c->nclasses; i++) {
     int sc = nt_ref(nt, c->classes[i].def_node, "superclass");
