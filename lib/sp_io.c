@@ -122,6 +122,13 @@ void sp_io_wait_readable(sp_File *f) {SP_GC_ROOT(f);
                 (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode) || S_ISCHR(st.st_mode)))) ? 2 : 1;
   }
   if (f->park != 2) return;
+  /* Already readable: answer from one poll rather than a park. The park is a
+     monitor round trip -- register the waiter, write the self-pipe to break
+     the monitor out of ITS poll, wait to be requeued and rescheduled -- and
+     paying that when the bytes are already there is most of the cost in the
+     shape that reads right after an IO.select says the fd is ready. */
+  { struct pollfd rp; rp.fd = fileno(f->fp); rp.events = POLLIN; rp.revents = 0;
+    if (rp.fd >= 0 && poll(&rp, 1, 0) > 0) return; }
 #if defined(__GLIBC__)
   if (f->fp->_IO_read_end > f->fp->_IO_read_ptr) return;
 #elif defined(__APPLE__)
