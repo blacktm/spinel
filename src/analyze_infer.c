@@ -2487,6 +2487,19 @@ else {
         NT_FOREACH_KIND(nt, NK_CallNode, use) {
           if (nt_ref(nt, use, "receiver") == id) return TY_POLY_POLY_HASH;
         }
+        /* ...and a Hash.new that is a method's VALUE has no receiver use of
+           its own either, so it stayed unknown and the method emitted as
+           void: `def mk = Hash.new(0)` answered nothing, and every call on
+           the result reported Hash.new itself as undefined (#4291). The
+           value position is the same "nothing narrows it" case the receiver
+           scan above covers. */
+        {
+          Scope *hs = comp_scope_of(c, id);
+          if (hs && hs->body >= 0) {
+            int hbn = 0; const int *hbb = nt_arr(nt, hs->body, "body", &hbn);
+            if (hbb && hbn > 0 && hbb[hbn - 1] == id) return TY_POLY_POLY_HASH;
+          }
+        }
         return TY_UNKNOWN;
       }
       if (cn && sp_streq(cn, "Regexp")) return TY_REGEX;
