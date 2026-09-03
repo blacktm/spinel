@@ -53,6 +53,13 @@ void (*sp_safepoint_publish_hook)(void) = NULL;   /* set by the generated TU (sp
 #ifndef SP_MAX_WORKERS
 #define SP_MAX_WORKERS 256   /* both builds: sizes the per-worker run-queue array */
 #endif
+/* The monotonic clock, outside the SP_THREADS guard: the monitor uses it for
+   deadlines, and so does Thread#join(limit), which is compiled into both
+   builds because the codegen emits its symbol unconditionally. */
+static double sp_monotonic_now(void) {
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
 #ifdef SP_THREADS
 #include <pthread.h>
 static pthread_mutex_t g_sched_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -117,10 +124,6 @@ static int            g_sysmon_pipe[2] = { -1, -1 };  /* self-pipe: wake the mon
 static void sp_sysmon_wake(void) {
   if (g_sysmon_idle) pthread_cond_signal(&g_sysmon_cv);
   else if (g_sysmon_pipe[1] >= 0) { char c = 1; ssize_t r = write(g_sysmon_pipe[1], &c, 1); (void)r; }
-}
-static double sp_monotonic_now(void) {
-  struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 /* ---- preemption (design §5): timeslice tracking + the one safepoint flag ----
@@ -838,42 +841,36 @@ sp_thread *sp_Thread_join(sp_thread *t) {
 }
 
 /* CRuby's Thread#join(limit): wait at most `seconds` for the thread to
-   finish. Returns the thread on success, nil on timeout. Uses a sleep
-   loop so the scheduler runs other threads during the wait. */
-/* CRuby's Thread#join(limit): wait at most `seconds` for the thread to
-   finish. Returns the thread on success, NULL on timeout. The same
-   return type as the no-arg join (sp_thread*) so callers can use
-   either form against the same variable; the spinel runtime maps
-   NULL to nil.
+   finish, answering the thread when it does and NULL (nil) on timeout.
+   Same return type as the no-arg join so one variable can hold either
+   call's result.
 
-   Uses sp_sched_sleep (scheduler-aware sleep) so the current thread
-   parks on g_sleepers with a deadline and the monitor wakes it. This
-   avoids the CPU burn of a tight poll loop. The trade-off: if the
-   target finishes early, we still sleep for the full timeout. That
-   matches the no-arg join's behavior (it also doesn't return early
-   for unrelated reasons) and keeps the implementation simple. */
+   The wait is a bounded poll rather than a park, because a deadline has
+   nowhere to live on the joiners list: the monitor walks g_sleepers and
+   g_io_waiters for deadlines, and a thread parked with sp_sched_block sits
+   on neither. Sleeping the whole timeout in one go is what the first cut
+   did, and it makes join(limit) a FIXED wait -- `t.join(5)` on a thread
+   that finishes in 50ms blocked for five seconds where CRuby returns at
+   once. Slicing it keeps the answer prompt (one slice of latency) and the
+   scheduler running other threads inside each sp_sleep. */
+#define SP_JOIN_POLL_SLICE 0.002
 sp_thread *sp_Thread_join_timeout(sp_thread *t, double seconds) {
-  /* Fast path: already dead. */
   SCHED_LOCK();
   int dead = (t->state == SP_TH_DEAD);
   SCHED_UNLOCK();
   if (dead) { sp_thread_reraise_if_exc(t); return t; }
+  if (!(seconds > 0)) return NULL;   /* also catches a NaN limit */
 
-  if (seconds <= 0) return NULL;
-  /* sp_sleep dispatches to sp_sched_sleep in the MT build and to a
-     plain nanosleep in the ST build, so the same call site works
-     regardless of whether threads are compiled in. The MT path
-     parks on g_sleepers with a deadline; the monitor wakes us.
-     The ST path is unreachable in practice (Thread#join is a
-     threaded method and the codegen only emits this symbol when
-     the test uses threads, which the test runner routes to the
-     MT build via SPINEL_USES_THREADS), but the function must
-     still resolve at link time. */
-  sp_sleep(seconds);
-  SCHED_LOCK();
-  dead = (t->state == SP_TH_DEAD);
-  SCHED_UNLOCK();
-  if (dead) { sp_thread_reraise_if_exc(t); return t; }
+  double deadline = sp_monotonic_now() + seconds;
+  for (;;) {
+    double left = deadline - sp_monotonic_now();
+    if (left <= 0) break;
+    sp_sleep(left < SP_JOIN_POLL_SLICE ? (sp_float)left : (sp_float)SP_JOIN_POLL_SLICE);
+    SCHED_LOCK();
+    dead = (t->state == SP_TH_DEAD);
+    SCHED_UNLOCK();
+    if (dead) { sp_thread_reraise_if_exc(t); return t; }
+  }
   return NULL;
 }
 
