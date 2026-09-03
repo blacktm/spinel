@@ -1114,7 +1114,12 @@ endif
 # -DSP_THREADS and -Werror rejects the mismatch.
 define RUN_ONE_TEST
 @mkdir -p build/test-results
-@tmpdir=$$(mktemp -d /tmp/spinel-test.XXXXXX); \
+@# Raise the descriptor soft limit toward the hard one, best effort. A test
+@# that has to reach a descriptor past FD_SETSIZE (io_select_high_fd, #4314)
+@# cannot get there under a 1024 soft limit, and a shell that refuses the
+@# raise leaves the test to fall back to whatever it can open.
+@ulimit -n 4096 2>/dev/null || true; \
+tmpdir=$$(mktemp -d /tmp/spinel-test.XXXXXX); \
 ast=$$tmpdir/test.ast; \
 ir=$$tmpdir/test.ir; \
 cfile=$(@:.ok=.c); \

@@ -3236,18 +3236,36 @@ static short sp_io_park_events(sp_int kind) {
 sp_File *sp_io_wait_events(sp_File *f, double timeout, sp_int kind) {SP_GC_ROOT(f);
   if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
   int fd = fileno(f->fp);
-  if (fd < 0 || fd >= FD_SETSIZE) sp_raise_cls("IOError", "file descriptor out of range");
+  if (fd < 0) sp_raise_cls("IOError", "closed stream");
 #ifdef SP_THREADS
   if (sp_io_park_events(kind) && timeout != 0.0) {
     extern int sp_sched_wait_io_timeout(int fd, short events, double timeout_s);
     return sp_sched_wait_io_timeout(fd, sp_io_park_events(kind), timeout) ? f : NULL;
   }
 #endif
+  /* Readiness on ONE descriptor is a poll, not a select. select(2) cannot name
+     a descriptor at or past FD_SETSIZE, and the range check that enforced that
+     stood in FRONT of the park above -- which polls and has no such bound --
+     so a wait on fd 1024 raised instead of waiting. A server with two
+     descriptors per connection lost every connection past ~450, silently,
+     because the thread died before it could close the socket (#4314).
+     PRIORITY (kind 2) stays on select: poll's POLLPRI is not the same thing,
+     and reports readiness on macOS where select does not. */
+  if (kind != 2) {
+    struct pollfd pf;
+    pf.fd = fd; pf.revents = 0;
+    pf.events = (short)((kind == 0 || kind == 3 ? POLLIN : 0) |
+                        (kind == 1 || kind == 3 ? POLLOUT : 0));
+    int ms = timeout < 0.0 ? -1 : (int)(timeout * 1000.0 + 0.5);
+    int n;
+    do { n = poll(&pf, 1, ms); } while (n < 0 && errno == EINTR);
+    if (n < 0) sp_raise_cls("IOError", "select failed");
+    return n > 0 ? f : NULL;
+  }
+  if (fd >= FD_SETSIZE) sp_raise_cls("IOError", "file descriptor out of range");
   fd_set rs, ws, es;
   FD_ZERO(&rs); FD_ZERO(&ws); FD_ZERO(&es);
-  if (kind == 0 || kind == 3) FD_SET(fd, &rs);
-  if (kind == 1 || kind == 3) FD_SET(fd, &ws);
-  if (kind == 2) FD_SET(fd, &es);
+  FD_SET(fd, &es);
   struct timeval tv, *tvp;
   sp_io_sel_timeout(timeout, &tv, &tvp);
   int n;
@@ -3276,6 +3294,69 @@ static sp_File *sp_select_io_of(sp_RbVal v) {
 }
 sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, double timeout) {
   sp_PolyArray *src[3] = { rd, wr, er };
+  /* No PRIORITY set: this is a poll, and then no descriptor is out of range.
+     select(2) cannot name one at or past FD_SETSIZE, and a server holding two
+     descriptors per connection crosses that at a few hundred connections
+     (#4314). An error set keeps select below, because poll's POLLPRI is not
+     the same thing -- it reports readiness on macOS where select does not. */
+  if (!er || er->len == 0) {
+    sp_int nrd = rd ? rd->len : 0, nwr = wr ? wr->len : 0;
+    sp_int nfd = nrd + nwr;
+#ifdef SP_THREADS
+    /* One IO and a real timeout still parks instead of polling: a poll here
+       would hold the OS worker for the whole timeout (see sp_io_wait_events). */
+    if (nfd == 1 && timeout != 0.0) {
+      extern int sp_sched_wait_io_timeout(int fd, short events, double timeout_s);
+      int g1 = nrd ? 0 : 1;
+      sp_RbVal io1 = src[g1]->data[0];
+      sp_File *f1 = sp_select_io_of(io1);
+      if (!f1 || !f1->fp) sp_raise_cls("IOError", "closed stream");
+      if (!sp_sched_wait_io_timeout(fileno(f1->fp), g1 == 0 ? POLLIN : POLLOUT, timeout))
+        return sp_box_nil();
+      sp_PolyArray *one1 = sp_PolyArray_new();
+      SP_GC_ROOT(one1);
+      for (int k = 0; k < 3; k++) {
+        sp_PolyArray *part = sp_PolyArray_new();
+        if (k == g1) sp_PolyArray_push(part, io1);
+        sp_PolyArray_push(one1, sp_box_poly_array(part));
+      }
+      return sp_box_poly_array(one1);
+    }
+#endif
+    struct pollfd *pfs = (struct pollfd *)calloc((size_t)(nfd > 0 ? nfd : 1), sizeof(struct pollfd));
+    if (!pfs) sp_raise_cls("NoMemoryError", "failed to allocate poll set");
+    sp_int k = 0;
+    for (int g = 0; g < 2; g++) {
+      sp_int n = src[g] ? src[g]->len : 0;
+      for (sp_int i = 0; i < n; i++) {
+        sp_File *f = sp_select_io_of(src[g]->data[i]);
+        int fd = (f && f->fp) ? fileno(f->fp) : -1;
+        if (fd < 0) { free(pfs); sp_raise_cls("IOError", "closed stream"); }
+        pfs[k].fd = fd;
+        pfs[k].events = (short)(g == 0 ? POLLIN : POLLOUT);
+        pfs[k].revents = 0;
+        k++;
+      }
+    }
+    int ms = timeout < 0.0 ? -1 : (int)(timeout * 1000.0 + 0.5);
+    int pn;
+    do { pn = poll(pfs, (nfds_t)nfd, ms); } while (pn < 0 && errno == EINTR);
+    if (pn < 0) { free(pfs); sp_raise_cls("IOError", "select failed"); }
+    if (pn == 0) { free(pfs); return sp_box_nil(); }
+    sp_PolyArray *out2 = sp_PolyArray_new();
+    SP_GC_ROOT(out2);
+    sp_int base = 0;
+    for (int g = 0; g < 3; g++) {
+      sp_PolyArray *part = sp_PolyArray_new();
+      sp_int n = (g < 2 && src[g]) ? src[g]->len : 0;
+      for (sp_int i = 0; i < n; i++)
+        if (pfs[base + i].revents) sp_PolyArray_push(part, src[g]->data[i]);
+      base += n;
+      sp_PolyArray_push(out2, sp_box_poly_array(part));
+    }
+    free(pfs);
+    return sp_box_poly_array(out2);
+  }
   fd_set sets[3];
   int maxfd = -1;
   for (int g = 0; g < 3; g++) {
