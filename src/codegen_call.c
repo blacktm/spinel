@@ -5525,6 +5525,28 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        unpack1, read an object through a char * (#4071's shape). */
     int is_ppack = (sp_streq(name, "pack") || sp_streq(name, "unpack1")) &&
                    argc == 1 && !has_splat_arg && nt_ref(nt, id, "block") < 0;
+    /* ...and only where the argument could BE a format string, the same guard
+       the join arm above carries: the arm passes the call's own argument temp
+       into sp_poly_pack's const char * slot, so a user object there did not
+       compile -- and this arm exists precisely because a user class owns the
+       name, which is the program that passes one (#4319). Without the arm the
+       builtin case reaches the raise, which is what CRuby answers for a
+       non-String format anyway. */
+    if (is_ppack) {
+      TyKind pat = comp_ntype(c, argv[0]);
+      if (!(pat == TY_STRING || pat == TY_POLY || pat == TY_UNKNOWN)) is_ppack = 0;
+    }
+    /* Both arms answer a String, so they can only be emitted where the result
+       temp can hold one: the call typed from the user method alone (a Crate,
+       say) has no room for the builtin answer, and assigning it there did not
+       compile. Standing down leaves the builtin case at the raise, which is the
+       trade the dig / values_at arms below already make (#4319). */
+    if (is_ppack || is_pjoin) {
+      TyKind pjr = comp_ntype(c, id);
+      if (!(pjr == TY_POLY || pjr == TY_STRING || pjr == TY_UNKNOWN)) {
+        is_ppack = 0; is_pjoin = 0;
+      }
+    }
     int is_cover = sp_streq(name, "cover?") && argc == 1 && !diag_user_defines(c, name);
     int is_gcdlcm = sp_streq(name, "gcdlcm") && argc == 1 && !diag_user_defines(c, name);
     if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge) {
@@ -6209,7 +6231,12 @@ else {
         else {
           buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY:"
                       " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: ");
-          buf_printf(&pb2, "sp_poly_pack(_t%d, _t%d)", tv, atmp[0]);
+          /* the same boxed-argument read as the join arm above: pack's format
+             is a String, and CRuby raises TypeError for anything else */
+          if (atmp_ty[0] == TY_POLY)
+            buf_printf(&pb2, "sp_poly_pack(_t%d, sp_poly_arg_str_chk(_t%d))", tv, atmp[0]);
+          else
+            buf_printf(&pb2, "sp_poly_pack(_t%d, _t%d)", tv, atmp[0]);
           buf_printf(b, "_t%d = ", tr);
           if (ret == TY_POLY) emit_boxed_text(c, TY_STRING, pb2.p ? pb2.p : "", b);
           else buf_puts(b, pb2.p ? pb2.p : "");
@@ -6224,7 +6251,14 @@ else {
                     " case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY: ");
         Buf jb; memset(&jb, 0, sizeof jb);
         buf_printf(&jb, "sp_poly_join(_t%d, ", tv);
-        if (argc >= 1) buf_printf(&jb, "_t%d", atmp[0]);
+        /* a BOXED separator has to be read as a String here: the temp is an
+           sp_RbVal and the slot is a const char *. sp_poly_arg_str_chk names
+           CRuby's TypeError for a value that is not one; nil is the separator
+           CRuby does accept, and it means "" (#4319). */
+        if (argc >= 1 && atmp_ty[0] == TY_POLY)
+          buf_printf(&jb, "(_t%d.tag == SP_TAG_NIL ? sp_str_empty : sp_poly_arg_str_chk(_t%d))",
+                     atmp[0], atmp[0]);
+        else if (argc >= 1) buf_printf(&jb, "_t%d", atmp[0]);
         else buf_puts(&jb, "sp_str_empty");
         buf_puts(&jb, ")");
         buf_printf(b, "_t%d = ", tr);
