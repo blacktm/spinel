@@ -2012,10 +2012,19 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
      "nil can't be coerced" does (#3991). */
   TyKind acct = bn > 0 ? comp_ntype(c, bb[bn - 1]) : TY_POLY;
   if (bn > 0 && acct == TY_NIL) acct = TY_POLY;
-  if (acct != TY_INT && acct != TY_FLOAT && acct != TY_STRING && acct != TY_POLY) return 0;
   int args = nt_ref(nt, id, "arguments");
   int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
   if (argc > 1) return 0;
+  /* A String accumulator needs a String seed -- without one the sum starts at
+     the Integer 0 and CRuby raises "String can't be coerced into Integer". */
+  if (acct == TY_STRING && !(argc == 1 && argv && comp_ntype(c, argv[0]) == TY_STRING))
+    acct = TY_POLY;
+  /* Every other block value accumulates BOXED rather than bailing out. The
+     answer CRuby gives for `[1, 2].sum { true }` is a TypeError from `0 + true`,
+     and only sp_poly_add can raise it: declining the fold left the call to the
+     generic dispatch, which answered NoMethodError instead (#4327). TY_NIL was
+     already routed this way for exactly that reason. */
+  if (acct != TY_INT && acct != TY_FLOAT && acct != TY_STRING) acct = TY_POLY;
   /* A poly block value (e.g. a product of values read out of poly containers,
      as in a range sum redispatched over an int array) accumulates into a boxed
      sp_RbVal via sp_poly_add, like the poly-receiver sum path. An empty range
@@ -2077,9 +2086,6 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
      yields integers (matches analyze and CRuby): accumulate in floating point
      rather than truncating the init into an integer accumulator. */
   if (argc == 1 && argv && comp_ntype(c, argv[0]) == TY_FLOAT) acct = TY_FLOAT;
-  /* a String accumulator requires a String initial value (CRuby raises on
-     sum() over strings without one; that shape keeps the loud reject) */
-  if (acct == TY_STRING && !(argc == 1 && argv && comp_ntype(c, argv[0]) == TY_STRING)) return 0;
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp;
   /* Float accumulation uses Kahan-Babuska-Neumaier compensation (matches
      CRuby's Array#sum), so it needs a running compensation temp plus

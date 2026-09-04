@@ -862,6 +862,14 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         sp_streq(name, "count") || sp_streq(name, "index") || sp_streq(name, "find_index")) { *out = TY_INT; return 1; }
     if (sp_streq(name, "sum")) {
       int blk = nt_ref(nt, id, "block");
+      /* Strings summed from anything but a String seed only ever raise, and an
+         EMPTY receiver answers the seed itself -- so the call is that union,
+         boxed. Typing it from the seed put an Integer 0 in a String slot, and
+         the codegen arm below emitted a call to an sp_StrArray_sum that does
+         not exist (#4327). */
+      if (rt == TY_STR_ARRAY && blk < 0 &&
+          !(argc == 1 && infer_type(c, argv[0]) == TY_STRING))
+        { *out = TY_POLY; return 1; }
       /* a float initial value promotes the whole sum to Float (e.g.
          ints.sum(0.0) or ints.sum(0.0) { |x| x }), regardless of the block. */
       if (argc == 1 && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_FLOAT; return 1; }
@@ -883,6 +891,12 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
            never nil. Typing it nil let the call constant-fold away, so
            `[].sum {}` printed "nil" instead of 0 (#4006). */
         if (st == TY_NIL || st == TY_VOID) st = TY_POLY;
+        /* A block value that has no `+` at all -- true, a Symbol -- can only
+           raise: CRuby answers TypeError from `0 + true`. The sum still folds,
+           boxed, so that the raise happens; typing the CALL as the block's kind
+           put the sp_RbVal accumulator in a Boolean slot and the C compiler
+           refused it (#4327). */
+        if (st == TY_BOOL || st == TY_SYMBOL) st = TY_POLY;
         { *out = st; return 1; }
       }
       { *out = ty_array_elem(rt); return 1; }

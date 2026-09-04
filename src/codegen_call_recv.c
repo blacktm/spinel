@@ -3584,6 +3584,23 @@ else {
         buf_printf(b, "(sp_%sArray_length(", k); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
         return 1;
       }
+      /* A blockless sum over Strings adds each element to an Integer seed,
+         which CRuby rejects with "String can't be coerced into Integer". There
+         is no sp_StrArray_sum, so the generic arms emitted a call to a function
+         that does not exist and the C compiler stopped on its implicit
+         declaration (#4327). An EMPTY receiver adds nothing and answers the
+         seed, which is why the test is at run time. */
+      if (sp_streq(name, "sum") && rt == TY_STR_ARRAY && argc <= 1 &&
+          nt_ref(nt, id, "block") < 0 &&
+          !(argc == 1 && comp_ntype(c, argv[0]) == TY_STRING)) {
+        int ts = ++g_tmp;
+        buf_printf(b, "({ sp_StrArray *_t%d = ", ts); emit_expr(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d); if (sp_StrArray_length(_t%d) != 0)"
+                      " sp_raise_cls(\"TypeError\", \"String can't be coerced into Integer\"); ", ts, ts);
+        if (argc == 1) emit_boxed(c, argv[0], b); else buf_puts(b, "sp_box_int(0)");
+        buf_puts(b, "; })");
+        return 1;
+      }
       if (sp_streq(name, "sum") && argc == 0 && nt_ref(nt, id, "block") < 0) {
         buf_printf(b, "sp_%sArray_sum(", k); emit_expr(c, recv, b); buf_puts(b, ", 0)");
         return 1;
