@@ -3537,6 +3537,36 @@ static int fold_body_has_next(Compiler *c, int node) {
   return 0;
 }
 
+/* A fold that reads a block body as "leading statements, then the tail as the
+   answer" drops a `next <value>`: the next leaves the block WITH that value and
+   never reaches the tail. Read that way it became a bare `continue` and the
+   fold tested the tail instead, so `count { next true if i == 1; false }`
+   answered 0 where CRuby answers 1, and find / find_index / take_while lost
+   their element the same way (#4324; #4301 is this bug in the any? / all?
+   folds).
+
+   When the body carries such a next, emit the whole body here and hand back
+   the C truthiness test for its answer -- emit_block_value_into wraps it in
+   do{}while(0), so an interior next assigns a slot and falls through to the
+   test rather than skipping it. Returns 0 for a body with no next of its own,
+   leaving the caller's own emission untouched; a nested block owns its next,
+   which is where the walk stops. */
+int emit_block_cond_next(Compiler *c, int block, int indent, Buf *out) {
+  int body = block >= 0 ? nt_ref(c->nt, block, "body") : -1;
+  if (body < 0 || !fold_body_has_next(c, body)) return 0;
+  int t = ++g_tmp;
+  emit_indent(g_pre, indent);
+  buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil();\n", t);
+  emit_indent(g_pre, indent);
+  buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", t);
+  char dest[24]; snprintf(dest, sizeof dest, "_t%d", t);
+  int sv = g_indent; g_indent = indent;
+  emit_block_value_into(c, block, dest, 1, indent);
+  g_indent = sv;
+  buf_printf(out, "sp_poly_truthy(_t%d)", t);
+  return 1;
+}
+
 static int ewi_chain(Compiler *c, int id, int *out_arr, int *out_off) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
