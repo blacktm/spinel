@@ -6358,6 +6358,25 @@ static sp_PolyArray *sp_poly_zip_none(sp_RbVal a) {
   }
   return r;
 }
+/* `f[a, b]` where f is a Proc: Proc#[] IS #call, and its arguments are whatever
+   the proc takes. Read as the two-integer slice it looks like, an Array operand
+   raised TypeError before any dispatch could happen (#4333). Only a pair of
+   Integers can be a slice, so the emitter sends anything else here; everything
+   that is not a callable delegates to sp_poly_slice, which keeps the bound
+   Method arm it already had. */
+static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args);
+static sp_RbVal sp_poly_slice_or_call(sp_RbVal v, sp_RbVal a, sp_RbVal b) {
+  if (v.tag == SP_TAG_OBJ && v.v.p &&
+      (v.cls_id == SP_BUILTIN_PROC || v.cls_id == SP_BUILTIN_CURRY)) {
+    _sp_proc_poly_args[0] = a;
+    _sp_proc_poly_args[1] = b;
+    sp_int slots[16];
+    slots[0] = sp_poly_slot_i(a);
+    slots[1] = sp_poly_slot_i(b);
+    return sp_poly_callable_call(v, 2, slots);
+  }
+  return sp_poly_slice(v, sp_poly_arg_int_chk(a), sp_poly_arg_int_chk(b));
+}
 /* `a.zip(*xs)` and `a.product(*xs)`: the splat spreads across the ARGUMENT
    LIST, one operand per element, and its length is only known at run time --
    which is why the emitters, whose arms read a splat as a single operand,

@@ -16206,6 +16206,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          just left in the sp_int slot (#2883). A poly arg that is itself a
          side-effecting call is also evaluated exactly once this way (#2874). */
       int *aptmp = (argc && !mabi_poly) ? calloc(argc, sizeof(int)) : NULL;
+      Buf pubs; memset(&pubs, 0, sizeof pubs);
       if (aptmp) {
         g_needs_proc_poly_argslot = 1;
         for (int k = 0; k < argc; k++) {
@@ -16225,11 +16226,19 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, " _t%d = %s;\n", aptmp[k], valb.p ? valb.p : "0");
           if (at == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", aptmp[k]); }
           else if (proc_slot_is_ptr(at) || at == TY_PROC) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", aptmp[k]); }
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "_sp_proc_poly_args[%d] = ", k);
+          /* The publish belongs to THIS call, not to the statement above it:
+             the side channel is one global array, and an argument that is
+             itself a proc call writes it -- and its callee's prologue then
+             clears it -- between a prelude publish and the call that reads it.
+             `step.call(acc, fn.call(input))` lost acc that way, arriving nil
+             (#4333). Collected here and emitted as a comma sequence
+             immediately in front of the call, which is the shape
+             emit_proc_call_args already uses for the same reason (#4059).
+             The temps stay in the prelude: they are what the roots are on. */
+          buf_printf(&pubs, "_sp_proc_poly_args[%d] = ", k);
           { char tn[24]; snprintf(tn, sizeof tn, "_t%d", aptmp[k]);
-            if (storable) emit_boxed_text(c, at, tn, g_pre); else buf_puts(g_pre, "sp_box_nil()"); }
-          buf_puts(g_pre, ";\n");
+            if (storable) emit_boxed_text(c, at, tn, &pubs); else buf_puts(&pubs, "sp_box_nil()"); }
+          buf_puts(&pubs, ", ");
           free(inner.p); free(valb.p);
         }
       }
@@ -16251,6 +16260,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          is created with a NULL self. Branch at run time so a top-level Method
          read out of a container is not invoked with a spurious leading self
          arg -- which would shift every real argument by one (#3231). */
+      if (pubs.p) { buf_puts(b, "("); buf_puts(b, pubs.p); }
       buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->self != NULL ? ", t, t);
       /* self-ful arm: fn((void *)self, args...) */
       buf_printf(b, "%s((%s (*)(void *", mabi_poly ? "" : "sp_box_int(", aty);
@@ -16286,6 +16296,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (argc == 0) buf_puts(b, "0");  /* C99: no empty initializer list */
       buf_puts(b, "}))");
+      if (pubs.p) buf_puts(b, ")");
+      free(pubs.p);
       #undef EMIT_POLY_CALL_SLOT
       free(aptmp);
       return;

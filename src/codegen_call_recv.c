@@ -13081,6 +13081,17 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     /* The runtime dispatches on the receiver's tag: a string/array does a
        two-arg slice, a bound Method (optcarrot's poke handlers) is called with
        both int args. Both operands are raw integers. */
+    /* ...but only a pair of statically Integer operands CAN be a slice. Proc#[]
+       is #call, and its arguments are whatever the proc takes -- an Array here,
+       which the two-integer reading rejected before any dispatch could happen
+       (#4333). Anything else goes through the boxed dispatch; the int path is
+       the hot one (optcarrot's poke tables) and keeps its raw operands. */
+    if (!(comp_ntype(c, argv[0]) == TY_INT && comp_ntype(c, argv[1]) == TY_INT)) {
+      buf_puts(b, "sp_poly_slice_or_call("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_boxed(c, argv[0], b);
+      buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+      return 1;
+    }
     buf_puts(b, "sp_poly_slice("); emit_expr(c, recv, b); buf_puts(b, ", ");
     emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
     return 1;
