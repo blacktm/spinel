@@ -13897,6 +13897,32 @@ void analyze_program(Compiler *c) {
         if (vnode < 0) continue;
         if (infer_type(c, vnode) == TY_POLY_ARRAY) { lv->type = TY_POLY_ARRAY; changed = 1; }
       }
+      /* (4b) ...and a local written from a `<proc>.call(...)`, whose slot was
+         typed from proc_ret as it read BEFORE the re-derivation in (2) above.
+         A return that widened there left the slot behind: `r = g.call(e)` kept
+         its sp_IntArray * while the call answers the boxed poly now, and the C
+         compiler refused the assignment (#4330). Unify rather than assign, so
+         this only ever widens -- the discipline the whole block keeps. */
+      for (int id = 0; id < nt->count; id++) {
+        if (nt_kind(nt, id) != NK_LocalVariableWriteNode) continue;
+        int vnode = nt_ref(nt, id, "value");
+        if (vnode < 0 || nt_kind(nt, vnode) != NK_CallNode) continue;
+        const char *cn = nt_str(nt, vnode, "name");
+        if (!cn || !(sp_streq(cn, "call") || sp_streq(cn, "()") || sp_streq(cn, "[]"))) continue;
+        int crecv = nt_ref(nt, vnode, "receiver");
+        if (crecv < 0 || infer_type(c, crecv) != TY_PROC) continue;
+        const char *nm = nt_str(nt, id, "name");
+        LocalVar *lv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+        if (!lv || lv->type == TY_UNKNOWN) continue;
+        /* the CALL NODE's own type, not proc_call_ret: that answers poly for
+           an unknowable return (a `&blk` param's), which would widen a slot
+           the call-site block types concretely. The node is what the emitter
+           produces, so it is what the slot has to hold. */
+        TyKind pr = infer_type(c, vnode);
+        if (pr == TY_UNKNOWN || pr == lv->type) continue;
+        TyKind u = ty_unify(lv->type, pr);
+        if (u != lv->type) { lv->type = u; changed = 1; }
+      }
       /* (5) a constant assigned from a value that widened to poly (a method
          return widened in step 3, an int constant assigned an arithmetic
          result, ...) must follow: a `COUNT = obj.m` whose method now returns
