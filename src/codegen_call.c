@@ -16190,7 +16190,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
           if (storable) emit_ctype(c, at, g_pre); else buf_puts(g_pre, "sp_int");
           buf_printf(g_pre, " _t%d = %s;\n", aptmp[k], valb.p ? valb.p : "0");
           if (at == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", aptmp[k]); }
-          else if (proc_slot_is_ptr(at)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", aptmp[k]); }
+          else if (proc_slot_is_ptr(at) || at == TY_PROC) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", aptmp[k]); }
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "_sp_proc_poly_args[%d] = ", k);
           { char tn[24]; snprintf(tn, sizeof tn, "_t%d", aptmp[k]);
@@ -16203,7 +16203,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         TyKind _at = comp_ntype(c, argv[k]); \
         if (aptmp) { \
           if (_at == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", aptmp[k]); \
-          else if (proc_slot_is_ptr(_at)) buf_printf(b, "(sp_int)(uintptr_t)_t%d", aptmp[k]); \
+          else if (proc_slot_is_ptr(_at) || _at == TY_PROC) buf_printf(b, "(sp_int)(uintptr_t)_t%d", aptmp[k]); \
           else if (_at == TY_FLOAT) buf_puts(b, "0"); \
           else buf_printf(b, "_t%d", aptmp[k]); \
         } \
@@ -17432,7 +17432,35 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        (see emit_proc_literal); evaluate the call for effect, then unbox the slot
        to the call's inferred type. */
     buf_puts(b, "((void)sp_proc_call(");
-    emit_expr(c, recv, b);
+    /* The receiver and the argument list are two operands of ONE C call, and C
+       does not order them. A receiver that is itself a call publishes into --
+       and its callee's prologue then clears -- the same _sp_proc_poly_args
+       slots this argument list writes. `o.call(f).call(x)` lost x that way:
+       the argument was published, the receiver's own call ran afterwards and
+       wiped the slot, and the inner lambda read nil (#4328). Evaluating a
+       non-trivial receiver into a temp first is what orders it before the
+       publish -- the same reason the arguments themselves are hoisted in
+       emit_proc_call_args. */
+    {
+      NodeKind rk = nt_kind(nt, recv);
+      if (rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode ||
+          rk == NK_ConstantReadNode || rk == NK_SelfNode)
+        emit_expr(c, recv, b);
+      else {
+        TyKind rct = comp_ntype(c, recv);
+        Buf rb = expr_buf(c, recv);
+        int tr = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        if (c_type_name(rct) || ty_is_object(rct)) emit_ctype(c, rct, g_pre);
+        else buf_puts(g_pre, "sp_RbVal");
+        buf_printf(g_pre, " _t%d = %s;\n", tr, rb.p ? rb.p : "");
+        free(rb.p);
+        emit_indent(g_pre, g_indent);
+        if (rct == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tr);
+        else buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
+        buf_printf(b, "_t%d", tr);
+      }
+    }
     buf_puts(b, ", ");
     emit_proc_call_args(c, argc, argv, b, 1);  /* emits args + the closing `)` */
     buf_puts(b, ", ");
