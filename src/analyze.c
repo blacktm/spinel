@@ -5174,6 +5174,37 @@ int desugar_enum_method_recv(Compiler *c) {
         }
       }
     }
+    /* `recv.<m>(args).each { blk }` IS `recv.<m>(args) { blk }`: Enumerator#each
+       runs the method the Enumerator came from with that block, and answers
+       what THAT method answers -- the receiver for each_with_index, the memo
+       for each_with_object, the mapped array for map. Read instead as an
+       iteration over the values the Enumerator yields, it answered those values
+       (#4332), and over an each_with_index Enumerator it did not compile at all
+       (#4331). `lazy` is left alone: its block form is not its each form. */
+    if (nm && sp_streq(nm, "each") && nt_ref(nt, id, "block") >= 0 &&
+        /* ...but never a synthesized one. `Enumerator.product(a, b) { blk }` is
+           lowered to `Enumerator.product(a, b).each { blk }` above (#3589), and
+           rewriting that back left the two rules undoing each other until the
+           fixpoint gave up, with the block never run. The nil_result marker is
+           what that lowering leaves behind. */
+        !nt_int(nt, id, "nil_result", 0)) {
+      int ea = nt_ref(nt, id, "arguments"); int eac = 0;
+      if (ea >= 0) nt_arr(nt, ea, "arguments", &eac);
+      int er = nt_ref(nt, id, "receiver");
+      if (eac == 0 && er >= 0 && nt_kind(nt, er) == NK_CallNode &&
+          nt_ref(nt, er, "block") < 0 && nt_ref(nt, er, "receiver") >= 0 &&
+          infer_type(c, er) == TY_ENUMERATOR) {
+        const char *ern = nt_str(nt, er, "name");
+        if (ern && !sp_streq(ern, "lazy")) {
+          nt_node_set_str(nt, id, "name", ern);
+          nt_node_set_ref(nt, id, "receiver", nt_ref(nt, er, "receiver"));
+          int ira = nt_ref(nt, er, "arguments");
+          if (ira >= 0) nt_node_set_ref(nt, id, "arguments", ira);
+          changed = 1;
+          continue;
+        }
+      }
+    }
     /* `arr.each_with_index.reduce { }` / `.inject { }`: the blockless inner
        call answers an Enumerator, and the fold read its elements as scalars --
        a seedless fold assigned a [value, index] pair into an sp_int and the C

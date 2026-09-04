@@ -19,7 +19,16 @@ static int call_is_chain_receiver_with_block(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_CallNode, n) {
     if (nt_ref(nt, n, "receiver") != id) continue;
-    return nt_ref(nt, n, "block") >= 0;
+    if (nt_ref(nt, n, "block") < 0) return 0;
+    /* `<blockless>.each { blk }` is the one chained consumer that does not take
+       the block for ITSELF: Enumerator#each runs the method the Enumerator came
+       from, which the desugar rewrites back to `<blockless> { blk }` -- and it
+       recognises that shape by this call being typed an Enumerator. Left in the
+       guard, `arr.map.each { }` typed neither and answered NoMethodError at run
+       time (#4331). */
+    { const char *cn = nt_str(nt, n, "name");
+      if (cn && sp_streq(cn, "each")) return 0; }
+    return 1;
   }
   return 0;
 }
