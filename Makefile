@@ -765,6 +765,12 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (#4309: a class reopened with another superclass compiled)"; ok=0; \
 	else grep -q "superclass mismatch for class Thing" "$$tmp/s.out" || \
 	  { echo "reject-test: FAIL (#4309: rejected without saying why)"; sed -n 1,5p "$$tmp/s.out"; ok=0; }; fi; \
+	for t in const_value_not_a_class const_value_not_a_module; do \
+	  if $(SPINEL) "test/reject/$$t.rb" -c --no-line-map -o "$$tmp/$$t.c" >"$$tmp/$$t.out" 2>&1; then \
+	    echo "reject-test: FAIL (#4318: $$t compiled)"; ok=0; \
+	  else grep -Eq "is not a (class|module)" "$$tmp/$$t.out" || \
+	    { echo "reject-test: FAIL (#4318: $$t rejected without saying why)"; sed -n 1,3p "$$tmp/$$t.out"; ok=0; }; fi; \
+	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 

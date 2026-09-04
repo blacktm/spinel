@@ -3223,6 +3223,24 @@ int infer_multiwrite_const_types(Compiler *c) {
    Only an EXPLICIT superclass on both sides counts: a bare reopen (`class Foo`
    with no `<`) is how a class is normally added to, and a computed one
    (`class K < Struct.new(:a)`) has no name to compare. */
+/* Is this expression a class or a module -- or something this cannot judge?
+   Answers 1 for both of those, and 0 ONLY when the value is certainly neither.
+   The asymmetry is deliberate: this drives a refusal, so an expression whose
+   kind is not obvious must not be refused. A literal is the certain case. */
+static int const_value_is_class_like(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  switch (nt_kind(nt, v)) {
+    case NK_IntegerNode: case NK_FloatNode: case NK_StringNode:
+    case NK_SymbolNode: case NK_ArrayNode: case NK_HashNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_RangeNode: case NK_RegularExpressionNode:
+    case NK_InterpolatedStringNode:
+      return 0;
+    default:
+      return 1;   /* Struct.new, Data.define, Class.new, another constant, a call */
+  }
+}
+
 static void check_class_redeclarations(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count;
@@ -3232,6 +3250,40 @@ static void check_class_redeclarations(Compiler *c) {
     int cp = nt_ref(nt, id, "constant_path");
     const char *nm = cp >= 0 ? nt_str(nt, cp, "name") : nt_str(nt, id, "name");
     if (!nm || !*nm) continue;
+    /* The same name also ASSIGNED a value. CRuby refuses to load the file when
+       the value is not the kind the declaration says -- `A = 1` then `class A`
+       is "A is not a class" -- and warns, then lets the value win, in the other
+       order. spinel said nothing either way, and worse, resolved the name TWO
+       ways in one file: `p T` read the constant while `T.inspect` and
+       `T.only_class` read the class (#4318).
+       Only a disagreement is refused. `Foo = Struct.new(:a)` followed by
+       `class Foo` is an ordinary idiom -- the value IS a class and the
+       declaration reopens it -- and stays legal, which is why this asks what
+       the value is rather than whether one exists. */
+    /* Same NAME is not the same constant: `module A; module B; C = 7; end; end`
+       and `module M; class C; end; end` share a leaf and nothing else. Compare
+       the enclosing class, and stand aside entirely for a qualified
+       declaration (`class M::C`), whose namespace this leaf match cannot
+       judge. Both shapes are in the suite, and both tripped the first cut. */
+    if (cp >= 0 && nt_kind(nt, cp) == NK_ConstantPathNode) continue;
+    { int dcid = (c->node_cbody && id < c->node_cap) ? c->node_cbody[id] : -1;
+    for (int cw = 0; cw < n; cw++) {
+      if (nt_kind(nt, cw) != NK_ConstantWriteNode) continue;
+      const char *wn = nt_str(nt, cw, "name");
+      if (!wn || !sp_streq(wn, nm)) continue;
+      if (((c->node_cbody && cw < c->node_cap) ? c->node_cbody[cw] : -1) != dcid) continue;
+      int v = nt_ref(nt, cw, "value");
+      if (v < 0 || const_value_is_class_like(c, v)) continue;   /* a class/module, or unknown */
+      char msg[512];
+      snprintf(msg, sizeof msg,
+               "%s is not a %s: it is assigned a value on line %d, and declared "
+               "with %s on line %d",
+               nm, k == NK_ModuleNode ? "module" : "class",
+               (int)nt_int(nt, cw, "node_line", 0),
+               k == NK_ModuleNode ? "module" : "class",
+               (int)nt_int(nt, id, "node_line", 0));
+      unsupported_feature(c, cw, msg);
+    } }
     /* the FIRST declaration of this name; nothing to say if this is it */
     int first = -1;
     for (int j = 0; j < id && first < 0; j++) {
