@@ -120,6 +120,16 @@ static pthread_t      g_sysmon;                                  /* monitor: wak
 static int            g_sysmon_started = 0;
 static int            g_sysmon_idle = 0; /* monitor is parked on g_sysmon_cv (signal it to start ticking) */
 static int            g_sysmon_pipe[2] = { -1, -1 };  /* self-pipe: wake the monitor out of poll() */
+/* What the monitor actually did, for SPINEL_SCHED_STATS=1. The cost of a wake
+   is O(parked) three times over (rebuild, poll, unlink), so the number that
+   sizes a deployment is iterations x set size -- and neither is visible from
+   outside the process. Counted unconditionally: they are four increments on
+   the monitor's own thread, under the lock it already holds. (#4317) */
+static unsigned long long g_mon_iters = 0;    /* monitor loop turns */
+static unsigned long long g_mon_polls = 0;    /* poll(2) calls it made */
+static unsigned long long g_mon_pollfds = 0;  /* descriptors handed to those polls */
+static unsigned long long g_mon_regs = 0;     /* I/O parks registered */
+static unsigned long long g_mon_readied = 0;  /* waiters the poll found ready */
 /* Wake the monitor whether it idles on the condvar or blocks in poll(). PRE: lock held. */
 static void sp_sysmon_wake(void) {
   if (g_sysmon_idle) pthread_cond_signal(&g_sysmon_cv);
@@ -1075,6 +1085,7 @@ static void *sp_sysmon_main(void *arg) {
        the monitor is not a GC participant (it holds no roots) but it must not
        move threads between lists concurrently with the collector. */
     if (g_stw_active) { pthread_cond_wait(&g_stw_release, &g_sched_lock); continue; }
+    g_mon_iters++;
     double now = sp_monotonic_now();
     double nearest = 0.0;
     for (sp_thread **pp = &g_sleepers; *pp; ) {
@@ -1166,12 +1177,14 @@ static void *sp_sysmon_main(void *arg) {
       SCHED_UNLOCK();
       int pr = poll(g_pfds, (nfds_t)npf, tmo);
       SCHED_LOCK();
+      g_mon_polls++; g_mon_pollfds += (unsigned long long)npf;
       if (g_pfds[0].revents & POLLIN) {   /* drain the wake pipe */
         char buf[64]; while (read(g_sysmon_pipe[0], buf, sizeof buf) > 0) {}
       }
       if (pr > 0) {
         for (int i = 1; i < npf; i++) {
           if (!g_pfds[i].revents) continue;
+          g_mon_readied++;
           sp_thread *t = g_pths[i];
           if (t->wait_head != &g_io_waiters) continue;   /* unparked meanwhile (e.g. #kill) */
           for (sp_thread **pp = &g_io_waiters; *pp; pp = &(*pp)->wait_next)
@@ -1263,6 +1276,7 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   self->off_cpu = 0;
   self->wake_pending = 0;
   self->wait_next = g_io_waiters; self->wait_head = &g_io_waiters; g_io_waiters = self;
+  g_mon_regs++;
   sp_sysmon_wake();   /* let the monitor rebuild its poll set */
   if (self == &g_main_thread) {
     sp_sched_pump(NULL, 1);   /* main waits (and pumps at N=1) until the monitor wakes it */
@@ -1411,6 +1425,23 @@ static void sp_sched_maybe_grow(void) {
 }
 #endif
 
+/* SPINEL_SCHED_STATS=1: what the monitor did, on the way out. A wake costs
+   O(parked) three times over, so what sizes a deployment is how OFTEN the
+   monitor turned and how BIG its poll set was each time -- and neither is
+   visible from outside the process, which is what left a 6x gap between a
+   standalone and a real server unexplained (#4317). */
+static void sp_sched_report_stats(void) {
+#ifdef SP_THREADS
+  const char *e = getenv("SPINEL_SCHED_STATS");
+  if (!e || !*e || *e == '0') return;
+  double avg = g_mon_polls ? (double)g_mon_pollfds / (double)g_mon_polls : 0.0;
+  fprintf(stderr,
+          "[sched] monitor: %llu turns, %llu polls, %.1f fds/poll avg, "
+          "%llu fds total; %llu io parks registered, %llu waiters readied\n",
+          g_mon_iters, g_mon_polls, avg, g_mon_pollfds, g_mon_regs, g_mon_readied);
+#endif
+}
+
 void sp_sched_drain(void) {
   /* main() is finishing: run remaining runnable threads so fire-and-forget side
      effects happen, then shut the helper workers down. Only the main thread
@@ -1428,6 +1459,7 @@ void sp_sched_drain(void) {
   SCHED_UNLOCK();
   for (int i = 1; i < sp_active_workers; i++) pthread_join(g_worker_threads[i], NULL);
   if (sysmon_running) pthread_join(g_sysmon, NULL);
+  sp_sched_report_stats();
   return;
 #endif
   SCHED_UNLOCK();
