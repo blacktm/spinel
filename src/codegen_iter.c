@@ -3330,6 +3330,19 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
           goto each_body;
         }
       }
+      /* Poly-typed params over poly elements auto-splat, which is what `each`
+         already does through its own lowering: without it
+         `each_with_index.to_a.reverse_each { |x, i| }` bound the whole
+         [value, index] pair to x and left i nil (#4326). The helper writes
+         through g_pre, so point it at this statement buffer. */
+      if (np >= 2 && sp_streq(k, "Poly")) {
+        char es_as[600];
+        snprintf(es_as, sizeof es_as, "sp_%sArray_get(%s, _t%d)", k, rb.p ? rb.p : "NULL", t);
+        Buf *sv_pre = g_pre; g_pre = b;
+        int did = emit_iter_autosplat(c, block, rt, es_as, indent + 1);
+        g_pre = sv_pre;
+        if (did) goto each_body;
+      }
       emit_indent(b, indent + 1);
       if (box_to_poly) {
         if (et == TY_INT) buf_printf(b, "lv_%s = sp_box_int(sp_%sArray_get(", p0, k);

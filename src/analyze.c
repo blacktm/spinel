@@ -5150,11 +5150,22 @@ int desugar_enum_method_recv(Compiler *c) {
         const char *rrn = nt_str(nt, rr, "name");
         int rra = nt_ref(nt, rr, "arguments"); int rrac = 0;
         if (rra >= 0) nt_arr(nt, rra, "arguments", &rrac);
+        /* `each` belongs here with the index enumerators: it reaches the
+           array machinery on its own, but then answers the array it walked
+           rather than the Enumerator, and the marked hop below is what carries
+           the receiver through (#4325). */
         if (rrn && rrac == 0 &&
-            (sp_streq(rrn, "each_index") || sp_streq(rrn, "each_with_index"))) {
+            (sp_streq(rrn, "each_index") || sp_streq(rrn, "each_with_index") ||
+             sp_streq(rrn, "each") || sp_streq(rrn, "each_entry"))) {
           int toa2 = nt_new_node(nt, "CallNode");
           nt_node_set_str(nt, toa2, "name", "to_a");
           nt_node_set_ref(nt, toa2, "receiver", rr);
+          /* The block form of reverse_each answers the RECEIVER, and after this
+             hop that is the interposed array rather than the Enumerator the
+             program wrote (#4325). `enum_recv` is the marker the value emitter
+             already reads for exactly this: it yields the marked hop's own
+             receiver instead of the hop. */
+          nt_node_set_str(nt, toa2, "enum_recv", "1");
           nt_node_set_ref(nt, id, "receiver", toa2);
           comp_grow_node_arrays(c);
           c->nscope[toa2] = c->nscope[id];

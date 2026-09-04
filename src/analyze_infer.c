@@ -1230,7 +1230,11 @@ static TyKind infer_call_inner(Compiler *c, int id) {
           was handed a hash where an array was declared (#3895) */
        (argc == 0 && (sp_streq(name, "each_entry") ||
                       /* each_entry is renamed to each before this point */
-                      sp_streq(name, "each")))) &&
+                      sp_streq(name, "each") ||
+                      /* reverse_each over an Enumerator reaches the array
+                         machinery through the same marked hop, and answers the
+                         Enumerator, not the array it walked (#4325) */
+                      sp_streq(name, "reverse_each")))) &&
       nt_kind(nt, recv) == NK_CallNode && nt_str(nt, recv, "enum_recv")) {
     int orecv = nt_ref(nt, recv, "receiver");
     if (orecv >= 0) return infer_type(c, orecv);
