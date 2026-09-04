@@ -5417,6 +5417,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        arm or the append is silently dropped. sp_poly_shl handles every array
        kind; the user arms above cover the object case. */
     int is_push = (sp_streq(name, "push") || sp_streq(name, "<<") || sp_streq(name, "append")) && argc >= 1;
+    /* unshift/prepend are the same arm at the other end: without one they fell
+       to the switch's NoMethodError default on a genuine Array (#4320). */
+    int is_unshift = (sp_streq(name, "unshift") || sp_streq(name, "prepend")) && argc >= 1;
     /* delete(chars) with a string arg: the poly value may be a string even
        when a user class also defines `delete` (the bundled Set does), so the
        switch needs a TAG_STR pre-arm routing to String#delete (doom's
@@ -5524,7 +5527,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                    argc == 1 && !has_splat_arg && nt_ref(nt, id, "block") < 0;
     int is_cover = sp_streq(name, "cover?") && argc == 1 && !diag_user_defines(c, name);
     int is_gcdlcm = sp_streq(name, "gcdlcm") && argc == 1 && !diag_user_defines(c, name);
-    if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge) {
+    if (ncand > 0 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
       /* `x = v` through a writer: the value is v as written, so the arms call
@@ -6166,6 +6169,22 @@ else {
           else                buf_printf(b, "_t%d = sp_poly_to_i(_t%d); ", tr, wrv);
           buf_puts(b, "break; }");
         }
+      }
+      if (is_unshift) {
+        /* sp_poly_insert is the kind dispatch for a positional splice, so
+           `unshift(a, b)` is a insert at 0 and b insert at 1 -- CRuby's order.
+           Answers the receiver, like push. */
+        buf_puts(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_FLT_ARRAY: case SP_BUILTIN_POLY_ARRAY:");
+        for (int a = 0; a < argc; a++) {
+          char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
+          Buf ab; memset(&ab, 0, sizeof ab);
+          if (atmp_ty[a] == TY_POLY) buf_puts(&ab, tn);
+          else emit_boxed_text(c, atmp_ty[a], tn, &ab);
+          buf_printf(b, " sp_poly_insert(_t%d, %d, %s);", tv, a, ab.p ? ab.p : "sp_box_nil()");
+          free(ab.p);
+        }
+        if (ret == TY_POLY) buf_printf(b, " _t%d = _t%d;", tr, tv);
+        buf_puts(b, " break;");
       }
       if (is_push) {
         /* The value is a builtin array: append each (boxed) arg via sp_poly_shl,

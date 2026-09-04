@@ -2872,6 +2872,19 @@ else {
     if (sp_streq(name, "key?") || sp_streq(name, "equal?")) return TY_BOOL;
   }
 
+  /* Array#push / #append / #unshift / #prepend answer the RECEIVER, and on a
+     boxed receiver that is the poly value itself. Leaving the call untyped made
+     the poly dispatch declare an sp_int result temp whose push arm (which only
+     assigns for a poly result) never wrote it, so the answer was the temp's
+     zero seed: `->(acc) { acc.push(1) }` answered nil (#4320). Poly is also the
+     right answer when a user class owns the name -- it is the union of that
+     return and the builtin one, which is what every other name on this surface
+     already widens to. */
+  if (recv >= 0 && rt == TY_POLY && argc >= 1 &&
+      (sp_streq(name, "push") || sp_streq(name, "append") ||
+       sp_streq(name, "unshift") || sp_streq(name, "prepend")))
+    return TY_POLY;
+
   /* Array#pop(n) / #shift(n) on a boxed array answer an Array of the removed
      elements (#3613) */
   if (recv >= 0 && rt == TY_POLY && argc == 1 &&
