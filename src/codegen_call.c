@@ -6126,17 +6126,17 @@ else {
           int e7 = kwh_lookup(nt, kwh, "exception");
           no_exc7 = e7 >= 0 && nt_type(nt, e7) && sp_streq(nt_type(nt, e7), "FalseNode");
         }
-        int trd7 = ++g_tmp;
-        buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_sock_read_nb("
-                      "(sp_File *)_t%d.v.p, ", trd7, tv);
+        int trd7 = ++g_tmp, te7 = ++g_tmp;
+        buf_printf(b, " case SP_BUILTIN_IO: { sp_bool _e%d; const char *_t%d = sp_sock_read_nb("
+                      "(sp_File *)_t%d.v.p, ", te7, trd7, tv);
         if (atmp_ty[0] == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", atmp[0]);
         else buf_printf(b, "(sp_int)_t%d", atmp[0]);
-        buf_printf(b, ", %d, 0); ", no_exc7 ? 0 : 1);
+        buf_printf(b, ", %d, 0, &_e%d); ", no_exc7 ? 0 : 1, te7);
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY) {
           if (no_exc7)
-            buf_printf(b, "_t%d ? sp_box_str(_t%d) : sp_box_sym(sp_sym_intern(\"wait_readable\"))",
-                       trd7, trd7);
+            buf_printf(b, "_t%d ? sp_box_str(_t%d) : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\")))",
+                       trd7, trd7, te7);
           else buf_printf(b, "sp_box_str(_t%d)", trd7);
         }
         else buf_printf(b, "_t%d", trd7);
@@ -18219,15 +18219,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (sp_streq(name, "recv_nonblock") && pos9 == 1) {
         if (no_exc) {
-          int tw = ++g_tmp;
-          buf_printf(b, "({ const char *_t%d = sp_sock_read_nb(%s, ", tw, r);
+          int tw = ++g_tmp, te = ++g_tmp;
+          buf_printf(b, "sp_bool _e%d; const char *_t%d = sp_sock_read_nb(%s, ", te, tw, r);
           emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 0, 1); _t%d ? sp_box_str(_t%d)"
-                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw);
+          buf_printf(b, ", 0, 1, &_e%d); _t%d ? sp_box_str(_t%d)"
+                        " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
+                     te, tw, tw, te);
         }
         else {
-          buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);
-          buf_puts(b, ", 1, 1)");
+          int te = ++g_tmp;
+          buf_printf(b, "sp_bool _e%d; sp_sock_read_nb(%s, ", te, r); emit_int_expr(c, argv[0], b);
+          buf_printf(b, ", 1, 1, &_e%d); })", te);
         }
         free(rb.p); return;
       }
@@ -18490,15 +18492,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int no_exc8 = exc8 >= 0 && nt_type(nt, exc8) && sp_streq(nt_type(nt, exc8), "FalseNode");
       if (sp_streq(name, "read_nonblock")) {
         if (no_exc8) {
-          int tw = ++g_tmp;
-          buf_printf(b, "({ const char *_t%d = sp_sock_read_nb(%s, ", tw, r);
+          int tw = ++g_tmp, te = ++g_tmp;
+          buf_printf(b, "sp_bool _e%d; const char *_t%d = sp_sock_read_nb(%s, ", te, tw, r);
           emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 0, 0); _t%d ? sp_box_str(_t%d)"
-                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw);
+          buf_printf(b, ", 0, 0, &_e%d); _t%d ? sp_box_str(_t%d)"
+                        " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
+                     te, tw, tw, te);
         }
         else {
-          buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);
-          buf_puts(b, ", 1, 0)");
+          int te = ++g_tmp;
+          buf_printf(b, "sp_bool _e%d; sp_sock_read_nb(%s, ", te, r); emit_int_expr(c, argv[0], b);
+          buf_printf(b, ", 1, 0, &_e%d); })", te);
         }
       }
       else {
@@ -18959,16 +18963,18 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                       sp_streq(nt_type(nt, exc9), "FalseNode");
         if (sp_streq(name, "read_nonblock")) {
           if (no_exc9) {
-            int tw9 = ++g_tmp;
-            buf_printf(b, "const char *_t%d = sp_sock_read_nb(_t%d, ", tw9, tio2);
+            int tw9 = ++g_tmp, te9 = ++g_tmp;
+            buf_printf(b, "sp_bool _e%d; const char *_t%d = sp_sock_read_nb(_t%d, ", te9, tw9, tio2);
             emit_int_expr(c, argv[0], b);
-            buf_printf(b, ", 0, 0); _t%d ? sp_box_str(_t%d)"
-                          " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw9, tw9);
+            buf_printf(b, ", 0, 0, &_e%d); _t%d ? sp_box_str(_t%d)"
+                          " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
+                         te9, tw9, tw9, te9);
           }
           else {
-            buf_printf(b, "sp_sock_read_nb(_t%d, ", tio2);
+            int te9 = ++g_tmp;
+            buf_printf(b, "sp_bool _e%d; sp_sock_read_nb(_t%d, ", te9, tio2);
             emit_int_expr(c, argv[0], b);
-            buf_puts(b, ", 1, 0); })");
+            buf_printf(b, ", 1, 0, &_e%d); })", te9);
           }
         }
         else {

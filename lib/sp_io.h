@@ -76,7 +76,7 @@ const char *sp_File_inspect(sp_File *f);
 const char *sp_io_kind_name(sp_File *f);
 sp_File *sp_sock_accept(sp_File *f);
 sp_File *sp_sock_accept_nb(sp_File *f, sp_bool exc);
-const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv);
+const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv, sp_bool *eof);
 sp_int sp_sock_write_nb(sp_File *f, const char *data, sp_bool exc);
 sp_int sp_sock_write_nb_bin(sp_File *f, const char *data, sp_bool exc);
 sp_int sp_sock_connect_nb(sp_File *f, const char *host, sp_int port, sp_bool exc);
