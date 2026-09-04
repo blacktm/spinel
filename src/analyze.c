@@ -5163,6 +5163,33 @@ int desugar_enum_method_recv(Compiler *c) {
         }
       }
     }
+    /* `arr.each_with_index.reduce { }` / `.inject { }`: the blockless inner
+       call answers an Enumerator, and the fold read its elements as scalars --
+       a seedless fold assigned a [value, index] pair into an sp_int and the C
+       compiler refused it, while a fold answering the accumulator answered 0
+       (#4321). Interpose to_a, exactly as the reverse_each sibling above does;
+       the fold's answer is its own, so this hop needs no `enum_recv` marker. */
+    if (nm && (sp_streq(nm, "reduce") || sp_streq(nm, "inject")) &&
+        nt_ref(nt, id, "block") >= 0) {
+      int fr = nt_ref(nt, id, "receiver");
+      if (fr >= 0 && nt_kind(nt, fr) == NK_CallNode && nt_ref(nt, fr, "block") < 0 &&
+          infer_type(c, fr) == TY_ENUMERATOR) {
+        const char *frn = nt_str(nt, fr, "name");
+        int fra = nt_ref(nt, fr, "arguments"); int frac = 0;
+        if (fra >= 0) nt_arr(nt, fra, "arguments", &frac);
+        if (frn && frac == 0 &&
+            (sp_streq(frn, "each_index") || sp_streq(frn, "each_with_index"))) {
+          int toa3 = nt_new_node(nt, "CallNode");
+          nt_node_set_str(nt, toa3, "name", "to_a");
+          nt_node_set_ref(nt, toa3, "receiver", fr);
+          nt_node_set_ref(nt, id, "receiver", toa3);
+          comp_grow_node_arrays(c);
+          c->nscope[toa3] = c->nscope[id];
+          changed = 1;
+          continue;
+        }
+      }
+    }
     /* Range no-block enumerator chains: interpose to_a so the array machinery
        serves them ((1..5).each_with_index.to_a, (1..3).map.with_index { },
        (1..3).cycle.first(7)). Blockless `each` (and each_slice/each_cons,
