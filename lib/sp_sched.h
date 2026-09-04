@@ -47,6 +47,9 @@ typedef struct sp_thread {
                                       it on another worker corrupts both workers' TLS. */
   struct sp_thread *rq_next;     /* run-queue link while RUNNABLE */
   struct sp_thread *joiners;     /* threads parked in #join/#value on this one */
+  struct sp_thread *ev_next;     /* link within the per-DESCRIPTOR waiter list: a readiness
+                                    event names an fd, and every thread parked on that fd is
+                                    woken from it (#4306) */
   struct sp_thread *wait_next;   /* link within the wait list it is parked on */
   struct sp_thread **wait_head;  /* head of that wait list, so #kill/#raise can unpark it */
   struct sp_thread *all_next, *all_prev;  /* registry of live threads (GC roots) */
@@ -88,6 +91,10 @@ void       sp_sleep(sp_float s);   /* Kernel#sleep; relocated from spinel_rt.h t
    errored), 0 to give up (shutdown). Falls back to a plain blocking poll in the
    single-threaded build / before the monitor starts. */
 int        sp_sched_wait_io(int fd, short events);
+/* A handle is closing: drop any persistent readiness registration for `fd`
+   while the descriptor still names the right thing. Safe to call for a
+   descriptor that was never registered, and on a build with no event set. */
+void       sp_sched_ev_forget(int fd);
 /* The same park with a deadline: wake when `fd` is ready for `events` OR when
    `timeout_s` seconds have passed, whichever comes first (a negative timeout
    is no deadline, i.e. sp_sched_wait_io). Returns 1 when the fd is ready or

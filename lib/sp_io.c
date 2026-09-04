@@ -331,10 +331,20 @@ sp_File *sp_io_stdin(void) {
 sp_bool sp_io_frozen(sp_File *f) { return f ? (sp_bool)f->frozen : TRUE; }
 sp_File *sp_io_freeze(sp_File *f) { if (f) f->frozen = 1; return f; }
 
+/* Declared in sp_sched.h, which sp_io.c does not include (it is deliberately
+   self-contained); the single-threaded build gets the no-op definition. */
+void sp_sched_ev_forget(int fd);
+
 sp_int sp_File_close(sp_File *f) {
   /* never fclose the shared stdout/stderr handles (sp_io_stdout/sp_io_stderr):
      closing the process's standard streams would corrupt the singleton and any
      later write through it. Closing them is a no-op. */
+  /* Take the descriptor out of the scheduler's readiness set BEFORE it stops
+     being ours. The registration is persistent, so this is the one place a
+     handle's fd dies where we can be exact; everything else that could strand
+     one -- a raw close behind our back, exec, a dup we did not make -- is left
+     to the self-healing arm, which re-adds on ENOENT (#4306). */
+  if (f && f->fp) sp_sched_ev_forget(fileno(f->fp));
   if (f && f->fp && f->fp != stdout && f->fp != stderr && f->fp != stdin) {
     /* autoclose=false on an IO that wraps the fd itself: flush and abandon
        the FILE (see sp_File_fin); a for_fd wrapper holds a dup, so its

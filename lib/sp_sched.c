@@ -136,6 +136,22 @@ static void sp_sysmon_wake(void) {
   else if (g_sysmon_pipe[1] >= 0) { char c = 1; ssize_t r = write(g_sysmon_pipe[1], &c, 1); (void)r; }
 }
 
+/* The earliest deadline on either wait list, cached. The monitor used to find
+   it by walking both lists on every turn, which is an O(parked) pass that
+   survived moving the descriptors into the kernel -- and with the event set the
+   turns are more frequent, so the walk became the population term it had been
+   hiding behind. Kept as a minimum here instead: a new deadline lowers it, and
+   only when it actually passes does the monitor walk to expire what is due and
+   recompute. Waking early is harmless; the walk that follows re-derives it. */
+static double g_nearest = 0.0;   /* 0 = nothing timed */
+static void sp_deadline_added(double d) {   /* PRE: sched lock held */
+  if (d <= 0.0) return;
+  if (g_nearest == 0.0 || d < g_nearest) {
+    g_nearest = d;
+    sp_sysmon_wake();   /* it must shorten its wait */
+  }
+}
+
 /* ---- preemption (design §5): timeslice tracking + the one safepoint flag ----
  * The monitor watches how long each worker has run its current green thread; past
  * a quantum it sets that thread's preempt_request, raises the safepoint flag, and
@@ -378,7 +394,137 @@ static sp_thread *g_io_waiters = NULL;    /* threads parked on a fd, woken by th
 static struct pollfd *g_pfds = NULL;     /* monitor's poll set, rebuilt from g_io_waiters each tick */
 static sp_thread    **g_pths = NULL;     /* parallel to g_pfds: the thread waiting on each fd */
 static int            g_pcap = 0;        /* capacity of g_pfds / g_pths */
+
+/* ---- persistent I/O registration (#4306 / #4317) -----------------------
+   poll(2) is stateless: the monitor had to hand the WHOLE parked population to
+   the kernel on every turn, so a wake cost O(parked) -- 109 us per turn at
+   5,000 parked, against epoll_wait's flat 0.35.
+
+   The kernel's interest set is keyed by DESCRIPTOR (epoll_ctl targets an fd,
+   and a second ADD on the same one is EEXIST), so this table is too, and a
+   readiness event fans out to every waiter on that descriptor. Two waiters on
+   one fd is a shape that already runs: IO.select over a #to_io wrapper and the
+   IO it wraps (test/io_select_to_io.rb).
+
+   ONE-SHOT registration. An armed descriptor with no waiter would report
+   readiness forever and spin the monitor, so the arm is EPOLLONESHOT: the
+   kernel disables it after the one delivery, and a park re-arms with MOD.
+   That is one syscall per park -- what the self-pipe write cost anyway -- and
+   it removes the O(parked) term entirely.
+
+   TEARDOWN is self-healing (matz's call), and the direction of failure is what
+   makes that safe: the arm is attempted on EVERY park rather than skipped on
+   the belief that a previous one still stands. A registration the kernel has
+   dropped (its descriptor closed, or the number reused) answers ENOENT and is
+   re-added; one that outlives its descriptor costs a wake nobody wants, which
+   is discarded. What must never happen -- a park that arms nothing and waits
+   forever -- cannot, because nothing is ever assumed still armed. */
+#if defined(SP_THREADS) && defined(__linux__)
+#define SP_EV_EPOLL 1
+#include <sys/epoll.h>
+typedef struct { sp_thread *waiters; } sp_ev_slot;   /* indexed by fd */
+static int         g_ev_fd  = -1;
+static sp_ev_slot *g_ev_tab = NULL;
+static int         g_ev_cap = 0;
+static unsigned long long g_ev_arms = 0, g_ev_adds = 0, g_ev_lost = 0, g_ev_timeouts = 0;
+#endif
+
 static sp_thread *g_all = NULL;          /* registry of live threads, for GC rooting */
+
+#ifdef SP_EV_EPOLL
+/* Bring up the event set once, lazily: a program with no I/O park never pays
+   for it, and a kernel without epoll leaves g_ev_fd -1 and the poll path in
+   place. */
+static int sp_ev_up(void) {
+  if (g_ev_fd >= 0) return 1;
+  if (g_ev_fd == -2) return 0;                 /* tried and failed: do not retry */
+  { const char *e = getenv("SPINEL_SCHED_POLL");   /* fall back to poll(2) on demand */
+    if (e && *e && *e != '0') { g_ev_fd = -2; return 0; } }
+  g_ev_fd = epoll_create1(EPOLL_CLOEXEC);
+  if (g_ev_fd < 0) { g_ev_fd = -2; return 0; }
+  return 1;
+}
+static uint32_t sp_ev_mask(short events) {
+  return (uint32_t)((events & POLLIN ? EPOLLIN : 0) | (events & POLLOUT ? EPOLLOUT : 0));
+}
+/* Arm `fd` for the union of what its waiters want. Attempted on every park --
+   see the note above: never skipped on the belief that an earlier arm stands. */
+static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
+  if (fd < 0 || fd >= g_ev_cap) return;
+  short want = 0;
+  for (sp_thread *w = g_ev_tab[fd].waiters; w; w = w->ev_next) want |= w->io_events;
+  if (!want) return;                            /* nobody left: leave it disabled */
+  struct epoll_event e;
+  e.events = sp_ev_mask(want) | EPOLLONESHOT;
+  e.data.fd = fd;
+  g_ev_arms++;
+  if (epoll_ctl(g_ev_fd, EPOLL_CTL_MOD, fd, &e) == 0) return;
+  if (errno == ENOENT) {
+    g_ev_adds++;
+    if (epoll_ctl(g_ev_fd, EPOLL_CTL_ADD, fd, &e) == 0) return;
+  }
+  /* EBADF, or a descriptor the kernel will not watch (a regular file): the
+     waiter falls back on its deadline, which is the same answer poll gave for
+     an always-ready file. Counted, so it is visible in SPINEL_SCHED_STATS. */
+  g_ev_lost++;
+}
+/* The monitor's own wake pipe joins the set, so one wait covers both the
+   descriptors and the "a deadline moved" nudge. One-shot like the rest, so it
+   is re-armed after each delivery. */
+static int g_ev_pipe_armed = 0;
+static void sp_ev_arm_pipe(void) {
+  if (g_ev_fd < 0 || g_sysmon_pipe[0] < 0 || g_ev_pipe_armed) return;
+  struct epoll_event e;
+  e.events = EPOLLIN | EPOLLONESHOT;
+  e.data.fd = g_sysmon_pipe[0];
+  if (epoll_ctl(g_ev_fd, EPOLL_CTL_MOD, g_sysmon_pipe[0], &e) != 0 && errno == ENOENT)
+    epoll_ctl(g_ev_fd, EPOLL_CTL_ADD, g_sysmon_pipe[0], &e);
+  g_ev_pipe_armed = 1;
+}
+/* Returns 0 when the descriptor could not be taken into the set. The waiter is
+   then on its deadline alone -- the same degradation the poll path already had
+   when its own array could not grow. */
+static int sp_ev_park(sp_thread *t, int fd) {   /* PRE: sched lock held */
+  if (!sp_ev_up() || fd < 0) return 0;
+  if (fd >= g_ev_cap) {
+    int nc = g_ev_cap ? g_ev_cap : 64;
+    while (nc <= fd) nc *= 2;
+    sp_ev_slot *nt = (sp_ev_slot *)realloc(g_ev_tab, sizeof(sp_ev_slot) * (size_t)nc);
+    if (!nt) return 0;
+    memset(nt + g_ev_cap, 0, sizeof(sp_ev_slot) * (size_t)(nc - g_ev_cap));
+    g_ev_tab = nt; g_ev_cap = nc;
+  }
+  t->ev_next = g_ev_tab[fd].waiters;
+  g_ev_tab[fd].waiters = t;
+  sp_ev_arm_fd(fd);
+  return 1;
+}
+/* Take a thread off its descriptor's waiter list. Every path that unlinks a
+   waiter from g_io_waiters goes through here. */
+static void sp_ev_drop(sp_thread *t) {   /* PRE: sched lock held */
+  int fd = t->io_fd;
+  if (fd < 0 || fd >= g_ev_cap) { t->ev_next = NULL; return; }
+  for (sp_thread **pp = &g_ev_tab[fd].waiters; *pp; pp = &(*pp)->ev_next)
+    if (*pp == t) { *pp = t->ev_next; break; }
+  t->ev_next = NULL;
+}
+/* A handle is closing: the descriptor is about to stop being ours, so drop the
+   registration while the fd still names the right thing. Waiters parked on it
+   keep their deadline. */
+void sp_sched_ev_forget(int fd) {
+  if (fd < 0) return;
+  SCHED_LOCK();
+  if (g_ev_fd >= 0) epoll_ctl(g_ev_fd, EPOLL_CTL_DEL, fd, NULL);
+  if (fd < g_ev_cap) {
+    for (sp_thread *w = g_ev_tab[fd].waiters; w; ) { sp_thread *n = w->ev_next; w->ev_next = NULL; w = n; }
+    g_ev_tab[fd].waiters = NULL;
+  }
+  SCHED_UNLOCK();
+}
+#else
+void sp_sched_ev_forget(int fd) { (void)fd; }
+#endif
+
 static unsigned   g_next_id = 1;
 static unsigned char g_report_default = 1;  /* Thread.report_on_exception default */
 
@@ -1088,6 +1234,32 @@ static void *sp_sysmon_main(void *arg) {
     g_mon_iters++;
     double now = sp_monotonic_now();
     double nearest = 0.0;
+    int npf = 1, nio = 0, busy = 0;
+    /* Timeslice enforcement, on every turn: it reads the worker slots, not the
+       wait lists, so it is O(workers) and does not belong behind the skip
+       below. (An earlier cut jumped over its declarations, which is how `busy`
+       came to be read uninitialised.) */
+    for (int i = 0; i < sp_active_workers; i++) {
+      sp_thread *r = g_wslot[i].active ? g_wslot[i].cur : NULL;
+      if (!r) continue;
+      busy = 1;
+      if (!r->preempt_request && (now - g_wslot[i].since) >= SP_PREEMPT_QUANTUM) {
+        r->preempt_request = 1;
+        g_npreempt++;
+        sp_recompute_safepoint_flag();
+        pthread_kill(g_wslot[i].tid, g_preempt_sig);   /* nudge it to its next safepoint poll */
+      }
+    }
+    /* The deadline walks are O(parked), and with the descriptors held in the
+       kernel they are the only term left that grows with the population. Skip
+       them while nothing is due: the earliest deadline is cached, and a walk
+       re-derives it whenever one passes (#4317). */
+    int skip_walks = 0;
+#ifdef SP_EV_EPOLL
+    skip_walks = (g_ev_fd >= 0 && !(g_nearest != 0.0 && now >= g_nearest));
+#endif
+    if (skip_walks) nearest = g_nearest;
+    else {
     for (sp_thread **pp = &g_sleepers; *pp; ) {
       sp_thread *t = *pp;
       if (t->wake_deadline <= now) {
@@ -1101,30 +1273,20 @@ static void *sp_sysmon_main(void *arg) {
         pp = &t->wait_next;
       }
     }
-    /* Timeslice enforcement: flag any worker over the quantum, once per slice. */
-    int busy = 0;
-    for (int i = 0; i < sp_active_workers; i++) {
-      sp_thread *r = g_wslot[i].active ? g_wslot[i].cur : NULL;
-      if (!r) continue;
-      busy = 1;
-      if (!r->preempt_request && (now - g_wslot[i].since) >= SP_PREEMPT_QUANTUM) {
-        r->preempt_request = 1;
-        g_npreempt++;
-        sp_recompute_safepoint_flag();
-        pthread_kill(g_wslot[i].tid, g_preempt_sig);   /* nudge it to its next safepoint poll */
-      }
-    }
     /* Build the I/O poll set: slot 0 is the wake pipe (a registering thread
        writes a byte to break us out of poll early), the rest are parked fds.
        A waiter with a deadline (sp_sched_wait_io_timeout) is woken here with
        no revents once the clock passes it, and otherwise pulls the poll
        timeout in like a sleeper does; wake_deadline is 0 for an open-ended
        wait. */
-    int npf = 1;
     for (sp_thread **wp = &g_io_waiters; *wp; ) {
       sp_thread *w = *wp;
       if (w->wake_deadline > 0.0 && w->wake_deadline <= now) {
         *wp = w->wait_next; w->wait_next = NULL; w->wait_head = NULL;
+#ifdef SP_EV_EPOLL
+        g_ev_timeouts++;
+        sp_ev_drop(w);
+#endif
         w->io_revents = 0; w->io_fd = -1;
         if (w == &g_main_thread) { w->state = SP_TH_RUNNABLE; SCHED_WAKE_ALL(); }
         else if (w->off_cpu) { w->state = SP_TH_RUNNABLE; runq_requeue(w); sp_sched_wake_for(w); }
@@ -1133,6 +1295,10 @@ static void *sp_sysmon_main(void *arg) {
       }
       if (w->wake_deadline > 0.0 && (nearest == 0.0 || w->wake_deadline < nearest)) nearest = w->wake_deadline;
       wp = &w->wait_next;
+      nio++;
+#ifdef SP_EV_EPOLL
+      if (g_ev_fd >= 0) continue;   /* the kernel holds the interest set */
+#endif
       if (npf >= g_pcap) {
         int nc = g_pcap ? g_pcap * 2 : 16;
         struct pollfd *np = (struct pollfd *)realloc(g_pfds, sizeof(struct pollfd) * nc);
@@ -1149,7 +1315,9 @@ static void *sp_sysmon_main(void *arg) {
       g_pths = (sp_thread **)realloc(g_pths, sizeof(sp_thread *) * 16);
       if (g_pfds && g_pths) g_pcap = 16;
     }
-    int have_io = (npf > 1);
+    g_nearest = nearest;   /* re-derived by the walks above */
+    }
+    int have_io = (nio > 0) || (g_io_waiters != NULL);
     if (nearest == 0.0 && !busy && !have_io) {
       /* nothing to time or watch: sleep until a thread sleeps / waits on I/O /
          is picked up by a worker (a registrant signals g_sysmon_cv). */
@@ -1166,6 +1334,55 @@ static void *sp_sysmon_main(void *arg) {
       if (dt > 0.05) dt = 0.05;
       if (dt < 0.0005) dt = 0.0005;
       int tmo = (int)(dt * 1000.0); if (tmo < 1) tmo = 1;
+#ifdef SP_EV_EPOLL
+      if (g_ev_fd >= 0) {
+        /* The interest set lives in the kernel, so this costs the READY
+           descriptors rather than the parked population. Slot 0's job -- the
+           wake pipe -- is done by registering it in the set once. */
+        struct epoll_event evs[64];
+        sp_ev_arm_pipe();
+        SCHED_UNLOCK();
+        int en = epoll_wait(g_ev_fd, evs, 64, tmo);
+        SCHED_LOCK();
+        g_mon_polls++; g_mon_pollfds += (unsigned long long)(en > 0 ? en : 0);
+        for (int i = 0; i < en; i++) {
+          int rfd = evs[i].data.fd;
+          if (rfd == g_sysmon_pipe[0]) {
+            char buf[64]; while (read(g_sysmon_pipe[0], buf, sizeof buf) > 0) {}
+            g_ev_pipe_armed = 0; sp_ev_arm_pipe();
+            continue;
+          }
+          short rev = (short)(((evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) ? POLLIN : 0) |
+                              ((evs[i].events & (EPOLLOUT | EPOLLHUP | EPOLLERR)) ? POLLOUT : 0));
+          if (rfd < 0 || rfd >= g_ev_cap) continue;
+          /* Fan out to every waiter on this descriptor whose events it answers,
+             then re-arm for whoever is left -- one-shot disabled it, and a
+             waiter still parked must not be stranded. */
+          for (sp_thread *w = g_ev_tab[rfd].waiters, *nx = NULL; w; w = nx) {
+            nx = w->ev_next;
+            if (!(w->io_events & rev)) continue;
+            if (w->wait_head != &g_io_waiters) continue;
+            g_mon_readied++;
+            for (sp_thread **pp = &g_io_waiters; *pp; pp = &(*pp)->wait_next)
+              if (*pp == w) { *pp = w->wait_next; break; }
+            sp_ev_drop(w);
+            w->wait_next = NULL; w->wait_head = NULL;
+            w->io_revents = rev; w->io_fd = -1;
+            if (w == &g_main_thread) { w->state = SP_TH_RUNNABLE; SCHED_WAKE_ALL(); }
+            else if (w->off_cpu) { w->state = SP_TH_RUNNABLE; runq_requeue(w); sp_sched_wake_for(w); }
+            else w->wake_pending = 1;
+          }
+          sp_ev_arm_fd(rfd);
+        }
+        continue;
+      }
+#endif
+      /* Only the poll path needs the array; the degraded wait below is its
+         fallback, not the event path's. Placed after it, the event path was
+         never reached when the array had not been allocated -- which is the
+         case whenever the walks are skipped, so a monitor that started with
+         nothing parked nanosleeps 50ms a turn and delivers nothing. 102 turns
+         of that is the five-second stall this cost. */
       if (!g_pfds) {   /* allocation failed: degrade to a plain timed wait */
         SCHED_UNLOCK();
         struct timespec req = { (time_t)dt, (long)((dt - (time_t)dt) * 1e9) };
@@ -1224,7 +1441,8 @@ void sp_sched_sleep(double seconds) {
   self->off_cpu = 0;
   self->wake_pending = 0;
   self->wait_next = g_sleepers; self->wait_head = &g_sleepers; g_sleepers = self;
-  sp_sysmon_wake();   /* let the monitor recompute its timeout */
+  sp_deadline_added(self->wake_deadline);   /* wakes the monitor iff this is the new earliest */
+  if (g_sysmon_idle) sp_sysmon_wake();
   if (self == &g_main_thread) {
     sp_sched_pump(NULL, 1);   /* main waits (and pumps at N=1) until the monitor wakes it */
     SCHED_UNLOCK();
@@ -1277,7 +1495,28 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   self->wake_pending = 0;
   self->wait_next = g_io_waiters; self->wait_head = &g_io_waiters; g_io_waiters = self;
   g_mon_regs++;
-  sp_sysmon_wake();   /* let the monitor rebuild its poll set */
+#ifdef SP_EV_EPOLL
+  if (sp_ev_park(self, fd)) {
+    /* Registered: the kernel holds the interest set, so the monitor needs no
+       word about the descriptor -- only about a deadline that moved earlier.
+       That is what takes the self-pipe write off the park path.
+
+       The idle check is NOT part of that saving and must not be folded into
+       it. sp_deadline_added signals only when this deadline is the new
+       earliest, and a monitor asleep on its condvar is woken by nothing else:
+       park with a deadline LATER than a stale g_nearest, while it sleeps, and
+       it sleeps through every event that follows. That is a whole-scheduler
+       stall, and it is what the first cut of this did -- 16 of 16 threads
+       waiting out their select timeout, about one run in twenty. */
+    if (self->wake_deadline > 0.0) sp_deadline_added(self->wake_deadline);
+    if (g_sysmon_idle) sp_sysmon_wake();
+  }
+  else
+#endif
+  {
+    if (self->wake_deadline > 0.0) sp_deadline_added(self->wake_deadline);
+    sp_sysmon_wake();   /* let the monitor rebuild its poll set */
+  }
   if (self == &g_main_thread) {
     sp_sched_pump(NULL, 1);   /* main waits (and pumps at N=1) until the monitor wakes it */
     int rev = self->io_revents; self->io_revents = 0; self->io_fd = -1;
@@ -1439,6 +1678,12 @@ static void sp_sched_report_stats(void) {
           "[sched] monitor: %llu turns, %llu polls, %.1f fds/poll avg, "
           "%llu fds total; %llu io parks registered, %llu waiters readied\n",
           g_mon_iters, g_mon_polls, avg, g_mon_pollfds, g_mon_regs, g_mon_readied);
+#ifdef SP_EV_EPOLL
+  if (g_ev_fd >= 0 || g_ev_arms)
+    fprintf(stderr, "[sched] events: %llu arms (%llu adds), %llu refused, "
+                    "%llu deadline expiries\n",
+            g_ev_arms, g_ev_adds, g_ev_lost, g_ev_timeouts);
+#endif
 #endif
 }
 
@@ -1532,6 +1777,9 @@ static sp_thread *sp_sched_wake_one(sp_thread **waitlist) {
 /* Remove a parked thread from whatever wait list it sits on (for #kill/#raise). */
 static void sp_sched_unpark(sp_thread *t) {
   if (!t->wait_head) return;
+#ifdef SP_EV_EPOLL
+  if (t->wait_head == &g_io_waiters) sp_ev_drop(t);
+#endif
   for (sp_thread **pp = t->wait_head; *pp; pp = &(*pp)->wait_next)
     if (*pp == t) { *pp = t->wait_next; break; }
   t->wait_next = NULL;
