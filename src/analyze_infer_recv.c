@@ -12,6 +12,29 @@
 #include <stdio.h>
 #include <string.h>
 
+/* infer_type through fold_seed_kind, which owns the rule (see types.c). */
+static TyKind fold_seed_infer_ty(Compiler *c, int node) {
+  return fold_seed_kind(infer_type(c, node), nt_type(c->nt, node));
+}
+
+/* The operator a seeded fold applies, whichever spelling was used.
+   `reduce(seed, :op)` carries the symbol as the trailing argument, with the
+   seed in front of it; `reduce(seed, &:op)` carries it in the block, which
+   leaves the seed as the only argument. Both are the same fold and take the
+   same accumulator rule -- reading only the argument list typed the &:op
+   spelling from the seed and then dropped it. */
+static const char *fold_seed_op_sym(Compiler *c, int id, int argc, const int *argv) {
+  const NodeTable *nt = c->nt;
+  if (argc >= 2 && argv) return sym_static_value(c, argv[argc - 1]);
+  if (argc != 1) return NULL;
+  { int blk = nt_ref(nt, id, "block");
+    if (blk < 0 || !nt_type(nt, blk) || !sp_streq(nt_type(nt, blk), "BlockArgumentNode")) return NULL;
+    { int ex = nt_ref(nt, blk, "expression");
+      if (ex >= 0 && nt_type(nt, ex) && sp_streq(nt_type(nt, ex), "SymbolNode"))
+        return nt_str(nt, ex, "value"); } }
+  return NULL;
+}
+
 /* True when `id` is the receiver of an enclosing call that carries a block:
    the chain emitters own that shape (arr.map.with_index { }), so the inner
    blockless call must keep its legacy typing. */
@@ -199,9 +222,18 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (rt == TY_RANGE && recv >= 0 && argc == 1 && nt_ref(nt, id, "block") < 0 &&
       (sp_streq(name, "min") || sp_streq(name, "max")))
     { *out = TY_INT_ARRAY; return 1; }
+  /* Range#sum(seed): CRuby adds the closed form to an INTEGER seed and answers
+     a Float for a seed of any other class (it runs the seed through
+     Kernel#Float first), so only an Integer or Float seed lands in a scalar
+     slot -- a Bignum seed wrapped in one, and a Rational one did not compile
+     at all. */
   if (rt == TY_RANGE && sp_streq(name, "sum") && argc == 1 &&
-      nt_ref(nt, id, "block") < 0)
-    { *out = infer_type(c, argv[0]) == TY_FLOAT ? TY_FLOAT : TY_INT; return 1; }
+      nt_ref(nt, id, "block") < 0) {
+    TyKind st = fold_seed_infer_ty(c, argv[0]);
+    if (st == TY_FLOAT) { *out = TY_FLOAT; return 1; }
+    *out = fold_seed_typed(st, TY_INT) ? TY_INT : TY_POLY;
+    return 1;
+  }
   /* each_slice(n) { } / each_cons(n) { } answer the receiver, which the value
      emitter yields; the materializing redispatch below would otherwise type
      them as the int array it walks, and an assigned result then printed the
@@ -558,7 +590,13 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         (ty_is_array(infer_type(c, argv[0])) ||
          (nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "ArrayNode"))))
       { *out = TY_POLY_ARRAY; return 1; }   /* an Array init concatenates the pairs (#3571) */
-    if (nt_ref(nt, id, "block") < 0 && sp_streq(name, "sum") && argc <= 1)
+    /* Every other blockless seed keeps its own class: Enumerable#sum adds the
+       first [k, v] pair to it with Ruby's `+`, so an Integer seed raises and
+       a nil / false one raises from nil itself -- neither is an Integer, and
+       an EMPTY hash answers the seed unchanged (`{}.sum(nil)` is nil). */
+    if (nt_ref(nt, id, "block") < 0 && sp_streq(name, "sum") && argc == 1)
+      { *out = fold_seed_typed(fold_seed_infer_ty(c, argv[0]), TY_INT) ? TY_INT : TY_POLY; return 1; }
+    if (nt_ref(nt, id, "block") < 0 && sp_streq(name, "sum") && argc == 0)
       { *out = TY_INT; return 1; }
     if (nt_ref(nt, id, "block") >= 0 &&
         (sp_streq(name, "flat_map") || sp_streq(name, "collect_concat") ||
@@ -879,6 +917,25 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       if (rt == TY_STR_ARRAY && blk < 0 &&
           !(argc == 1 && infer_type(c, argv[0]) == TY_STRING))
         { *out = TY_POLY; return 1; }
+      /* A blockless seed keeps its OWN class through the whole fold: CRuby's
+         accumulator is the seed object and every step is Ruby's `+` on it. Only
+         a seed of the element's own class can live in the element's C slot --
+         plus an Integer seed over Floats, and a Float seed over Integers, both
+         of which CRuby answers as a Float too. Everything else folds boxed and
+         the call IS that boxed value: a Rational total, a Bignum that no longer
+         wraps, or the raise the generic `+` produces. Only the three
+         concretely-typed kinds are decided here; a poly array keeps the
+         sp_PolyArray_sum_* typings its own emitter arms expect. */
+      if (argc == 1 && blk < 0 &&
+          (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY || rt == TY_STR_ARRAY)) {
+        TyKind st = fold_seed_infer_ty(c, argv[0]);
+        TyKind et = ty_array_elem(rt);
+        /* the String-seed concatenation; the rule above took every other seed */
+        if (rt == TY_STR_ARRAY) { *out = TY_STRING; return 1; }
+        if (et == TY_INT && st == TY_FLOAT) { *out = TY_FLOAT; return 1; }
+        *out = fold_seed_typed(st, et) ? et : TY_POLY;
+        return 1;
+      }
       /* a float initial value promotes the whole sum to Float (e.g.
          ints.sum(0.0) or ints.sum(0.0) { |x| x }), regardless of the block. */
       if (argc == 1 && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_FLOAT; return 1; }
@@ -944,8 +1001,13 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
               infer_type(c, argv[0]) == TY_PROC) { *out = TY_POLY; return 1; }
         }
         const char *a0ty = nt_type(nt, argv[0]);
-        /* a symbol literal, or a local statically holding one (s = :+) */
-        int is_sym_op = argc == 1 && sym_static_value(c, argv[0]) != NULL;
+        /* a symbol literal, or a local statically holding one (s = :+) -- and
+           only when there is no block: `inject(:s, &:+)` gives the operator in
+           the block, which makes the lone Symbol the SEED, not the operator
+           (Enumerable#inject's own rule). Read as an operator it typed the
+           call from the elements while the emitter folded from the seed. */
+        int is_sym_op = argc == 1 && nt_ref(nt, id, "block") < 0 &&
+                        sym_static_value(c, argv[0]) != NULL;
         (void)a0ty;
         /* `reduce(nil) { |acc, t| acc.nil? ? t : acc + t }` -- the idiom for a
            fold with no natural identity. The seed says nothing about the
@@ -1010,11 +1072,18 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
                `:+` still came out Integer. Promote a numeric seed by the element
                type when the operator is arithmetic (#3181). */
             else if (rbn == 0 && ty_is_numeric(it)) {
-              const char *sop = argc >= 2 ? sym_static_value(c, argv[argc - 1]) : NULL;
+              const char *sop = fold_seed_op_sym(c, id, argc, argv);
               TyKind et = ty_array_elem(rt);
               int arith = sop && (sp_streq(sop, "+") || sp_streq(sop, "-") || sp_streq(sop, "*") ||
                                   sp_streq(sop, "/") || sp_streq(sop, "%") || sp_streq(sop, "**"));
-              if (arith && ty_is_numeric(et))
+              /* A seed of another class is not an accumulator this element type
+                 can hold at all: `[1, 2, 3].reduce(0.5, :+)` accumulates Float
+                 and a Bignum seed does not fit an sp_int. Those fold boxed, and
+                 the promotion below then only ever widens Integer to Float. An
+                 ERASED element type says nothing about the seed's class, so it
+                 is left to the two rules below, which have their own answer. */
+              if (sop && et != TY_POLY && !fold_seed_typed(it, et)) it = TY_POLY;
+              else if (arith && ty_is_numeric(et))
                 it = ty_promote_numeric(it, et);
               /* fold over a literal array of boxed Rationals/Complex with an
                  arithmetic operator: the accumulator promotes to the boxed
@@ -1036,6 +1105,15 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
                  the bits. Keep the result boxed (#3238). */
               else if (arith && et == TY_POLY) it = TY_POLY;
             }
+            /* The same rule for a seed that is not a number at all -- a String,
+               nil, true/false, a Rational. `[1, 2].reduce("x", :*)` accumulates
+               a String ("xx"), and `[1, 2].reduce(nil, :+)` raises from nil's
+               own missing `+`; both were read out of an sp_int slot, so nil
+               came back as the sum and a String stopped the C build. */
+            else if (rbn == 0 && fold_seed_op_sym(c, id, argc, argv) &&
+                     ty_array_elem(rt) != TY_POLY &&
+                     !fold_seed_typed(it, ty_array_elem(rt)))
+              it = TY_POLY;
             /* A hash/array/object seed whose block body reassigns the
                accumulator to a boxed poly value (e.g. a method that returns
                poly because it is also used in a poly context elsewhere) widens

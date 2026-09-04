@@ -367,9 +367,10 @@ sp_float sp_FloatArray_min(sp_FloatArray*a){if(!a||a->len==0)return sp_float_nil
 sp_float sp_FloatArray_max(sp_FloatArray*a){if(!a||a->len==0)return sp_float_nil();  /* CRuby: nil on empty (#4288) */ sp_float m=a->data[0];for(sp_int i=1;i<a->len;i++)if(a->data[i]>m)m=a->data[i];return m;}
 /* Array#sum for floats: Kahan-Babuska-Neumaier compensated summation,
    matching CRuby (float addition isn't associative, so a naive fold of
-   [0.1,0.2,0.3] yields 0.6000000000000001 instead of 0.6). `c` accumulates
-   the low-order bits dropped at each add and is folded back at the end. */
-sp_float sp_FloatArray_sum(sp_FloatArray*a,sp_float init){sp_float s=init,c=0.0;for(sp_int i=0;i<a->len;i++){sp_float x=a->data[i],t=s+x;if(fabs(s)>=fabs(x))c+=(s-t)+x;else c+=(x-t)+s;s=t;}return s+c;}
+   [0.1,0.2,0.3] yields 0.6000000000000001 instead of 0.6). The step, with
+   CRuby's NaN/Infinity arms, is sp_float_sum_step in sp_array.h -- shared with
+   the boxed fold so the two cannot drift. */
+sp_float sp_FloatArray_sum(sp_FloatArray*a,sp_float init){sp_float s=init,c=0.0;for(sp_int i=0;i<a->len;i++)sp_float_sum_step(&s,&c,a->data[i]);return s+c;}
 void sp_FloatArray_replace(sp_FloatArray*dst,sp_FloatArray*src){dst->len=0;if(src->len>dst->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)dst-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*dst->cap);h->size-=sizeof(sp_float)*dst->cap;void*nd=realloc(dst->data,sizeof(sp_float)*src->len);if(!nd){perror("realloc");exit(1);}dst->data=(sp_float*)nd;dst->cap=src->len;h->size+=sizeof(sp_float)*dst->cap;sp_gc_bytes_add(sizeof(sp_float)*dst->cap);}memcpy(dst->data,src->data,sizeof(sp_float)*src->len);dst->len=src->len;}
 /* a[start, len] / a[start..end] for FloatArray. Same negative-start and
    length-clamping semantics as sp_IntArray_slice. */

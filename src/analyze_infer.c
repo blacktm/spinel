@@ -1646,8 +1646,14 @@ static TyKind infer_call_inner(Compiler *c, int id) {
         if (argc == 1 && (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") ||
                           sp_streq(name, "instance_of?"))) return TY_BOOL;
         if (argc == 0 && sp_streq(name, "to_h")) return TY_STR_POLY_HASH;   /* (#2410) */
-        if (argc <= 1 && sp_streq(name, "sum"))
-          return argc == 1 ? infer_type(c, argv[0]) : TY_INT;               /* (#2416) */
+        if (argc <= 1 && sp_streq(name, "sum")) {
+          /* the empty collection answers the SEED itself, so the call is the
+             seed's type -- except that nil and true/false have no scalar slot
+             to be answered in, and ride boxed (`{}.sum(nil)` is nil) */
+          TyKind st0 = argc == 1 ? infer_type(c, argv[0]) : TY_INT;         /* (#2416) */
+          if (st0 == TY_NIL || st0 == TY_BOOL || st0 == TY_VOID) st0 = TY_POLY;
+          return st0;
+        }
         if (argc == 0 && (sp_streq(name, "min") || sp_streq(name, "max"))) return TY_POLY;
         if (argc == 0 && sp_streq(name, "minmax")) return TY_POLY_ARRAY;    /* (#2406) */
         if (argc == 1 && (sp_streq(name, "<") || sp_streq(name, "<=") ||

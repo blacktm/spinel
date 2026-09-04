@@ -1372,6 +1372,22 @@ void emit_box_close(Compiler *c, TyKind t, Buf *b) {
   if (t == TY_POLY_ARRAY)  { buf_puts(b, "), SP_BUILTIN_POLY_ARRAY)"); return; }
   buf_puts(b, ")");
 }
+/* comp_ntype through fold_seed_kind, which owns the rule (see types.c). */
+TyKind fold_seed_ntype(Compiler *c, int node) {
+  return fold_seed_kind(comp_ntype(c, node), nt_type(c->nt, node));
+}
+/* sum(seed) through the boxed fold. The receiver is boxed into a ROOTED temp
+   before the seed runs: a seed that allocates -- a Rational, a Bignum -- can
+   collect a receiver array the same statement just built, and the fold then
+   walked an empty one. Rooting also fixes the order, which is Ruby's: the
+   receiver first, then the seed, each evaluated exactly once. Shared by the
+   typed-array, Hash and poly-receiver call sites, which each had the hazard. */
+void emit_poly_sum_seed(Compiler *c, int recv, int seed, Buf *b) {
+  int tr = ++g_tmp, ts = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", tr); emit_boxed(c, recv, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tr, ts); emit_boxed(c, seed, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_sum_seed(_t%d, _t%d); })", ts, tr, ts);
+}
 const char *array_kind(TyKind t) {
   switch (t) {
     case TY_INT_ARRAY:   return "Int";

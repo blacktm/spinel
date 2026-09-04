@@ -3117,22 +3117,29 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
   if (!k) return 0;
   TyKind et = ty_array_elem(rt);
 
-  /* find the operator symbol (from a &:op block or a trailing :op arg) and
-     any explicit initial value */
-  const char *op = NULL; int init = -1;
+  /* Find the operator symbol (from a &:op block or a trailing :op arg), its
+     NODE, and any explicit initial value. The two spellings put the seed in
+     different places: `reduce(seed, :op)` in front of the symbol argument,
+     `reduce(seed, &:op)` as the only argument, the symbol being in the block.
+     Only the first was read for a seed, so the &:op spelling folded from the
+     first ELEMENT and dropped the seed entirely. */
+  const char *op = NULL; int init = -1, sym_node = -1;
   int block = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
   if (block >= 0 && nt_type(nt, block) && sp_streq(nt_type(nt, block), "BlockArgumentNode")) {
     int ex = nt_ref(nt, block, "expression");
-    if (ex >= 0 && nt_type(nt, ex) && sp_streq(nt_type(nt, ex), "SymbolNode")) op = nt_str(nt, ex, "value");
+    if (ex >= 0 && nt_type(nt, ex) && sp_streq(nt_type(nt, ex), "SymbolNode"))
+      { op = nt_str(nt, ex, "value"); sym_node = ex; }
   }
   int args = nt_ref(nt, id, "arguments");
   int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
-  if (!op && argc >= 1) {
+  if (op && sym_node >= 0 && argc == 1) init = argv[0];
+  else if (!op && argc >= 1) {
     int last = argv[argc - 1];
     /* a symbol literal, or a local that statically holds one (s = :+) */
     const char *sv = sym_static_value(c, last);
     if (sv) {
       op = sv;
+      sym_node = last;
       if (argc == 2) init = argv[0];
     }
   }
@@ -3143,17 +3150,37 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
      operator folds through sp_poly_binop_sym -- the static arms below only
      serve the concretely-typed element kinds. This is what lets an array of
      lambdas fold with reduce(:>>) (#2880). */
+  int runtime_sym = (!op && block < 0 && argc >= 1 &&
+                     (comp_ntype(c, argv[argc - 1]) == TY_SYMBOL ||
+                      comp_ntype(c, argv[argc - 1]) == TY_POLY));
   int poly_sym_fold = (k && sp_streq(k, "Poly") && block < 0 && argc >= 1 &&
                        comp_ntype(c, argv[argc - 1]) == TY_SYMBOL);
-  if ((!op || poly_sym_fold) && block < 0 && argc >= 1 &&
-      (comp_ntype(c, argv[argc - 1]) == TY_SYMBOL || comp_ntype(c, argv[argc - 1]) == TY_POLY)) {
-    int symarg = argv[argc - 1];
-    int rinit = (argc == 2) ? argv[0] : -1;
+  /* A seed of a class other than the elements' folds boxed as well. Ruby's
+     accumulator IS the seed object and every step is the seed's own operator,
+     so `[1, 2, 3].reduce(0.5, :+)` accumulates Float (6.5) where the typed arm
+     below truncated 0.5 into its sp_int accumulator and answered 6.0 -- and a
+     Rational, Bignum or String seed has no sp_int spelling at all, so the
+     generated C did not compile. Either spelling of the operator gets here:
+     the symbol node is the one found above, not always a trailing argument. */
+  int seed_boxed_fold = (op && init >= 0 && sym_node >= 0 &&
+                         (comp_ntype(c, sym_node) == TY_SYMBOL ||
+                          comp_ntype(c, sym_node) == TY_POLY) &&
+                         !fold_seed_typed(fold_seed_ntype(c, init), et));
+  if (runtime_sym || poly_sym_fold || seed_boxed_fold) {
+    int symarg = (sym_node >= 0) ? sym_node : argv[argc - 1];
+    int rinit = (init >= 0) ? init : ((block < 0 && argc == 2) ? argv[0] : -1);
     int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp, tsy = ++g_tmp;
     const char *boxfn = et == TY_INT ? "sp_box_int" : et == TY_FLOAT ? "sp_box_float"
                       : et == TY_STRING ? "sp_box_str" : NULL;
     buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
-    buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d); sp_sym _t%d = ", tn, k, ta, tsy);
+    /* The receiver temp has to be a GC root for the whole fold: the boxed seed
+       allocates before the loop and every sp_poly_binop_sym allocates inside
+       it, so a receiver built by this same statement was collected out from
+       under the walk. The poly-array arm above roots its own for this reason;
+       this one never did, which the seeded fold now makes reachable from
+       `arr.reduce(Rational(1, 2), :+)`. */
+    buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = sp_%sArray_length(_t%d); sp_sym _t%d = ",
+               ta, tn, k, ta, tsy);
     /* a statically-poly operand (a `|sym|` block param over a poly array)
        carries the symbol in its .v.i slot */
     if (comp_ntype(c, symarg) == TY_SYMBOL) emit_expr(c, symarg, b);

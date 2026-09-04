@@ -14,6 +14,7 @@
  * generated TU and resolved at the final link, the same way lib/sp_core.c
  * calls them -- so lib/sp_array.c can use them without a runtime include.
  */
+#include <math.h>      /* isnan / isinf / signbit / NAN / fabs for sp_float_sum_step */
 #include "sp_gc.h"      /* sp_gc_hdr, sp_gc_bytes, SP_GC_ROOT, sp_oom_die */
 #include "sp_alloc.h"   /* sp_gc_alloc, sp_str_alloc, sp_raise_cls, sp_raise_frozen_array */
 
@@ -107,6 +108,32 @@ static inline sp_float sp_FloatArray_first_opt(sp_FloatArray*a){return (!a||a->l
 static inline sp_float sp_FloatArray_last_opt(sp_FloatArray*a){return (!a||a->len<=0)?sp_float_nil():sp_FloatArray_get(a,a->len-1);}
 /* Issue #769: no-op for negative index after adjustment. */
 static inline void sp_FloatArray_set(sp_FloatArray*a,sp_int i,sp_float v){if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}sp_int orig=i;if(i<0)i+=a->len;if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len));while(i>=a->cap){a->cap=((((((a->cap*2))))))+1;a->data=(sp_float*)realloc(a->data,sizeof(sp_float)*a->cap);}while(i>=a->len){a->data[a->len]=sp_float_nil();a->len++;}a->data[i]=v;}  /* the gap is nil, not 0.0 (#3836) */
+
+/* One step of CRuby's compensated summation (array.c ary_sum): Kahan-Babuska-
+   Neumaier, where `comp` collects the low-order bits each add drops and is
+   folded back once the run ends. The special-value arms are CRuby's own: a
+   total that is already NaN stays NaN, a NaN element makes it NaN, and an
+   Infinity element takes the total over unless it meets an Infinity of the
+   other sign, which is NaN. Without them the compensation computed
+   (inf - inf) and `[Float::INFINITY, 1.0].sum` answered NaN where Ruby
+   answers Infinity. Shared so the typed float sum and the boxed fold in
+   spinel_rt.h cannot drift apart. */
+static inline void sp_float_sum_step(sp_float *sum, sp_float *comp, sp_float x) {
+  sp_float f = *sum;
+  if (isnan(f)) return;
+  if (isnan(x)) { *sum = x; return; }
+  if (isinf(x)) {
+    *sum = (isinf(f) && signbit(x) != signbit(f)) ? (sp_float)NAN : x;
+    return;
+  }
+  if (isinf(f)) return;
+  {
+    sp_float t = f + x;
+    if (fabs(f) >= fabs(x)) *comp += (f - t) + x;
+    else *comp += (x - t) + f;
+    *sum = t;
+  }
+}
 
 /* ---- sp_FloatArray cold ops (compiled in lib/sp_array.c) ---- */
 void sp_FloatArray_unshift(sp_FloatArray *a, sp_float v);
