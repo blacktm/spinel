@@ -62,9 +62,12 @@ p ready ? "block" : "TIMEOUT"     #=> "block"
 
 # 3. yielding #to_io -- the class is excluded from the dispatch to
 #    match the prototype/definition loops. A class the gate forgot
-#    to skip would make the spinel C build fail with an undefined
-#    reference to sp_YieldWrap_to_io; this case is here to exercise
-#    the exclusion at compile time, not to test runtime behavior.
+#    to skip makes the spinel C build fail, so this case guards the
+#    exclusion at compile time rather than testing runtime behaviour.
+#    It has to be INSTANTIATED and CALLED to guard anything: an
+#    unreachable method never reaches the dispatch in the first
+#    place, so the class alone would pass whether the gate skipped
+#    yielding scopes or not.
 class YieldWrap
   def initialize(sock)
     @sock = sock
@@ -74,5 +77,18 @@ class YieldWrap
     @sock
   end
 end
+
+a, _ = make_pair
+y = YieldWrap.new(a)
+n = 0
+y.to_io { n += 1 }
+p n                               #=> 1
+
+# ...and the wrapper shapes above still select with such a class in
+# the program, which is the whole point of excluding it rather than
+# refusing the build.
+a, _ = make_pair
+ready = IO.select([Wrap.new(a)], nil, nil, 5)
+p ready ? "poly-with-yielding-peer" : "TIMEOUT"
 
 puts "done"
