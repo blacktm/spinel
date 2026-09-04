@@ -7281,7 +7281,21 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
    on; the runtime cannot dispatch a user method itself, so it calls this
    through sp_user_to_io_hook. A class whose #to_io does not answer an IO is
    left out rather than emitted wrong: it falls through to the TypeError the
-   element would have raised anyway. */
+   element would have raised anyway.
+
+   The return-type gate accepts TY_IO, TY_UNKNOWN, and TY_POLY: a
+   wrapper written as `def to_io; @sock; end` lets the compiler infer
+   the return type from `@sock`, which is poly (TY_POLY) because the
+   constructor takes a raw socket the user hands in. The runtime hook
+   checks the result is actually an IO before using it, so a wrong
+   return is still a TypeError -- just at the moment of select, not
+   at the moment of class discovery.
+
+   A poly return means the emitted body boxes the value into sp_RbVal
+   first, then asks the runtime to unwrap an sp_File from it; the
+   IO path's existing box machinery is what handles "answer is an IO"
+   already (sp_poly_to_file / tag SP_TAG_FILE). The TY_IO arm stays
+   the direct cast: that function still returns sp_File * directly. */
 static void emit_user_to_io_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "static sp_File *sp_user_to_io_dispatch(sp_RbVal v) {\n");
   buf_puts(b, "  switch (v.cls_id) {\n");
@@ -7291,12 +7305,27 @@ static void emit_user_to_io_dispatch(Compiler *c, Buf *b) {
     int mi = comp_method_in_chain(c, k, "to_io", &defcls);
     if (mi < 0 || defcls < 0) continue;
     Scope *m = &c->scopes[mi];
-    if (!m->reachable || m->nparams != 0 || m->ret != TY_IO) continue;
+    if (!m->reachable || m->yields || m->nparams != 0) continue;
+    if (m->ret != TY_IO && m->ret != TY_UNKNOWN && m->ret != TY_POLY) continue;
     if (scope_is_shadowed(c, mi) || m->is_transplanted_source) continue;
     const char *dcn = c->classes[defcls].c_name;
-    buf_printf(b, "    case %d: return sp_%s_to_io(%s(sp_%s *)v.v.p);\n",
-               comp_class_index(c, c->classes[k].name),
-               dcn, c->classes[defcls].is_value_type ? "*" : "", dcn);
+    /* Non-yielding &block: the prototype includes a sp_Proc * parameter
+       (see emit_method_signature), so the dispatch must pass NULL for it. */
+    int has_blk = m->blk_param && m->blk_param[0];
+    if (m->ret == TY_IO) {
+      buf_printf(b, "    case %d: return sp_%s_to_io(%s(sp_%s *)v.v.p%s);\n",
+                 comp_class_index(c, c->classes[k].name),
+                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn,
+                 has_blk ? ", NULL" : "");
+    } else {
+      /* poly/unknown: the #to_io body boxes; unwrap via the poly->file path
+         so a non-IO answer falls through to the caller's TypeError instead
+         of a segfault. */
+      buf_printf(b, "    case %d: { sp_RbVal _r = sp_%s_to_io(%s(sp_%s *)v.v.p%s); return (sp_File *)sp_poly_to_file(_r); }\n",
+                 comp_class_index(c, c->classes[k].name),
+                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn,
+                 has_blk ? ", NULL" : "");
+    }
   }
   buf_puts(b, "    default: break;\n  }\n  return NULL;\n}\n");
 }
@@ -10076,7 +10105,8 @@ char *codegen_program(const NodeTable *nt) {
     int dc = -1, mi2 = comp_method_in_chain(c, k, "to_io", &dc);
     if (mi2 < 0 || dc < 0) continue;
     Scope *m2 = &c->scopes[mi2];
-    if (m2->reachable && m2->nparams == 0 && m2->ret == TY_IO &&
+    if (m2->reachable && !m2->yields && m2->nparams == 0 &&
+        (m2->ret == TY_IO || m2->ret == TY_UNKNOWN || m2->ret == TY_POLY) &&
         !scope_is_shadowed(c, mi2) && !m2->is_transplanted_source) { g_has_user_to_io = 1; break; }
   }
   g_gen_obj_hashkey = 0;
