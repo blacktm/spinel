@@ -420,8 +420,21 @@ static int            g_pcap = 0;        /* capacity of g_pfds / g_pths */
    is discarded. What must never happen -- a park that arms nothing and waits
    forever -- cannot, because nothing is ever assumed still armed. */
 #if defined(SP_THREADS) && defined(__linux__)
+#define SP_EV_BACKEND 1
 #define SP_EV_EPOLL 1
 #include <sys/epoll.h>
+#elif defined(SP_THREADS) && (defined(__APPLE__) || defined(__FreeBSD__) || \
+                              defined(__OpenBSD__) || defined(__NetBSD__))
+/* kqueue keys by (descriptor, filter), so READ and WRITE are two entries for
+   one fd; EV_ONESHOT DELETES the entry after its delivery where epoll only
+   disables it, which makes the re-arm a plain EV_ADD. Everything above the
+   three backend calls is the same on both. */
+#define SP_EV_BACKEND 1
+#define SP_EV_KQUEUE 1
+#include <sys/types.h>   /* <sys/event.h> wants it first on the BSDs */
+#include <sys/event.h>
+#endif
+#ifdef SP_EV_BACKEND
 typedef struct { sp_thread *waiters; } sp_ev_slot;   /* indexed by fd */
 static int         g_ev_fd  = -1;
 static sp_ev_slot *g_ev_tab = NULL;
@@ -431,7 +444,7 @@ static unsigned long long g_ev_arms = 0, g_ev_adds = 0, g_ev_lost = 0, g_ev_time
 
 static sp_thread *g_all = NULL;          /* registry of live threads, for GC rooting */
 
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
 /* Bring up the event set once, lazily: a program with no I/O park never pays
    for it, and a kernel without epoll leaves g_ev_fd -1 and the poll path in
    place. */
@@ -440,12 +453,87 @@ static int sp_ev_up(void) {
   if (g_ev_fd == -2) return 0;                 /* tried and failed: do not retry */
   { const char *e = getenv("SPINEL_SCHED_POLL");   /* fall back to poll(2) on demand */
     if (e && *e && *e != '0') { g_ev_fd = -2; return 0; } }
+#ifdef SP_EV_EPOLL
   g_ev_fd = epoll_create1(EPOLL_CLOEXEC);
+#else
+  g_ev_fd = kqueue();
+  if (g_ev_fd >= 0) { int fl = fcntl(g_ev_fd, F_GETFD); if (fl >= 0) fcntl(g_ev_fd, F_SETFD, fl | FD_CLOEXEC); }
+#endif
   if (g_ev_fd < 0) { g_ev_fd = -2; return 0; }
   return 1;
 }
-static uint32_t sp_ev_mask(short events) {
-  return (uint32_t)((events & POLLIN ? EPOLLIN : 0) | (events & POLLOUT ? EPOLLOUT : 0));
+
+/* Arm one descriptor for `want` (POLLIN / POLLOUT), one-shot. 0 on success.
+   The three functions below are the whole platform surface; everything above
+   and below them is shared. */
+static int sp_ev_backend_arm(int fd, short want) {
+#ifdef SP_EV_EPOLL
+  struct epoll_event e;
+  e.events = (uint32_t)((want & POLLIN ? EPOLLIN : 0) | (want & POLLOUT ? EPOLLOUT : 0)) | EPOLLONESHOT;
+  e.data.fd = fd;
+  if (epoll_ctl(g_ev_fd, EPOLL_CTL_MOD, fd, &e) == 0) return 0;
+  /* Not in the set: epoll's one-shot only DISABLES, so MOD is the usual arm
+     and ADD is the first one. */
+  if (errno == ENOENT) { g_ev_adds++; return epoll_ctl(g_ev_fd, EPOLL_CTL_ADD, fd, &e); }
+  return -1;
+#else
+  /* kqueue's one-shot DELETES the entry when it fires, so every arm is an
+     EV_ADD -- and a filter the waiters no longer want stays armed until it
+     fires once into nobody, which is the discarded wake the design allows. */
+  struct kevent ch[2];
+  int n = 0;
+  if (want & POLLIN)  EV_SET(&ch[n++], (uintptr_t)fd, EVFILT_READ,  EV_ADD | EV_ONESHOT, 0, 0, NULL);
+  if (want & POLLOUT) EV_SET(&ch[n++], (uintptr_t)fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+  if (!n) return 0;
+  g_ev_adds++;
+  return kevent(g_ev_fd, ch, n, NULL, 0, NULL) < 0 ? -1 : 0;
+#endif
+}
+
+/* Drop a descriptor from the set outright (a handle is closing). */
+static void sp_ev_backend_del(int fd) {
+#ifdef SP_EV_EPOLL
+  epoll_ctl(g_ev_fd, EPOLL_CTL_DEL, fd, NULL);
+#else
+  struct kevent ch[2];
+  EV_SET(&ch[0], (uintptr_t)fd, EVFILT_READ,  EV_DELETE, 0, 0, NULL);
+  EV_SET(&ch[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+  kevent(g_ev_fd, ch, 2, NULL, 0, NULL);   /* ENOENT for a filter never armed */
+#endif
+}
+
+/* Wait for readiness. Fills `out` with (descriptor, poll-style events) and
+   answers how many, or a negative on error. */
+typedef struct { int fd; short rev; } sp_ev_ready;
+static int sp_ev_backend_wait(sp_ev_ready *out, int max, int tmo_ms) {
+#ifdef SP_EV_EPOLL
+  struct epoll_event evs[64];
+  if (max > 64) max = 64;
+  int n = epoll_wait(g_ev_fd, evs, max, tmo_ms);
+  for (int i = 0; i < n; i++) {
+    out[i].fd = evs[i].data.fd;
+    out[i].rev = (short)(((evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) ? POLLIN : 0) |
+                         ((evs[i].events & (EPOLLOUT | EPOLLHUP | EPOLLERR)) ? POLLOUT : 0));
+  }
+  return n;
+#else
+  struct kevent evs[64];
+  if (max > 64) max = 64;
+  struct timespec ts;
+  ts.tv_sec = tmo_ms / 1000;
+  ts.tv_nsec = (long)(tmo_ms % 1000) * 1000000L;
+  int n = kevent(g_ev_fd, NULL, 0, evs, max, &ts);
+  for (int i = 0; i < n; i++) {
+    out[i].fd = (int)evs[i].ident;
+    /* EV_EOF is a peer that closed: readable (and writable, for a socket whose
+       other end is gone) exactly as POLLHUP is. EV_ERROR answers both so the
+       waiter's own read or write reports the error, which is what poll did. */
+    short r = (evs[i].filter == EVFILT_WRITE) ? POLLOUT : POLLIN;
+    if (evs[i].flags & (EV_EOF | EV_ERROR)) r = POLLIN | POLLOUT;
+    out[i].rev = r;
+  }
+  return n;
+#endif
 }
 /* Arm `fd` for the union of what its waiters want. Attempted on every park --
    see the note above: never skipped on the belief that an earlier arm stands. */
@@ -454,18 +542,12 @@ static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
   short want = 0;
   for (sp_thread *w = g_ev_tab[fd].waiters; w; w = w->ev_next) want |= w->io_events;
   if (!want) return;                            /* nobody left: leave it disabled */
-  struct epoll_event e;
-  e.events = sp_ev_mask(want) | EPOLLONESHOT;
-  e.data.fd = fd;
   g_ev_arms++;
-  if (epoll_ctl(g_ev_fd, EPOLL_CTL_MOD, fd, &e) == 0) return;
-  if (errno == ENOENT) {
-    g_ev_adds++;
-    if (epoll_ctl(g_ev_fd, EPOLL_CTL_ADD, fd, &e) == 0) return;
-  }
-  /* EBADF, or a descriptor the kernel will not watch (a regular file): the
-     waiter falls back on its deadline, which is the same answer poll gave for
-     an always-ready file. Counted, so it is visible in SPINEL_SCHED_STATS. */
+  if (sp_ev_backend_arm(fd, want) == 0) return;
+  /* EBADF, or a descriptor the kernel will not watch (epoll refuses a regular
+     file): the waiter falls back on its deadline, which is the same answer
+     poll gave for an always-ready file. Counted, so SPINEL_SCHED_STATS shows
+     it rather than leaving a silent gap. */
   g_ev_lost++;
 }
 /* The monitor's own wake pipe joins the set, so one wait covers both the
@@ -474,11 +556,7 @@ static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
 static int g_ev_pipe_armed = 0;
 static void sp_ev_arm_pipe(void) {
   if (g_ev_fd < 0 || g_sysmon_pipe[0] < 0 || g_ev_pipe_armed) return;
-  struct epoll_event e;
-  e.events = EPOLLIN | EPOLLONESHOT;
-  e.data.fd = g_sysmon_pipe[0];
-  if (epoll_ctl(g_ev_fd, EPOLL_CTL_MOD, g_sysmon_pipe[0], &e) != 0 && errno == ENOENT)
-    epoll_ctl(g_ev_fd, EPOLL_CTL_ADD, g_sysmon_pipe[0], &e);
+  sp_ev_backend_arm(g_sysmon_pipe[0], POLLIN);
   g_ev_pipe_armed = 1;
 }
 /* Returns 0 when the descriptor could not be taken into the set. The waiter is
@@ -514,7 +592,7 @@ static void sp_ev_drop(sp_thread *t) {   /* PRE: sched lock held */
 void sp_sched_ev_forget(int fd) {
   if (fd < 0) return;
   SCHED_LOCK();
-  if (g_ev_fd >= 0) epoll_ctl(g_ev_fd, EPOLL_CTL_DEL, fd, NULL);
+  if (g_ev_fd >= 0) sp_ev_backend_del(fd);
   if (fd < g_ev_cap) {
     for (sp_thread *w = g_ev_tab[fd].waiters; w; ) { sp_thread *n = w->ev_next; w->ev_next = NULL; w = n; }
     g_ev_tab[fd].waiters = NULL;
@@ -1255,7 +1333,7 @@ static void *sp_sysmon_main(void *arg) {
        them while nothing is due: the earliest deadline is cached, and a walk
        re-derives it whenever one passes (#4317). */
     int skip_walks = 0;
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
     skip_walks = (g_ev_fd >= 0 && !(g_nearest != 0.0 && now >= g_nearest));
 #endif
     if (skip_walks) nearest = g_nearest;
@@ -1283,7 +1361,7 @@ static void *sp_sysmon_main(void *arg) {
       sp_thread *w = *wp;
       if (w->wake_deadline > 0.0 && w->wake_deadline <= now) {
         *wp = w->wait_next; w->wait_next = NULL; w->wait_head = NULL;
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
         g_ev_timeouts++;
         sp_ev_drop(w);
 #endif
@@ -1296,7 +1374,7 @@ static void *sp_sysmon_main(void *arg) {
       if (w->wake_deadline > 0.0 && (nearest == 0.0 || w->wake_deadline < nearest)) nearest = w->wake_deadline;
       wp = &w->wait_next;
       nio++;
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
       if (g_ev_fd >= 0) continue;   /* the kernel holds the interest set */
 #endif
       if (npf >= g_pcap) {
@@ -1334,26 +1412,25 @@ static void *sp_sysmon_main(void *arg) {
       if (dt > 0.05) dt = 0.05;
       if (dt < 0.0005) dt = 0.0005;
       int tmo = (int)(dt * 1000.0); if (tmo < 1) tmo = 1;
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
       if (g_ev_fd >= 0) {
         /* The interest set lives in the kernel, so this costs the READY
            descriptors rather than the parked population. Slot 0's job -- the
            wake pipe -- is done by registering it in the set once. */
-        struct epoll_event evs[64];
+        sp_ev_ready evs[64];
         sp_ev_arm_pipe();
         SCHED_UNLOCK();
-        int en = epoll_wait(g_ev_fd, evs, 64, tmo);
+        int en = sp_ev_backend_wait(evs, 64, tmo);
         SCHED_LOCK();
         g_mon_polls++; g_mon_pollfds += (unsigned long long)(en > 0 ? en : 0);
         for (int i = 0; i < en; i++) {
-          int rfd = evs[i].data.fd;
+          int rfd = evs[i].fd;
           if (rfd == g_sysmon_pipe[0]) {
             char buf[64]; while (read(g_sysmon_pipe[0], buf, sizeof buf) > 0) {}
             g_ev_pipe_armed = 0; sp_ev_arm_pipe();
             continue;
           }
-          short rev = (short)(((evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) ? POLLIN : 0) |
-                              ((evs[i].events & (EPOLLOUT | EPOLLHUP | EPOLLERR)) ? POLLOUT : 0));
+          short rev = evs[i].rev;
           if (rfd < 0 || rfd >= g_ev_cap) continue;
           /* Fan out to every waiter on this descriptor whose events it answers,
              then re-arm for whoever is left -- one-shot disabled it, and a
@@ -1495,7 +1572,7 @@ int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   self->wake_pending = 0;
   self->wait_next = g_io_waiters; self->wait_head = &g_io_waiters; g_io_waiters = self;
   g_mon_regs++;
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
   if (sp_ev_park(self, fd)) {
     /* Registered: the kernel holds the interest set, so the monitor needs no
        word about the descriptor -- only about a deadline that moved earlier.
@@ -1678,7 +1755,7 @@ static void sp_sched_report_stats(void) {
           "[sched] monitor: %llu turns, %llu polls, %.1f fds/poll avg, "
           "%llu fds total; %llu io parks registered, %llu waiters readied\n",
           g_mon_iters, g_mon_polls, avg, g_mon_pollfds, g_mon_regs, g_mon_readied);
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
   if (g_ev_fd >= 0 || g_ev_arms)
     fprintf(stderr, "[sched] events: %llu arms (%llu adds), %llu refused, "
                     "%llu deadline expiries\n",
@@ -1777,7 +1854,7 @@ static sp_thread *sp_sched_wake_one(sp_thread **waitlist) {
 /* Remove a parked thread from whatever wait list it sits on (for #kill/#raise). */
 static void sp_sched_unpark(sp_thread *t) {
   if (!t->wait_head) return;
-#ifdef SP_EV_EPOLL
+#ifdef SP_EV_BACKEND
   if (t->wait_head == &g_io_waiters) sp_ev_drop(t);
 #endif
   for (sp_thread **pp = t->wait_head; *pp; pp = &(*pp)->wait_next)
