@@ -7305,21 +7305,26 @@ static void emit_user_to_io_dispatch(Compiler *c, Buf *b) {
     int mi = comp_method_in_chain(c, k, "to_io", &defcls);
     if (mi < 0 || defcls < 0) continue;
     Scope *m = &c->scopes[mi];
-    if (!m->reachable || m->nparams != 0) continue;
+    if (!m->reachable || m->yields || m->nparams != 0) continue;
     if (m->ret != TY_IO && m->ret != TY_UNKNOWN && m->ret != TY_POLY) continue;
     if (scope_is_shadowed(c, mi) || m->is_transplanted_source) continue;
     const char *dcn = c->classes[defcls].c_name;
+    /* Non-yielding &block: the prototype includes a sp_Proc * parameter
+       (see emit_method_signature), so the dispatch must pass NULL for it. */
+    int has_blk = m->blk_param && m->blk_param[0];
     if (m->ret == TY_IO) {
-      buf_printf(b, "    case %d: return sp_%s_to_io(%s(sp_%s *)v.v.p);\n",
+      buf_printf(b, "    case %d: return sp_%s_to_io(%s(sp_%s *)v.v.p%s);\n",
                  comp_class_index(c, c->classes[k].name),
-                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn);
+                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn,
+                 has_blk ? ", NULL" : "");
     } else {
       /* poly/unknown: the #to_io body boxes; unwrap via the poly->file path
          so a non-IO answer falls through to the caller's TypeError instead
          of a segfault. */
-      buf_printf(b, "    case %d: { sp_RbVal _r = sp_%s_to_io(%s(sp_%s *)v.v.p); return (sp_File *)sp_poly_to_file(_r); }\n",
+      buf_printf(b, "    case %d: { sp_RbVal _r = sp_%s_to_io(%s(sp_%s *)v.v.p%s); return (sp_File *)sp_poly_to_file(_r); }\n",
                  comp_class_index(c, c->classes[k].name),
-                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn);
+                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn,
+                 has_blk ? ", NULL" : "");
     }
   }
   buf_puts(b, "    default: break;\n  }\n  return NULL;\n}\n");
@@ -10100,7 +10105,7 @@ char *codegen_program(const NodeTable *nt) {
     int dc = -1, mi2 = comp_method_in_chain(c, k, "to_io", &dc);
     if (mi2 < 0 || dc < 0) continue;
     Scope *m2 = &c->scopes[mi2];
-    if (m2->reachable && m2->nparams == 0 &&
+    if (m2->reachable && !m2->yields && m2->nparams == 0 &&
         (m2->ret == TY_IO || m2->ret == TY_UNKNOWN || m2->ret == TY_POLY) &&
         !scope_is_shadowed(c, mi2) && !m2->is_transplanted_source) { g_has_user_to_io = 1; break; }
   }
