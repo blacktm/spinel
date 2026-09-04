@@ -461,7 +461,32 @@ static inline char *sp_w_bool(char *p, sp_bool v) {
   memcpy(p, "false", 5); return p + 5;
 }
 
-static inline const char *sp_int_to_s(sp_int n){char*b=sp_str_alloc_raw(32);int len=snprintf(b,32,"%lld",(long long)n);if(len<0)len=0;sp_str_set_len(b,(size_t)len);return b;}
+/* Integer#to_s. This is one of the hottest allocating calls in the runtime --
+   every interpolation of a number, every inspect of an integer array, every
+   `j.to_s` in a loop -- and it went through snprintf: __printf_buffer and its
+   friends were a fifth of an allocating benchmark's profile. Writing the digits
+   by hand also lets the string be allocated at its real length instead of a
+   fixed 32, which is less string-heap pressure per call and so fewer
+   collections. */
+static inline const char *sp_int_to_s(sp_int n) {
+  char tmp[24];   /* -9223372036854775808 is 20 characters */
+  int i = (int)sizeof tmp;
+  uint64_t u;
+  /* negate in unsigned space: -INT64_MIN does not fit in sp_int */
+  if (n < 0) u = (uint64_t)(-(n + 1)) + 1; else u = (uint64_t)n;
+  do { tmp[--i] = (char)('0' + (int)(u % 10)); u /= 10; } while (u);
+  if (n < 0) tmp[--i] = '-';
+  size_t len = sizeof tmp - (size_t)i;
+  char *b = sp_str_alloc_raw(len + 1);
+  memcpy(b, tmp + i, len);
+  b[len] = 0;
+  sp_str_set_len(b, len);
+  /* digits and the sign are 7-bit by construction, and set_len clears the
+     flag, so re-assert it: the length and index paths then answer without
+     scanning. */
+  sp_str_mark_ascii7(b);
+  return b;
+}
 /* Float#to_s (Ruby semantics): the shortest decimal that round-trips, fixed
    point for a decimal exponent in [-4, 15], scientific otherwise; NaN, ±Infinity
    and -0.0 match CRuby's spelling. */
