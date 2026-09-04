@@ -15,6 +15,31 @@
 #include <poll.h>       /* poll (scheduler-aware I/O) */
 #include <fcntl.h>      /* fcntl O_NONBLOCK (monitor wake pipe) */
 
+/* Which readiness backend this build has, decided BEFORE anything that tests
+   it. It used to be declared beside the registration table, halfway down --
+   below the wake helpers, whose `#ifdef SP_EV_BACKEND` arms were therefore
+   compiled out. Every cross-worker kick vanished with them, and only the
+   backstop timeout was left to deliver a wake: the ping-pong ran at full speed
+   on one worker (which needs no kick) and at a twentieth of it on two. */
+#if defined(SP_THREADS) && defined(__linux__)
+#define SP_EV_BACKEND 1
+#define SP_EV_EPOLL 1
+#include <sys/epoll.h>
+#elif defined(SP_THREADS) && (defined(__APPLE__) || defined(__FreeBSD__) || \
+                              defined(__OpenBSD__) || defined(__NetBSD__))
+/* kqueue keys by (descriptor, filter), so READ and WRITE are two entries for
+   one fd; EV_ONESHOT DELETES the entry after its delivery where epoll only
+   disables it, which makes the re-arm a plain EV_ADD. Everything above the
+   three backend calls is the same on both. */
+#define SP_EV_BACKEND 1
+#define SP_EV_KQUEUE 1
+#include <sys/types.h>   /* <sys/event.h> wants it first on the BSDs */
+#include <sys/event.h>
+#endif
+#ifdef SP_EV_BACKEND
+static void sp_ev_kick(int wid);
+#endif
+
 /* Reached by name (defined in lib/sp_alloc.c or the generated TU), exactly as
    lib/sp_fiber.c reaches them. */
 void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *));
@@ -174,7 +199,16 @@ typedef struct { pthread_t tid; sp_thread *cur; double since; int active;
                     throughput (#4305). Each helper waits on its own condvar instead;
                     `idle` says it is on it, and is written only under the lock, so a
                     wake that lands between the enqueue and the wait is not lost. */
-                 pthread_cond_t cv; int idle; } sp_wslot;
+                 pthread_cond_t cv; int idle;
+                 /* (b), #4306: the worker waits on its OWN readiness set, holding the
+                    descriptors of the threads pinned to it -- so a thread it can run
+                    is one it wakes for itself, with no monitor round trip and no
+                    condvar hand-off. `kick` is a self-pipe in that set: it is how a
+                    stop-the-world, a shutdown, or work enqueued for this worker
+                    breaks it out of the wait, since a signal on `cv` no longer
+                    reaches it there. `ev_waiting` says which of the two it is on,
+                    and like `idle` it is written only under the lock. */
+                 int evfd; int kick[2]; int kick_armed; int ev_waiting; } sp_wslot;
 static sp_wslot   g_wslot[SP_MAX_WORKERS];   /* per-worker: the green thread it runs + when it started */
 static void sp_recompute_safepoint_flag(void) {   /* PRE: g_sched_lock held */
   SP_SAFEPOINT_SET(g_stw_active || g_npreempt > 0);
@@ -186,33 +220,70 @@ static void sp_recompute_safepoint_flag(void) {   /* PRE: g_sched_lock held */
 static void sp_preempt_handler(int sig) { (void)sig; SP_SAFEPOINT_SET(1); }
 /* Wake one helper that can take unpinned work; main (worker 0, on g_sched_work)
    is the fallback when no helper is idle. */
+/* Main waits on its condvar OR, once it has a readiness set, inside that --
+   and a condvar signal does not reach it there. Every wake aimed at main goes
+   through here, because the one that did not (quiescence) left it sitting out
+   its 50ms backstop, which is a ping-pong at 8k hops a second instead of 190k
+   (#4306). */
+/* Wake one worker, whichever kind of wait it is on.
+   The kick BYTE is durable and the ev_waiting FLAG is not: a worker sets the
+   flag under the lock and enters its wait after releasing it, so a kick
+   conditioned on the flag is lost in exactly that window -- the worker then
+   sleeps its whole backstop. That is how a stop-the-world came to wait one
+   out (the collector holds the lock and waits for every worker to park), and
+   it is the wake that went missing about once in four hundred hops. A byte
+   written before the wait is still there when it starts, because the kick
+   descriptor is armed for the whole time the worker has a set. */
+static void sched_kick_worker(int wid) {   /* PRE: sched lock held */
+  if (wid < 0 || wid >= SP_MAX_WORKERS) return;
+#ifdef SP_EV_BACKEND
+  if (g_wslot[wid].evfd > 0) {
+    if (wid != sp_worker_id) sp_ev_kick(wid);   /* ourselves: we loop and re-pick */
+    return;
+  }
+#endif
+  if (wid == 0) { pthread_cond_broadcast(&g_sched_work); return; }
+  if (g_wslot[wid].idle) pthread_cond_signal(&g_wslot[wid].cv);
+}
+
+static void sched_wake_main(void) {   /* PRE: sched lock held */
+#ifdef SP_EV_BACKEND
+  if (g_wslot[0].evfd > 0) { sched_kick_worker(0); return; }
+#endif
+  pthread_cond_broadcast(&g_sched_work);
+}
+
 static void sched_wake_idle_helper(void) {   /* PRE: sched lock held */
-  for (int i = 1; i < sp_active_workers; i++)
+  for (int i = 1; i < sp_active_workers; i++) {
+#ifdef SP_EV_BACKEND
+    if (g_wslot[i].evfd > 0) { sched_kick_worker(i); return; }
+#endif
     if (g_wslot[i].idle) { pthread_cond_signal(&g_wslot[i].cv); return; }
-  pthread_cond_signal(&g_sched_work);
+  }
+  sched_wake_main();
 }
 /* Every waiter re-checks state: helpers on their own condvars, main on its
    pump. Used where the state change is not one thread becoming runnable --
    shutdown, the STW barrier, quiescence. */
 static void sched_wake_all_workers(void) {   /* PRE: sched lock held */
-  for (int i = 1; i < sp_active_workers; i++)
+  for (int i = 1; i < sp_active_workers; i++) {
+#ifdef SP_EV_BACKEND
+    if (g_wslot[i].evfd > 0) { sched_kick_worker(i); continue; }
+#endif
     if (g_wslot[i].idle) pthread_cond_signal(&g_wslot[i].cv);
-  pthread_cond_broadcast(&g_sched_work);
+  }
+  sched_wake_main();
 }
 /* Wake the one worker that can run a thread pinned to `wid` (see home_wid).
    Main's worker (0) waits in its pump on the shared condvar, and a signal
    there could be taken by a helper instead, so it gets the broadcast. */
 static void sched_wake_home(int wid) {   /* PRE: sched lock held */
-  if (wid > 0) {
-    if (g_wslot[wid].idle) pthread_cond_signal(&g_wslot[wid].cv);
-    return;
-  }
-  if (wid == 0) { pthread_cond_broadcast(&g_sched_work); return; }
+  if (wid >= 0) { sched_kick_worker(wid); return; }
   sched_wake_idle_helper();   /* unpinned: any worker will do */
 }
 #define SCHED_WAKE()    sched_wake_idle_helper()
 #define SCHED_WAKE_ALL() sched_wake_all_workers()
-#define SCHED_WAKE_MAIN() pthread_cond_broadcast(&g_sched_work)  /* main's pump alone */
+#define SCHED_WAKE_MAIN() sched_wake_main()   /* main's pump alone */
 
 /* Park the calling worker at the barrier until the collection finishes,
    publishing its running green thread's roots first. PRE: g_sched_lock held. */
@@ -333,7 +404,7 @@ static void sp_stw_collect_impl(int force) {
   SP_SAFEPOINT_SET(1);
   /* wake idle workers (and main waiting in its pump) so they park at the barrier
      rather than sit through the collection without publishing their roots. */
-  sched_wake_all_workers();
+  sched_wake_all_workers();   /* reaches an ev_waiting main and workers too */
   while (g_nparked < sp_active_workers - 1) pthread_cond_wait(&g_stw_request, &g_sched_lock);
   /* Our own root fiber holds this worker's suspended context (the main thread's
      top-level locals if it triggered the collection while pumping a green
@@ -419,27 +490,12 @@ static int            g_pcap = 0;        /* capacity of g_pfds / g_pths */
    re-added; one that outlives its descriptor costs a wake nobody wants, which
    is discarded. What must never happen -- a park that arms nothing and waits
    forever -- cannot, because nothing is ever assumed still armed. */
-#if defined(SP_THREADS) && defined(__linux__)
-#define SP_EV_BACKEND 1
-#define SP_EV_EPOLL 1
-#include <sys/epoll.h>
-#elif defined(SP_THREADS) && (defined(__APPLE__) || defined(__FreeBSD__) || \
-                              defined(__OpenBSD__) || defined(__NetBSD__))
-/* kqueue keys by (descriptor, filter), so READ and WRITE are two entries for
-   one fd; EV_ONESHOT DELETES the entry after its delivery where epoll only
-   disables it, which makes the re-arm a plain EV_ADD. Everything above the
-   three backend calls is the same on both. */
-#define SP_EV_BACKEND 1
-#define SP_EV_KQUEUE 1
-#include <sys/types.h>   /* <sys/event.h> wants it first on the BSDs */
-#include <sys/event.h>
-#endif
 #ifdef SP_EV_BACKEND
 typedef struct { sp_thread *waiters; } sp_ev_slot;   /* indexed by fd */
 static int         g_ev_fd  = -1;
 static sp_ev_slot *g_ev_tab = NULL;
 static int         g_ev_cap = 0;
-static unsigned long long g_ev_arms = 0, g_ev_adds = 0, g_ev_lost = 0, g_ev_timeouts = 0;
+static unsigned long long g_ev_arms = 0, g_ev_adds = 0, g_ev_lost = 0, g_ev_timeouts = 0, g_ev_backstop = 0;
 #endif
 
 static sp_thread *g_all = NULL;          /* registry of live threads, for GC rooting */
@@ -448,33 +504,73 @@ static sp_thread *g_all = NULL;          /* registry of live threads, for GC roo
 /* Bring up the event set once, lazily: a program with no I/O park never pays
    for it, and a kernel without epoll leaves g_ev_fd -1 and the poll path in
    place. */
-static int sp_ev_up(void) {
-  if (g_ev_fd >= 0) return 1;
-  if (g_ev_fd == -2) return 0;                 /* tried and failed: do not retry */
-  { const char *e = getenv("SPINEL_SCHED_POLL");   /* fall back to poll(2) on demand */
-    if (e && *e && *e != '0') { g_ev_fd = -2; return 0; } }
+typedef struct { int fd; short rev; } sp_ev_ready;
+static int  sp_ev_backend_arm(int set, int fd, short want);
+static void sp_ev_backend_del(int set, int fd);
+static int  sp_ev_backend_wait(int set, sp_ev_ready *out, int max, int tmo_ms);
+
+/* The wait's own timeout. Every wake has a kick or an event behind it, so this
+   is a backstop and nothing routes through it; SPINEL_SCHED_STATS counts how
+   often it expires, which should be "rarely" and is how the missing kick was
+   found. */
+#define SP_EV_BACKSTOP_MS 50
+static int sp_ev_disabled(void) {
+  static int asked = 0, off = 0;
+  if (!asked) { const char *e = getenv("SPINEL_SCHED_POLL"); off = (e && *e && *e != '0'); asked = 1; }
+  return off;
+}
+/* Each worker owns a readiness set holding the descriptors of the threads
+   pinned to IT, so the worker that can run a ready thread is the one the
+   kernel wakes -- no monitor round trip, no condvar hand-off (#4306). The set
+   and its kick pipe are created on that worker's first park. */
+static int sp_ev_worker_up(int wid) {   /* PRE: sched lock held */
+  if (wid < 0 || wid >= SP_MAX_WORKERS) return 0;
+  if (g_wslot[wid].evfd > 0) return 1;
+  if (g_wslot[wid].evfd == -2 || sp_ev_disabled()) { g_wslot[wid].evfd = -2; return 0; }
 #ifdef SP_EV_EPOLL
-  g_ev_fd = epoll_create1(EPOLL_CLOEXEC);
+  int fd = epoll_create1(EPOLL_CLOEXEC);
 #else
-  g_ev_fd = kqueue();
-  if (g_ev_fd >= 0) { int fl = fcntl(g_ev_fd, F_GETFD); if (fl >= 0) fcntl(g_ev_fd, F_SETFD, fl | FD_CLOEXEC); }
+  int fd = kqueue();
+  if (fd >= 0) { int fl = fcntl(fd, F_GETFD); if (fl >= 0) fcntl(fd, F_SETFD, fl | FD_CLOEXEC); }
 #endif
-  if (g_ev_fd < 0) { g_ev_fd = -2; return 0; }
+  if (fd < 0) { g_wslot[wid].evfd = -2; return 0; }
+  if (pipe(g_wslot[wid].kick) != 0) { close(fd); g_wslot[wid].evfd = -2; return 0; }
+  for (int i = 0; i < 2; i++) {
+    int fl = fcntl(g_wslot[wid].kick[i], F_GETFL);
+    if (fl >= 0) fcntl(g_wslot[wid].kick[i], F_SETFL, fl | O_NONBLOCK);
+    fl = fcntl(g_wslot[wid].kick[i], F_GETFD);
+    if (fl >= 0) fcntl(g_wslot[wid].kick[i], F_SETFD, fl | FD_CLOEXEC);
+  }
+  g_wslot[wid].evfd = fd;
+  g_wslot[wid].kick_armed = 0;
+  g_ev_fd = fd;   /* any set being up is what tells the monitor the backend is live */
   return 1;
+}
+/* Re-arm the kick pipe. One-shot like everything else in the set. */
+static void sp_ev_arm_kick(int wid) {   /* PRE: sched lock held */
+  if (g_wslot[wid].evfd <= 0 || g_wslot[wid].kick_armed) return;
+  sp_ev_backend_arm(g_wslot[wid].evfd, g_wslot[wid].kick[0], POLLIN);
+  g_wslot[wid].kick_armed = 1;
+}
+/* Break a worker out of its readiness wait. A byte is enough; the reader
+   drains whatever accumulated. */
+static void sp_ev_kick(int wid) {   /* PRE: sched lock held */
+  if (wid < 0 || wid >= SP_MAX_WORKERS || g_wslot[wid].evfd <= 0) return;
+  char c = 1; ssize_t r = write(g_wslot[wid].kick[1], &c, 1); (void)r;
 }
 
 /* Arm one descriptor for `want` (POLLIN / POLLOUT), one-shot. 0 on success.
    The three functions below are the whole platform surface; everything above
    and below them is shared. */
-static int sp_ev_backend_arm(int fd, short want) {
+static int sp_ev_backend_arm(int set, int fd, short want) {
 #ifdef SP_EV_EPOLL
   struct epoll_event e;
   e.events = (uint32_t)((want & POLLIN ? EPOLLIN : 0) | (want & POLLOUT ? EPOLLOUT : 0)) | EPOLLONESHOT;
   e.data.fd = fd;
-  if (epoll_ctl(g_ev_fd, EPOLL_CTL_MOD, fd, &e) == 0) return 0;
+  if (epoll_ctl(set, EPOLL_CTL_MOD, fd, &e) == 0) return 0;
   /* Not in the set: epoll's one-shot only DISABLES, so MOD is the usual arm
      and ADD is the first one. */
-  if (errno == ENOENT) { g_ev_adds++; return epoll_ctl(g_ev_fd, EPOLL_CTL_ADD, fd, &e); }
+  if (errno == ENOENT) { g_ev_adds++; return epoll_ctl(set, EPOLL_CTL_ADD, fd, &e); }
   return -1;
 #else
   /* kqueue's one-shot DELETES the entry when it fires, so every arm is an
@@ -486,30 +582,29 @@ static int sp_ev_backend_arm(int fd, short want) {
   if (want & POLLOUT) EV_SET(&ch[n++], (uintptr_t)fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
   if (!n) return 0;
   g_ev_adds++;
-  return kevent(g_ev_fd, ch, n, NULL, 0, NULL) < 0 ? -1 : 0;
+  return kevent(set, ch, n, NULL, 0, NULL) < 0 ? -1 : 0;
 #endif
 }
 
 /* Drop a descriptor from the set outright (a handle is closing). */
-static void sp_ev_backend_del(int fd) {
+static void sp_ev_backend_del(int set, int fd) {
 #ifdef SP_EV_EPOLL
-  epoll_ctl(g_ev_fd, EPOLL_CTL_DEL, fd, NULL);
+  epoll_ctl(set, EPOLL_CTL_DEL, fd, NULL);
 #else
   struct kevent ch[2];
   EV_SET(&ch[0], (uintptr_t)fd, EVFILT_READ,  EV_DELETE, 0, 0, NULL);
   EV_SET(&ch[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-  kevent(g_ev_fd, ch, 2, NULL, 0, NULL);   /* ENOENT for a filter never armed */
+  kevent(set, ch, 2, NULL, 0, NULL);   /* ENOENT for a filter never armed */
 #endif
 }
 
 /* Wait for readiness. Fills `out` with (descriptor, poll-style events) and
    answers how many, or a negative on error. */
-typedef struct { int fd; short rev; } sp_ev_ready;
-static int sp_ev_backend_wait(sp_ev_ready *out, int max, int tmo_ms) {
+static int sp_ev_backend_wait(int set, sp_ev_ready *out, int max, int tmo_ms) {
 #ifdef SP_EV_EPOLL
   struct epoll_event evs[64];
   if (max > 64) max = 64;
-  int n = epoll_wait(g_ev_fd, evs, max, tmo_ms);
+  int n = epoll_wait(set, evs, max, tmo_ms);
   for (int i = 0; i < n; i++) {
     out[i].fd = evs[i].data.fd;
     out[i].rev = (short)(((evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) ? POLLIN : 0) |
@@ -522,7 +617,7 @@ static int sp_ev_backend_wait(sp_ev_ready *out, int max, int tmo_ms) {
   struct timespec ts;
   ts.tv_sec = tmo_ms / 1000;
   ts.tv_nsec = (long)(tmo_ms % 1000) * 1000000L;
-  int n = kevent(g_ev_fd, NULL, 0, evs, max, &ts);
+  int n = kevent(set, NULL, 0, evs, max, &ts);
   for (int i = 0; i < n; i++) {
     out[i].fd = (int)evs[i].ident;
     /* EV_EOF is a peer that closed: readable (and writable, for a socket whose
@@ -537,33 +632,40 @@ static int sp_ev_backend_wait(sp_ev_ready *out, int max, int tmo_ms) {
 }
 /* Arm `fd` for the union of what its waiters want. Attempted on every park --
    see the note above: never skipped on the belief that an earlier arm stands. */
+static int sp_ev_home_of(sp_thread *t) { return t->home_wid < 0 ? 0 : (int)t->home_wid; }
 static void sp_ev_arm_fd(int fd) {   /* PRE: sched lock held */
   if (fd < 0 || fd >= g_ev_cap) return;
-  short want = 0;
-  for (sp_thread *w = g_ev_tab[fd].waiters; w; w = w->ev_next) want |= w->io_events;
-  if (!want) return;                            /* nobody left: leave it disabled */
-  g_ev_arms++;
-  if (sp_ev_backend_arm(fd, want) == 0) return;
+  /* One descriptor can be waited on by threads pinned to DIFFERENT workers --
+     IO.select over a #to_io wrapper and the IO it wraps, from two threads --
+     so it is armed in each of their sets, for the union of what that worker's
+     waiters want. The list is one element in the ordinary case, which is why
+     the quadratic shape here costs nothing. */
+  int done[8]; int nd = 0;
+  for (sp_thread *w = g_ev_tab[fd].waiters; w; w = w->ev_next) {
+    int h = sp_ev_home_of(w), seen = 0;
+    for (int i = 0; i < nd; i++) if (done[i] == h) { seen = 1; break; }
+    if (seen) continue;
+    if (nd < 8) done[nd++] = h;
+    short want = 0;
+    for (sp_thread *x = g_ev_tab[fd].waiters; x; x = x->ev_next)
+      if (sp_ev_home_of(x) == h) want |= x->io_events;
+    if (!want || g_wslot[h].evfd <= 0) continue;
+    g_ev_arms++;
+    if (sp_ev_backend_arm(g_wslot[h].evfd, fd, want) == 0) continue;
+    g_ev_lost++;
+  }
+  return;
+  {
   /* EBADF, or a descriptor the kernel will not watch (epoll refuses a regular
      file): the waiter falls back on its deadline, which is the same answer
      poll gave for an always-ready file. Counted, so SPINEL_SCHED_STATS shows
      it rather than leaving a silent gap. */
-  g_ev_lost++;
-}
-/* The monitor's own wake pipe joins the set, so one wait covers both the
-   descriptors and the "a deadline moved" nudge. One-shot like the rest, so it
-   is re-armed after each delivery. */
-static int g_ev_pipe_armed = 0;
-static void sp_ev_arm_pipe(void) {
-  if (g_ev_fd < 0 || g_sysmon_pipe[0] < 0 || g_ev_pipe_armed) return;
-  sp_ev_backend_arm(g_sysmon_pipe[0], POLLIN);
-  g_ev_pipe_armed = 1;
-}
+  } }
 /* Returns 0 when the descriptor could not be taken into the set. The waiter is
    then on its deadline alone -- the same degradation the poll path already had
    when its own array could not grow. */
 static int sp_ev_park(sp_thread *t, int fd) {   /* PRE: sched lock held */
-  if (!sp_ev_up() || fd < 0) return 0;
+  if (fd < 0 || !sp_ev_worker_up(sp_ev_home_of(t))) return 0;
   if (fd >= g_ev_cap) {
     int nc = g_ev_cap ? g_ev_cap : 64;
     while (nc <= fd) nc *= 2;
@@ -577,6 +679,65 @@ static int sp_ev_park(sp_thread *t, int fd) {   /* PRE: sched lock held */
   sp_ev_arm_fd(fd);
   return 1;
 }
+/* Hand one readiness event to the threads waiting on that descriptor. Called
+   by whichever worker's set produced it, so `only_home` filters to the threads
+   that worker can actually run -- a descriptor shared by two homes is armed in
+   both sets and each worker takes its own. Re-arms for whoever is left, since
+   the arm is one-shot and a waiter still parked must not be stranded.
+   Answers how many threads it readied. PRE: sched lock held. */
+static void sp_sched_wake_for(sp_thread *t);
+static void runq_requeue(sp_thread *t);
+static void sp_ev_drop(sp_thread *t);
+static int sp_ev_dispatch(int rfd, short rev, int only_home) {
+  if (rfd < 0 || rfd >= g_ev_cap) return 0;
+  int n = 0;
+  for (sp_thread *w = g_ev_tab[rfd].waiters, *nx = NULL; w; w = nx) {
+    nx = w->ev_next;
+    if (!(w->io_events & rev)) continue;
+    if (w->wait_head != &g_io_waiters) continue;
+    if (only_home >= 0 && sp_ev_home_of(w) != only_home) continue;
+    g_mon_readied++;
+    for (sp_thread **pp = &g_io_waiters; *pp; pp = &(*pp)->wait_next)
+      if (*pp == w) { *pp = w->wait_next; break; }
+    sp_ev_drop(w);
+    w->wait_next = NULL; w->wait_head = NULL;
+    w->io_revents = rev; w->io_fd = -1;
+    n++;
+    if (w == &g_main_thread) { w->state = SP_TH_RUNNABLE; SCHED_WAKE_ALL(); }
+    else if (w->off_cpu) { w->state = SP_TH_RUNNABLE; runq_requeue(w); sp_sched_wake_for(w); }
+    else w->wake_pending = 1;
+  }
+  sp_ev_arm_fd(rfd);
+  return n;
+}
+
+/* Wait on this worker's own readiness set for up to `tmo_ms`, then dispatch
+   what came back. Releases and retakes the lock around the wait. Answers how
+   many threads it readied. PRE/POST: sched lock held. */
+static int sp_ev_worker_wait(int wid, int tmo_ms) {
+  if (g_wslot[wid].evfd <= 0) return 0;
+  sp_ev_ready evs[64];
+  sp_ev_arm_kick(wid);
+  g_wslot[wid].ev_waiting = 1;
+  int set = g_wslot[wid].evfd;
+  SCHED_UNLOCK();
+  int en = sp_ev_backend_wait(set, evs, 64, tmo_ms);
+  SCHED_LOCK();
+  g_wslot[wid].ev_waiting = 0;
+  if (en == 0) g_ev_backstop++;
+  g_mon_polls++; g_mon_pollfds += (unsigned long long)(en > 0 ? en : 0);
+  int n = 0;
+  for (int i = 0; i < en; i++) {
+    if (evs[i].fd == g_wslot[wid].kick[0]) {
+      char buf[64]; while (read(g_wslot[wid].kick[0], buf, sizeof buf) > 0) {}
+      g_wslot[wid].kick_armed = 0;
+      continue;
+    }
+    n += sp_ev_dispatch(evs[i].fd, evs[i].rev, wid);
+  }
+  return n;
+}
+
 /* Take a thread off its descriptor's waiter list. Every path that unlinks a
    waiter from g_io_waiters goes through here. */
 static void sp_ev_drop(sp_thread *t) {   /* PRE: sched lock held */
@@ -592,7 +753,8 @@ static void sp_ev_drop(sp_thread *t) {   /* PRE: sched lock held */
 void sp_sched_ev_forget(int fd) {
   if (fd < 0) return;
   SCHED_LOCK();
-  if (g_ev_fd >= 0) sp_ev_backend_del(fd);
+  for (int wid = 0; wid < SP_MAX_WORKERS; wid++)
+    if (g_wslot[wid].evfd > 0) sp_ev_backend_del(g_wslot[wid].evfd, fd);
   if (fd < g_ev_cap) {
     for (sp_thread *w = g_ev_tab[fd].waiters; w; ) { sp_thread *n = w->ev_next; w->ev_next = NULL; w = n; }
     g_ev_tab[fd].waiters = NULL;
@@ -987,6 +1149,9 @@ static void sp_sched_pump(sp_thread *target, int may_wait) {
     if (g_stw_active) { sp_stw_park_locked(); continue; }   /* park main through STW too */
 #endif
     if (target && target->state == SP_TH_DEAD) return;
+#ifdef SP_EV_BACKEND
+    if (g_wslot[0].evfd > 0) sp_ev_worker_wait(0, 0);   /* see sp_worker_main */
+#endif
     /* main blocked on a Queue/Mutex and a runnable thread just woke it */
     if (g_main_thread.state == SP_TH_RUNNABLE) { g_main_thread.state = SP_TH_RUNNING; return; }
     /* Run a green thread on the main worker only at N=1. With helpers present,
@@ -1019,6 +1184,14 @@ static void sp_sched_pump(sp_thread *target, int may_wait) {
        queue is empty do we fall through -- drained, or a deadlock the caller
        observes. */
     if (may_wait && (g_nrunning > 0 || g_runnable > 0 || g_sleepers || g_io_waiters)) {
+#ifdef SP_EV_BACKEND
+      /* Main is worker 0, and threads pin to it -- at SPINEL_WORKERS=1 all of
+         them do. So main waits on worker 0's readiness set like any other
+         worker, or nothing would ever deliver to the threads pinned here
+         (#4306). The timeout keeps the pump's own predicates -- target death,
+         main made runnable -- checked on a bound. */
+      if (g_wslot[0].evfd > 0) { sp_ev_worker_wait(0, SP_EV_BACKSTOP_MS); continue; }
+#endif
       pthread_cond_wait(&g_sched_work, &g_sched_lock);
       continue;
     }
@@ -1413,44 +1586,25 @@ static void *sp_sysmon_main(void *arg) {
       if (dt < 0.0005) dt = 0.0005;
       int tmo = (int)(dt * 1000.0); if (tmo < 1) tmo = 1;
 #ifdef SP_EV_BACKEND
-      if (g_ev_fd >= 0) {
-        /* The interest set lives in the kernel, so this costs the READY
-           descriptors rather than the parked population. Slot 0's job -- the
-           wake pipe -- is done by registering it in the set once. */
-        sp_ev_ready evs[64];
-        sp_ev_arm_pipe();
-        SCHED_UNLOCK();
-        int en = sp_ev_backend_wait(evs, 64, tmo);
-        SCHED_LOCK();
-        g_mon_polls++; g_mon_pollfds += (unsigned long long)(en > 0 ? en : 0);
-        for (int i = 0; i < en; i++) {
-          int rfd = evs[i].fd;
-          if (rfd == g_sysmon_pipe[0]) {
-            char buf[64]; while (read(g_sysmon_pipe[0], buf, sizeof buf) > 0) {}
-            g_ev_pipe_armed = 0; sp_ev_arm_pipe();
-            continue;
-          }
-          short rev = evs[i].rev;
-          if (rfd < 0 || rfd >= g_ev_cap) continue;
-          /* Fan out to every waiter on this descriptor whose events it answers,
-             then re-arm for whoever is left -- one-shot disabled it, and a
-             waiter still parked must not be stranded. */
-          for (sp_thread *w = g_ev_tab[rfd].waiters, *nx = NULL; w; w = nx) {
-            nx = w->ev_next;
-            if (!(w->io_events & rev)) continue;
-            if (w->wait_head != &g_io_waiters) continue;
-            g_mon_readied++;
-            for (sp_thread **pp = &g_io_waiters; *pp; pp = &(*pp)->wait_next)
-              if (*pp == w) { *pp = w->wait_next; break; }
-            sp_ev_drop(w);
-            w->wait_next = NULL; w->wait_head = NULL;
-            w->io_revents = rev; w->io_fd = -1;
-            if (w == &g_main_thread) { w->state = SP_TH_RUNNABLE; SCHED_WAKE_ALL(); }
-            else if (w->off_cpu) { w->state = SP_TH_RUNNABLE; runq_requeue(w); sp_sched_wake_for(w); }
-            else w->wake_pending = 1;
-          }
-          sp_ev_arm_fd(rfd);
-        }
+      if (g_ev_fd > 0) {
+        /* The descriptors are in the WORKERS' sets now, so the monitor has no
+           fds of its own to watch: it is a timer, for deadlines and the
+           timeslice, and a condvar is the right thing to wait on. Its own wake
+           pipe goes with them -- sp_sysmon_wake signals the condvar. */
+        /* pthread_cond_timedwait's deadline is on CLOCK_REALTIME, and every
+           other clock in this file is CLOCK_MONOTONIC. Handing it a monotonic
+           stamp names a moment decades in the past, so the wait returns at
+           once, every time: the monitor spun 1.5 MILLION turns where it should
+           have taken 4,400, and burned a quarter of a core doing nothing. */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += (time_t)dt;
+        ts.tv_nsec += (long)((dt - (double)(time_t)dt) * 1e9);
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        g_mon_polls++;
+        g_sysmon_idle = 1;
+        pthread_cond_timedwait(&g_sysmon_cv, &g_sched_lock, &ts);
+        g_sysmon_idle = 0;
         continue;
       }
 #endif
@@ -1626,8 +1780,29 @@ static void *sp_worker_main(void *arg) {
   for (;;) {
     if (g_stw_active) { sp_stw_park_locked(); continue; }
     if (g_shutdown) break;
+#ifdef SP_EV_BACKEND
+    /* Drain what is ready before picking, every turn. A worker with runnable
+       work never reaches the blocking wait below, and its OWN set is the only
+       place its parked threads are delivered from -- so without this a busy
+       worker starves them until it happens to idle. That showed as a
+       ping-pong that ran at full speed on one worker and fell to a fifth of it
+       on four, run to run. One zero-timeout wait per scheduling turn is what
+       every netpoll scheduler pays for the same reason. */
+    if (g_wslot[wid].evfd > 0) sp_ev_worker_wait(wid, 0);
+#endif
     sp_thread *t = sched_pick(wid);   /* own queue, then global, then steal */
     if (t) { run_thread_once(t); continue; }  /* run_thread_once signals quiescence on the last one */
+#ifdef SP_EV_BACKEND
+    /* Nothing to run: wait on THIS worker's readiness set, so a descriptor
+       belonging to a thread pinned here wakes the worker that can run it --
+       no monitor round trip and no condvar hand-off (#4306). The kick pipe in
+       the same set is how a stop-the-world, a shutdown, or work enqueued for
+       us gets through. The timeout is a backstop, not the mechanism. */
+    if (g_wslot[wid].evfd > 0) {
+      sp_ev_worker_wait(wid, SP_EV_BACKSTOP_MS);
+      continue;
+    }
+#endif
     /* `idle` is set under the lock the enqueue also holds, so a wake issued
        between our sched_pick and this wait cannot be lost. */
     g_wslot[wid].idle = 1;
@@ -1758,8 +1933,8 @@ static void sp_sched_report_stats(void) {
 #ifdef SP_EV_BACKEND
   if (g_ev_fd >= 0 || g_ev_arms)
     fprintf(stderr, "[sched] events: %llu arms (%llu adds), %llu refused, "
-                    "%llu deadline expiries\n",
-            g_ev_arms, g_ev_adds, g_ev_lost, g_ev_timeouts);
+                    "%llu deadline expiries, %llu backstop expiries\n",
+            g_ev_arms, g_ev_adds, g_ev_lost, g_ev_timeouts, g_ev_backstop);
 #endif
 #endif
 }
