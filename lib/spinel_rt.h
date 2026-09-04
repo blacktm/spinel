@@ -6358,6 +6358,49 @@ static sp_PolyArray *sp_poly_zip_none(sp_RbVal a) {
   }
   return r;
 }
+/* `a.zip(*xs)` and `a.product(*xs)`: the splat spreads across the ARGUMENT
+   LIST, one operand per element, and its length is only known at run time --
+   which is why the emitters, whose arms read a splat as a single operand,
+   refused these shapes rather than answer wrongly (#4322, #4323). `ops` holds
+   the spread operand list; the receiver is not in it. */
+static sp_PolyArray *sp_poly_zip_n(sp_RbVal a, sp_PolyArray *ops) {
+  SP_GC_ROOT_RBVAL(a);
+  SP_GC_ROOT(ops);
+  sp_PolyArray *r = sp_PolyArray_new();
+  SP_GC_ROOT(r);
+  /* Convert each operand once: sp_zip_arg raises CRuby's TypeError for one
+     that answers no :each, and every row reads the conversion again. */
+  sp_PolyArray *cols = sp_PolyArray_new();
+  SP_GC_ROOT(cols);
+  for (sp_int j = 0; j < ops->len; j++)
+    sp_PolyArray_push(cols, sp_box_poly_array(sp_zip_arg(ops->data[j])));
+  sp_int n = sp_poly_arr_len(a);
+  for (sp_int i = 0; i < n; i++) {
+    sp_PolyArray *row = sp_PolyArray_new();
+    SP_GC_ROOT(row);
+    sp_PolyArray_push(row, sp_poly_each_elem(a, i));
+    for (sp_int j = 0; j < cols->len; j++) {
+      sp_PolyArray *cj = (sp_PolyArray *)cols->data[j].v.p;
+      sp_PolyArray_push(row, (cj && i < cj->len) ? cj->data[i] : sp_box_nil());
+    }
+    sp_PolyArray_push(r, sp_box_poly_array(row));
+  }
+  return r;
+}
+static sp_PolyArray *sp_poly_set_operand(sp_RbVal v);   /* fwd */
+static sp_PolyArray *sp_poly_product_n(sp_RbVal a, sp_PolyArray *ops) {
+  SP_GC_ROOT_RBVAL(a);
+  SP_GC_ROOT(ops);
+  /* the receiver is operand 0, so the tuples are drawn in source order */
+  sp_PolyArray *all = sp_PolyArray_new();
+  SP_GC_ROOT(all);
+  sp_PolyArray_push(all, a);
+  for (sp_int i = 0; i < ops->len; i++) {
+    (void)sp_poly_set_operand(ops->data[i]);   /* CRuby's TypeError for a non-Array */
+    sp_PolyArray_push(all, ops->data[i]);
+  }
+  return sp_poly_product(all->data, all->len);
+}
 /* Kernel#warn's per-message rendering: an Array contributes one line per
    element (recursively, so a nested array flattens and an empty one
    contributes nothing); anything else is its to_s on a line of its own. A

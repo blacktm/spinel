@@ -201,6 +201,46 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       emit_expr(c, recvZ, b);
       return 1;
     }
+    /* `zip(*xs)` / `product(*xs)`: the splat spreads across the ARGUMENT LIST,
+       one operand per element, and its length is only known at run time. Every
+       arm below reads a splat as a SINGLE operand, so zip handed an array where
+       a value was expected and stopped the C build, and product refused the
+       shape outright rather than answer wrongly (#4322, #4323). Build the
+       operand list here -- a splat contributes each of its elements, anything
+       else contributes itself -- and hand it to the variadic runtime. */
+    if (nmZ && recvZ >= 0 && acZ >= 1 && nt_ref(ntZ, id, "block") < 0 &&
+        (sp_streq(nmZ, "zip") || sp_streq(nmZ, "product")) &&
+        (ty_is_array(comp_ntype(c, recvZ)) || comp_ntype(c, recvZ) == TY_POLY)) {
+      const int *avZ = nt_arr(ntZ, aZ, "arguments", &acZ);
+      int splZ = 0;
+      for (int ai = 0; ai < acZ; ai++)
+        if (nt_kind(ntZ, avZ[ai]) == NK_SplatNode) { splZ = 1; break; }
+      if (splZ) {
+        int tops = ++g_tmp;
+        buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tops, tops);
+        for (int ai = 0; ai < acZ; ai++) {
+          if (nt_kind(ntZ, avZ[ai]) == NK_SplatNode) {
+            int sx = nt_ref(ntZ, avZ[ai], "expression");
+            int tsp = ++g_tmp, tsi = ++g_tmp;
+            buf_printf(b, " { sp_PolyArray *_t%d = sp_enum_items_from(", tsp);
+            if (sx >= 0) emit_boxed(c, sx, b); else buf_puts(b, "sp_box_nil()");
+            buf_printf(b, "); SP_GC_ROOT(_t%d);"
+                          " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
+                          " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }",
+                       tsp, tsi, tsi, tsp, tsi, tops, tsp, tsi);
+          }
+          else {
+            buf_printf(b, " sp_PolyArray_push(_t%d, ", tops);
+            emit_boxed(c, avZ[ai], b);
+            buf_puts(b, ");");
+          }
+        }
+        buf_printf(b, " sp_poly_%s_n(", sp_streq(nmZ, "zip") ? "zip" : "product");
+        emit_boxed(c, recvZ, b);
+        buf_printf(b, ", _t%d); })", tops);
+        return 1;
+      }
+    }
     /* zip with nothing to zip against: each element alone in a one-element
        array. Every zip arm below is written for argc >= 1 (#3612). */
     if (nmZ && recvZ >= 0 && acZ == 0 && nt_ref(ntZ, id, "block") < 0 &&
