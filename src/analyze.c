@@ -142,6 +142,40 @@ static int method_name_implicitly_invoked(const char *nm) {
   return 0;
 }
 
+/* Can this fold seed only ever be a BUILTIN? A literal, or an expression whose
+   value a literal decides, can never reach a user class's `+`, so a seeded
+   `sum` written with one must not keep every `+` in the program alive. Asked
+   of the Prism node because compute_reachable runs before inference. */
+static int an_seed_is_builtin(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  switch (nt_kind(nt, id)) {
+    case NK_IntegerNode: case NK_FloatNode: case NK_StringNode:
+    case NK_InterpolatedStringNode: case NK_SymbolNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_ArrayNode: case NK_HashNode: case NK_RangeNode:
+    case NK_RationalNode: case NK_ImaginaryNode:
+      return 1;
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int rcv = nt_ref(nt, id, "receiver");
+      if (!nm) return 0;
+      /* the Kernel constructors, which name a builtin class and answer one */
+      if (rcv < 0 &&
+          (sp_streq(nm, "Rational") || sp_streq(nm, "Complex") ||
+           sp_streq(nm, "Float") || sp_streq(nm, "Integer") ||
+           sp_streq(nm, "String") || sp_streq(nm, "Array")))
+        return 1;
+      /* arithmetic ON a literal is still a literal's class: `10**30`, `-1`.
+         An operator name is the one that does not start like an identifier. */
+      if (rcv >= 0 && nm[0] &&
+          !((nm[0] >= 'a' && nm[0] <= 'z') || (nm[0] >= 'A' && nm[0] <= 'Z') || nm[0] == '_'))
+        return an_seed_is_builtin(nt, rcv);
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
 void compute_reachable(Compiler *c) {
   /* Build per-scope call sets (CallNode names, not entering nested DefNodes). */
   char ***scope_calls = calloc((size_t)c->nscopes, sizeof(char **));
@@ -282,6 +316,40 @@ void compute_reachable(Compiler *c) {
       for (int k = 0; k < an; k++)
         if (nt_kind(c->nt, av[k]) == NK_SymbolNode && nt_str(c->nt, av[k], "value"))
           MARK_NAME(nt_str(c->nt, av[k], "value"));
+      /* `reduce(seed, &:sym)` spells the same operator in the block, where the
+         argument walk above cannot see it. */
+      { int blk = nt_ref(c->nt, id, "block");
+        if (blk >= 0 && nt_type(c->nt, blk) && sp_streq(nt_type(c->nt, blk), "BlockArgumentNode")) {
+          int ex = nt_ref(c->nt, blk, "expression");
+          if (ex >= 0 && nt_kind(c->nt, ex) == NK_SymbolNode && nt_str(c->nt, ex, "value"))
+            MARK_NAME(nt_str(c->nt, ex, "value"));
+        } }
+    }
+    /* `sum(seed)` names no operator at all: the fold applies the SEED's `+`
+       once per element. A user class used as the seed therefore needs its `+`
+       kept, exactly as `reduce(seed, :+)` does -- without it the dispatch arm
+       was emitted empty and the fold raised NoMethodError for a method the
+       program defines. MARK_NAME is by name and global, so ask first whether
+       the seed could BE a user object: a literal, or an expression that can
+       only build a builtin, never reaches a user `+`, and marking for one
+       resurrects every `+` in the program -- including bodies the emitter
+       cannot compile, which turned a program that built into one that does
+       not. A local, an ivar, a constant or a call such as `Money.new(0)`
+       marks, which is the same reach `reduce(seed, :+)` already has. */
+    for (int id = 0; id < c->nt->count; id++) {
+      if (nt_kind(c->nt, id) != NK_CallNode) continue;
+      { const char *nm = nt_str(c->nt, id, "name");
+        if (!nm || !sp_streq(nm, "sum")) continue; }
+      if (nt_ref(c->nt, id, "block") >= 0) continue;   /* a block decides what is summed */
+      /* `"abc".sum(16)` is String's checksum width, not a fold seed */
+      { int rcv = nt_ref(c->nt, id, "receiver");
+        if (rcv >= 0 && nt_kind(c->nt, rcv) == NK_StringNode) continue; }
+      { int args = nt_ref(c->nt, id, "arguments");
+        int an = 0; const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &an) : NULL;
+        if (an < 1 || !av) continue;
+        if (an_seed_is_builtin(c->nt, av[0])) continue;
+        MARK_NAME("+");
+        break; }
     }
     while (qhead < qtail) { int s = queue[qhead++]; for (int ni = 0; ni < sc_n[s]; ni++) MARK_NAME(scope_calls[s][ni]); }
   }

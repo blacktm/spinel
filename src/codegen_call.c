@@ -12728,17 +12728,17 @@ int emit_arg_type_guards(Compiler *c, int id, Buf *b) {
     TyKind art = ar >= 0 ? comp_ntype(c, ar) : TY_UNKNOWN;
     if (ar >= 0 && an2 && ac2 >= 1 && av2 && ty_is_array(art) &&
         !user_defines_or_reads(c, an2)) {
-      /* which argument has to be an Integer, and which an Array */
+      /* Which argument has to be an Integer, and which an Array. `sum` is
+         deliberately absent: its seed is not an Integer slot at all -- CRuby's
+         accumulator IS the seed, and a seed of any class folds from it with
+         that class's own `+`. The blanket "X can't be coerced into Integer"
+         this used to raise for a literal String/Symbol/Array/Hash seed was the
+         Integer wording for what is really String#+ or Symbol's missing `+`;
+         sp_poly_sum_seed reaches the operator, which words each one CRuby's
+         way. */
       int want_int = -1, want_arr = -1;
       if (sp_streq(an2, "rotate")) want_int = 0;
       else if (sp_streq(an2, "fill") && ac2 >= 2) want_int = 1;
-      /* Array#sum over a String or Array element list folds by concatenation,
-         and its seed is legitimately one of those: only a NUMERIC element list
-         wants an Integer seed. */
-      /* ... and a BLOCK decides what is summed (`a.sum("") { |x| x.to_s }`),
-         so only the blockless numeric form wants an Integer seed. */
-      else if (sp_streq(an2, "sum") && ty_is_numeric(ty_array_elem(art)) &&
-               nt_ref(nt, id, "block") < 0) want_int = 0;
       else if (sp_streq(an2, "product")) want_arr = 0;
       const char *badcls = NULL;
       int check = want_int >= 0 ? want_int : want_arr;
@@ -12760,11 +12760,8 @@ int emit_arg_type_guards(Compiler *c, int id, Buf *b) {
         TyKind rty3 = comp_ntype(c, id);
         const char *dv3 = default_value(rty3);
         buf_puts(b, "({ (void)("); emit_expr(c, ar, b); buf_puts(b, "); ");
-        if (want_int >= 0 && sp_streq(an2, "sum"))
-          buf_printf(b, "sp_raise_cls(\"TypeError\", \"%s can't be coerced into Integer\"); ", badcls);
-        else
-          buf_printf(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into %s\"); ",
-                     badcls, want_int >= 0 ? "Integer" : "Array");
+        buf_printf(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into %s\"); ",
+                   badcls, want_int >= 0 ? "Integer" : "Array");
         buf_printf(b, "%s; })", dv3 ? dv3 : "0");
         return 1;
       }
@@ -27673,8 +27670,13 @@ else {
       buf_puts(b, "sp_StrPolyHash_new()"); return;   /* {}.to_h == {} (#2410) */
     }
     if (argc <= 1 && sp_streq(name, "sum") && nt_ref(nt, id, "block") < 0) {
-      /* {}.sum == the init (or 0) (#2416) */
-      if (argc == 1) emit_expr(c, argv[0], b); else buf_puts(b, "0");
+      /* {}.sum == the init (or 0) (#2416). A nil or Boolean init has no scalar
+         slot to be answered in and the call is typed poly for it, so the init
+         has to be boxed there -- emitted raw, `{}.sum(nil)` answered 0. */
+      TyKind hst = comp_ntype(c, id);
+      if (argc == 0) buf_puts(b, hst == TY_POLY ? "sp_box_int(0)" : "0");
+      else if (hst == TY_POLY) emit_boxed(c, argv[0], b);
+      else emit_expr(c, argv[0], b);
       return;
     }
     if (argc == 0 && (sp_streq(name, "min") || sp_streq(name, "max"))) {
@@ -27771,8 +27773,7 @@ else {
     for (int k = 0; k < c->nclasses; k++)
       if (comp_method_in_chain(c, k, name, NULL) >= 0) ncand9++;
     if (ncand9 == 0) {
-      buf_puts(b, "sp_poly_sum_seed("); emit_expr(c, recv, b); buf_puts(b, ", ");
-      emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      emit_poly_sum_seed(c, recv, argv[0], b);
       return;
     }
   }

@@ -590,6 +590,12 @@ void emit_box_open(Compiler *c, TyKind t, Buf *b);
 void emit_box_close(Compiler *c, TyKind t, Buf *b);
 /* "Int" / "Str" / "Float" for the sp_<K>Array_* runtime family. */
 const char *array_kind(TyKind t);
+/* comp_ntype for a fold seed, with an empty `[]` / `{}` literal resolved to
+   its container kind rather than left TY_UNKNOWN (see types.c). */
+TyKind fold_seed_ntype(Compiler *c, int node);
+/* `sum(seed)` through sp_poly_sum_seed, with both operands boxed into rooted
+   temporaries in receiver-then-seed order (see codegen_util.c). */
+void emit_poly_sum_seed(Compiler *c, int recv, int seed, Buf *b);
 void emit_c_escaped_n(Buf *b, const char *s, size_t len);
 void emit_c_escaped(Buf *b, const char *s);
 /* A poly RHS assigned into a scalar slot needs an unbox. The statement form
