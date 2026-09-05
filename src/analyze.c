@@ -1070,10 +1070,24 @@ void mark_proc_captures(Compiler *c) {
       int myframe = procof ? procof[id] : -1;
       for (int w = 0; w < nt->count && !owned; w++) {
         if (c->nscope[w] != encl) continue;
-        if (procof ? procof[w] != myframe : inproc[w]) continue;
         if (!a_is_write_node(nt_type(nt, w))) continue;
         const char *wn = nt_str(nt, w, "name");
-        if (wn && sp_streq(wn, nm)) owned = 1;
+        if (!wn || !sp_streq(wn, nm)) continue;
+        if (!procof) { if (!inproc[w]) owned = 1; continue; }
+        /* The write's frame is this proc's own, or one that ENCLOSES it. An
+           enclosing frame's write is just as capturable: a_collect_used is
+           deep, so every proc between that write and this reader has the name
+           in its own used set and cells it too, and the chain of cells is what
+           this proc reads through. Accepting only myframe refused a block
+           nested inside a Thread whose body never names the variable directly
+           -- the write sat in the outermost frame, two levels up, and the
+           compiler reported an uncaptured outer variable (#4349). */
+        int wf = procof[w], f = myframe;
+        for (;;) {
+          if (wf == f) { owned = 1; break; }
+          if (f < 0) break;
+          f = procof[f];
+        }
       }
       /* a param of an ENCLOSING proc: it lives in that proc's frame (a "later
          slice"), and this proc closes over it -- the enclosing proc's prologue
