@@ -18695,10 +18695,20 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          a static class/symbol name with no marker byte, which _bin would read
          out of bounds at s[-1]. */
       if (argc == 1) {
-        int sk = comp_ntype(c, argv[0]) == TY_STRING;
-        buf_printf(b, "%s(%s, ", sk ? "sp_File_write_bin" : "sp_File_write", r);
-        emit_to_s_expr(c, argv[0], b);
-        buf_puts(b, ")");
+        /* An operand whose class is only known at run time picks the entry by
+           its TAG, not by its static type: chosen statically it took the plain
+           entry and an embedded NUL truncated the write. */
+        if (comp_ntype(c, argv[0]) == TY_POLY) {
+          buf_printf(b, "sp_File_write_poly(%s, ", r);
+          emit_boxed(c, argv[0], b);
+          buf_puts(b, ")");
+        }
+        else {
+          int sk = comp_ntype(c, argv[0]) == TY_STRING;
+          buf_printf(b, "%s(%s, ", sk ? "sp_File_write_bin" : "sp_File_write", r);
+          emit_to_s_expr(c, argv[0], b);
+          buf_puts(b, ")");
+        }
       }
       else if (argc >= 2) {
         int tw = ++g_tmp;
@@ -18707,6 +18717,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
            interleaves them, so each write is its own held unit rather than
            the call's */
         for (int k = 0; k < argc; k++) {
+          if (comp_ntype(c, argv[k]) == TY_POLY) {   /* see the one-argument form */
+            buf_printf(b, " _t%d += sp_File_write_poly(%s, ", tw, r);
+            emit_boxed(c, argv[k], b);
+            buf_puts(b, ");");
+            continue;
+          }
           int sk = comp_ntype(c, argv[k]) == TY_STRING;
           ConvHold hk; memset(&hk, 0, sizeof hk);
           ConvHold *outer = g_conv_hold; g_conv_hold = &hk;

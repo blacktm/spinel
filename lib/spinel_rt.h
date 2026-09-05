@@ -1839,6 +1839,17 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
    class is a pointer the user-defined #to_io just returned, and the
    dispatch already vetted it. NULL is the "not an IO" answer the
    dispatch turns into the caller's TypeError. */
+/* IO#write of an operand whose class is only known at run time. A String
+   writes through the binary entry so an embedded NUL survives; anything else
+   stringifies through the plain one, which it must -- a static class or symbol
+   name has no marker byte, and the _bin entry would read s[-1] out of bounds.
+   The typed-receiver arm chose by the operand's STATIC type, so a poly operand
+   took the plain entry and a NUL truncated the write; the poly-receiver arm
+   already tested the tag, and now both do. */
+static SP_INLINE sp_int sp_File_write_poly(sp_File *f, sp_RbVal v) {
+  if (v.tag == SP_TAG_STR) return sp_File_write_bin(f, v.v.s);
+  return sp_File_write(f, sp_poly_to_s(v));
+}
 static inline sp_File *sp_poly_to_file(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return (sp_File *)v.v.p;
   return NULL;
