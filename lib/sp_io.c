@@ -97,7 +97,6 @@ sp_File *sp_io_fdopen_sock(int fd, const char *kind) {SP_GC_ROOT_STR(kind);
   return f;
 }
 
-SP_NORETURN static void sp_file_raise_errno(const char *op, const char *path);
 /* Park the calling green thread until the handle has readable data, so a
    blocking fgets/fread does not pin its worker while the peer is idle. A
    no-op when stdio already buffered data (waiting then would stall on the
@@ -1078,25 +1077,27 @@ sp_bool sp_file_symlink(const char *path) {
   return path && lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
 }
 
-/* map errno to the matching Errno:: class the way sp_cold.c's File ops do */
-SP_NORETURN static void sp_file_raise_errno(const char *op, const char *path) {SP_GC_ROOT_STR(op);SP_GC_ROOT_STR(path);
-  sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" :
-               errno == EACCES ? "Errno::EACCES" :
-               errno == EEXIST ? "Errno::EEXIST" :
-               errno == EPERM  ? "Errno::EPERM"  :
-               errno == EBADF  ? "Errno::EBADF"  :
-               errno == EINVAL ? "Errno::EINVAL" :
-               errno == EISDIR ? "Errno::EISDIR" :
-               errno == ENOTDIR ? "Errno::ENOTDIR" :
-               errno == EADDRINUSE ? "Errno::EADDRINUSE" :
-               errno == EADDRNOTAVAIL ? "Errno::EADDRNOTAVAIL" :
-               errno == ECONNREFUSED ? "Errno::ECONNREFUSED" :
-               errno == ECONNRESET ? "Errno::ECONNRESET" :
-               errno == EPIPE  ? "Errno::EPIPE"  :
-               errno == EAGAIN ? "Errno::EAGAIN" :
-               errno == EAFNOSUPPORT ? "Errno::EAFNOSUPPORT" :
-               errno == ENOTCONN ? "Errno::ENOTCONN" : "SystemCallError",
-               sp_sprintf("%s @ %s - %s", strerror(errno), op, path ? path : ""));
+/* map errno to the matching Errno:: class (see sp_io.h) */
+SP_NORETURN void sp_file_raise_errno(const char *op, const char *path) {SP_GC_ROOT_STR(op);SP_GC_ROOT_STR(path);
+  int e = errno;   /* read once, before the rooting or the formatting can touch it */
+  sp_raise_cls(e == ENOENT ? "Errno::ENOENT" :
+               e == EACCES ? "Errno::EACCES" :
+               e == EEXIST ? "Errno::EEXIST" :
+               e == EPERM  ? "Errno::EPERM"  :
+               e == EBADF  ? "Errno::EBADF"  :
+               e == EINVAL ? "Errno::EINVAL" :
+               e == EISDIR ? "Errno::EISDIR" :
+               e == ENOTDIR ? "Errno::ENOTDIR" :
+               e == ENOTEMPTY ? "Errno::ENOTEMPTY" :
+               e == EADDRINUSE ? "Errno::EADDRINUSE" :
+               e == EADDRNOTAVAIL ? "Errno::EADDRNOTAVAIL" :
+               e == ECONNREFUSED ? "Errno::ECONNREFUSED" :
+               e == ECONNRESET ? "Errno::ECONNRESET" :
+               e == EPIPE  ? "Errno::EPIPE"  :
+               e == EAGAIN ? "Errno::EAGAIN" :
+               e == EAFNOSUPPORT ? "Errno::EAFNOSUPPORT" :
+               e == ENOTCONN ? "Errno::ENOTCONN" : "SystemCallError",
+               sp_sprintf("%s @ %s - %s", strerror(e), op, path ? path : ""));
 }
 
 sp_bool sp_file_owned(const char *path) {
@@ -1173,8 +1174,19 @@ sp_int sp_file_utime(double atime, double mtime, const char *path) {SP_GC_ROOT_S
    the old fopen probe hung File.exist? on a fresh mkfifo path (#3118). stat
    also answers true for directories, matching CRuby. */
 sp_bool sp_file_exist(const char *path) { struct stat st; return path && stat(path, &st) == 0; }
-void sp_file_delete(const char *path) { remove(path); }
-void sp_file_rename(const char *from, const char *to) { rename(from, to); }
+/* unlink(2), not remove(3): remove would take a directory too, which
+   File.delete refuses (EPERM here, EISDIR on Linux), as CRuby does. */
+void sp_file_delete(const char *path) {SP_GC_ROOT_STR(path);
+  if (unlink(path ? path : "") != 0) sp_file_raise_errno("apply2files", path);
+}
+void sp_file_rename(const char *from, const char *to) {SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);
+  if (rename(from ? from : "", to ? to : "") != 0) {
+    int e = errno;
+    const char *pair = sp_sprintf("(%s, %s)", from ? from : "", to ? to : "");
+    errno = e;
+    sp_file_raise_errno("rb_file_s_rename", pair);
+  }
+}
 
 /* --- IO instance methods that ride the underlying fd (#3038) ------------- */
 

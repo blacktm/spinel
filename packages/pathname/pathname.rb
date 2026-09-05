@@ -391,8 +391,12 @@ class Pathname
     self
   end
 
+  # CRuby's order: the directory unlink first, the file unlink on ENOTDIR, so
+  # a missing path reports dir_s_rmdir there and here alike.
   def delete
-    directory? ? Dir.rmdir(@path) : File.delete(@path)
+    Dir.unlink(@path)
+  rescue Errno::ENOTDIR
+    File.unlink(@path)
   end
 
   def unlink
