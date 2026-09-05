@@ -183,6 +183,31 @@ static TyKind emit_product_operand(Compiler *c, int node, TyKind at, Buf *b) {
   return at;
 }
 
+/* The class a builtin type answers to #class, for a "no implicit conversion of
+   X into Array" message. Only the kinds conv_to_ary_impossible admits. */
+static const char *conv_builtin_class_name(TyKind t) {
+  if (t == TY_STRING || t == TY_STRBUF) return "String";
+  if (t == TY_INT || t == TY_BIGINT) return "Integer";
+  if (t == TY_FLOAT) return "Float";
+  if (t == TY_SYMBOL) return "Symbol";
+  if (t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE) return "Range";
+  if (t == TY_PROC) return "Proc";
+  if (t == TY_TIME) return "Time";
+  if (ty_is_hash(t)) return "Hash";
+  return "Object";
+}
+/* True for a builtin type that certainly has no #to_ary, so an Array method
+   taking "something Array-like" can say so at compile time rather than reach
+   an arm that cannot serve it. Deliberately excludes TY_POLY / TY_UNKNOWN (may
+   be an array at run time) and every OBJECT type (a user class may define
+   #to_ary, which CRuby honours). */
+static int conv_to_ary_impossible(TyKind t) {
+  return t == TY_STRING || t == TY_STRBUF || t == TY_INT || t == TY_BIGINT ||
+         t == TY_FLOAT || t == TY_SYMBOL || t == TY_PROC || t == TY_TIME ||
+         t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE ||
+         ty_is_hash(t);
+}
+
 int emit_array_call(Compiler *c, int id, Buf *b) {
   /* The variadic Array mutators accept zero elements and return the receiver
      unchanged; every arm below is written for argc >= 1, so a no-argument call
@@ -1480,7 +1505,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       int bad = -1;
       for (int ai = 0; ai < argc; ai++) {
         TyKind at = comp_ntype(c, argv[ai]);
-        if (at == TY_NIL || at == TY_BOOL) { bad = ai; break; }
+        if (at == TY_NIL || at == TY_BOOL || conv_to_ary_impossible(at)) { bad = ai; break; }
       }
       if (bad >= 0) {
         TyKind arty = comp_ntype(c, id);
@@ -1496,10 +1521,13 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         }
         if (comp_ntype(c, argv[bad]) == TY_NIL)
           buf_puts(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of nil into Array\");");
-        else
+        else if (comp_ntype(c, argv[bad]) == TY_BOOL)
           buf_printf(b, "sp_raise_cls(\"TypeError\", _t%d"
                         " ? \"no implicit conversion of true into Array\""
                         " : \"no implicit conversion of false into Array\");", tb);
+        else
+          buf_printf(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into Array\");",
+                     conv_builtin_class_name(comp_ntype(c, argv[bad])));
         buf_printf(b, " %s; })", raise_tail_value(arty));
         return 1;
       }
@@ -3624,21 +3652,21 @@ else {
         buf_printf(b, "(sp_%sArray_length(", k); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
         return 1;
       }
-      /* A blockless sum over Strings adds each element to an Integer seed,
-         which CRuby rejects with "String can't be coerced into Integer". There
-         is no sp_StrArray_sum, so the generic arms emitted a call to a function
-         that does not exist and the C compiler stopped on its implicit
-         declaration (#4327). An EMPTY receiver adds nothing and answers the
-         seed, which is why the test is at run time. */
-      if (sp_streq(name, "sum") && rt == TY_STR_ARRAY && argc <= 1 &&
-          nt_ref(nt, id, "block") < 0 &&
-          !(argc == 1 && comp_ntype(c, argv[0]) == TY_STRING)) {
+      /* A blockless SEEDLESS sum over Strings adds each element to the implied
+         Integer 0, which CRuby rejects with "String can't be coerced into
+         Integer". There is no sp_StrArray_sum, so the generic arms emitted a
+         call to a function that does not exist and the C compiler stopped on
+         its implicit declaration (#4327). An EMPTY receiver adds nothing and
+         answers the 0, which is why the test is at run time. A seed of any
+         class takes the boxed fold below, which reaches the same raise through
+         the operator itself. */
+      if (sp_streq(name, "sum") && rt == TY_STR_ARRAY && argc == 0 &&
+          nt_ref(nt, id, "block") < 0) {
         int ts = ++g_tmp;
         buf_printf(b, "({ sp_StrArray *_t%d = ", ts); emit_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); if (sp_StrArray_length(_t%d) != 0)"
                       " sp_raise_cls(\"TypeError\", \"String can't be coerced into Integer\"); ", ts, ts);
-        if (argc == 1) emit_boxed(c, argv[0], b); else buf_puts(b, "sp_box_int(0)");
-        buf_puts(b, "; })");
+        buf_puts(b, "sp_box_int(0); })");
         return 1;
       }
       if (sp_streq(name, "sum") && argc == 0 && nt_ref(nt, id, "block") < 0) {
@@ -3646,15 +3674,7 @@ else {
         return 1;
       }
       if (sp_streq(name, "sum") && argc == 1 && nt_ref(nt, id, "block") < 0) {
-        TyKind init_t = comp_ntype(c, argv[0]);
-        /* a String initial value over numeric elements is a TypeError (String#+
-           rejects an Integer), matching CRuby (#2504). */
-        if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && init_t == TY_STRING) {
-          buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), (void)(");
-          emit_expr(c, argv[0], b);
-          buf_puts(b, "), sp_raise_cls(\"TypeError\", \"no implicit conversion of Integer into String\"), (sp_int)0)");
-          return 1;
-        }
+        TyKind init_t = fold_seed_ntype(c, argv[0]);
         /* a String initial value concatenates (["a","b"].sum("") == "ab") */
         if (rt == TY_STR_ARRAY && init_t == TY_STRING) {
           buf_puts(b, "sp_StrArray_sum_str("); emit_expr(c, recv, b); buf_puts(b, ", ");
@@ -3669,15 +3689,31 @@ else {
           buf_puts(b, ") + (sp_float)sp_IntArray_sum("); emit_expr(c, recv, b); buf_puts(b, ", 0))");
           return 1;
         }
+        /* Any other seed keeps its OWN class for the whole fold: CRuby's
+           accumulator is the seed object and every step is Ruby's `+` on it. A
+           Rational seed therefore answers a Rational total, a Bignum one stops
+           wrapping into an sp_int, and nil / a String / an Array reach the raise
+           that operator itself produces -- worded for the ELEMENT's class, which
+           the hard-coded String-seed raise that used to stand here could only
+           get right over Integers. sp_poly_sum_seed runs CRuby's own phases. */
+        if (rt == TY_STR_ARRAY || !fold_seed_typed(init_t, ty_array_elem(rt))) {
+          emit_poly_sum_seed(c, recv, argv[0], b);
+          return 1;
+        }
+        /* A FLOAT seed over Floats does not compensate: CRuby reaches the
+           compensated loop only out of the exact phase, and a seed that is
+           already a Float never has one. An INTEGER seed does have one, so it
+           keeps the compensated call -- `[0.1, 0.2, 0.3].sum(0)` is 0.6 and
+           `.sum(0.0)` is 0.6000000000000001. The boxed fold draws the same
+           line; the two paths must not disagree. */
+        if (rt == TY_FLOAT_ARRAY && init_t == TY_FLOAT) {
+          buf_puts(b, "sp_FloatArray_sum_plain("); emit_expr(c, recv, b); buf_puts(b, ", ");
+          emit_expr(c, argv[0], b); buf_puts(b, ")");
+          return 1;
+        }
         buf_printf(b, "sp_%sArray_sum(", k); emit_expr(c, recv, b); buf_puts(b, ", ");
         if (rt == TY_FLOAT_ARRAY && init_t == TY_INT) {
           buf_puts(b, "(sp_float)("); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        }
-        else if (rt == TY_FLOAT_ARRAY && init_t == TY_POLY) {
-          buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        }
-        else if (rt == TY_INT_ARRAY && init_t == TY_POLY) {
-          buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ")");
         }
         else {
           emit_expr(c, argv[0], b);
@@ -4598,6 +4634,15 @@ else {
         buf_puts(b, "sp_PolyArray_replace("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return 1;
       }
+      /* ...and a source of ANOTHER kind, which `[1, 2].replace(["x"])` is:
+         the widening makes the receiver poly, and the source is read through
+         the boxed accessors rather than needing an arm of its own (#4339). */
+      if (sp_streq(name, "replace") && argc == 1 && ty_is_array(rt) &&
+          (ty_is_array(a0) || a0 == TY_POLY)) {
+        buf_puts(b, "sp_PolyArray_replace_from("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
       if (sp_streq(name, "shuffle") && argc == 0) {
         buf_puts(b, "sp_PolyArray_shuffle("); emit_expr(c, recv, b); buf_puts(b, ")");
         return 1;
@@ -5426,6 +5471,15 @@ else {
         }
         else { buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), sp_PolyArray_new())"); }
         buf_puts(b, ")");
+        return 1;
+      }
+      /* A seed of any other class folds the pairs into IT: `nil + [k, v]` is
+         nil's own missing `+` (NoMethodError), not the Integer coercion the
+         int arm below reports -- and an empty hash adds nothing and answers
+         the seed itself, so `{}.sum(nil)` is nil. */
+      if (sp_streq(name, "sum") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
+          !fold_seed_typed(fold_seed_ntype(c, argv[0]), TY_INT)) {
+        emit_poly_sum_seed(c, recv, argv[0], b);
         return 1;
       }
       if (sp_streq(name, "sum") && argc <= 1 && nt_ref(nt, id, "block") < 0) {
@@ -11232,6 +11286,17 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "sum") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
         buf_puts(b, "(("); emit_expr(c, argv[0], b);
         buf_printf(b, ") + (double)sp_IntArray_sum(sp_range_to_ia(_t%d), 0))", t);
+      }
+      /* Range#sum takes an INTEGER seed exactly and runs every other class
+         through Kernel#Float, answering a Float -- so a Bignum seed wrapped
+         into the sp_int slot here, a Rational one did not compile, and nil and
+         a String reported the wrong conversion. An empty range answers the
+         seed untouched, which is why the helper decides at run time. */
+      else if (sp_streq(name, "sum") && argc == 1 &&
+               !fold_seed_typed(fold_seed_ntype(c, argv[0]), TY_INT)) {
+        buf_printf(b, "sp_range_sum_seed(_t%d, ", t);
+        emit_boxed(c, argv[0], b);
+        buf_puts(b, ")");
       }
       else if (sp_streq(name, "sum") && argc == 1) {
         buf_printf(b, "sp_IntArray_sum(sp_range_to_ia(_t%d), ", t);

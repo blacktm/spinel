@@ -161,6 +161,21 @@ const char *ty_name(TyKind t);         /* legacy string tag, for diagnostics */
 int ty_is_numeric(TyKind t);           /* INT or FLOAT */
 int ty_never_callable(TyKind t);       /* kind can never answer #call */
 TyKind ty_promote_numeric(TyKind a, TyKind b); /* fold-accumulator numeric promotion */
+/* Can a seeded fold (sum(seed), inject(seed, :op)) keep the element's C type?
+   Ruby's accumulator is the SEED's object and every step is the seed's own
+   operator, so only a seed of the element's own class stays in that slot --
+   plus an Integer seed over Floats, which widens exactly and answers a Float
+   in Ruby too. Every other seed folds boxed. Read by the inference and by the
+   emitters, so the two can never disagree about which fold is emitted. */
+int fold_seed_typed(TyKind seed, TyKind elem);
+/* The seed kind a fold decides by, from the kind already resolved for the node
+   and the node's own type name. An empty `[]` or `{}` literal resolves to
+   TY_UNKNOWN so that a later push can narrow it, and TY_UNKNOWN is the one
+   kind fold_seed_typed lets through to the typed accumulator -- but as a fold
+   SEED the literal is already an Array or a Hash and belongs in the boxed
+   fold. The inference and the emitter each pass the kind they resolved, so the
+   rule itself is written once and they cannot answer differently. */
+TyKind fold_seed_kind(TyKind resolved, const char *node_type);
 int ty_is_array(TyKind t);
 /* Set while the type fixpoint iterates; defined in analyze.c. Declared here
    because ty_array_of consults it -- see the TY_UNKNOWN case. */

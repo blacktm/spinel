@@ -483,14 +483,14 @@ tools: $(TOOL_BINS) bin/spin
 # extractor beside the compiler when vendor/rbs is fetched: a spin-driven
 # build resolves --rbs via <dir-of-spinel>/spinel_rbs_extract, and without
 # the copy it silently lost every .rbs seed (#1845 bounce 6).
-bin/spin: tools/spin.rb tools/spin/toml.rb $(SPINEL) $(SP_RT_LIB) $(RBS_EXTRACT_TARGET)
+bin/spin: tools/spin.rb tools/spin/toml.rb $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(RBS_EXTRACT_TARGET)
 	$(SPINEL) tools/spin.rb -o bin/spin
 	@if [ -n "$(RBS_EXTRACT_TARGET)" ]; then \
 	  cp -f $(RBS_EXTRACT_BIN) bin/spinel_rbs_extract; \
 	  echo "$(RBS_EXTRACT_BIN) -> bin/spinel_rbs_extract"; \
 	fi
 
-bin/spinel-%: tools/%.rb tools/tool_common.rb $(SPINEL) $(SP_RT_LIB)
+bin/spinel-%: tools/%.rb tools/tool_common.rb $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB)
 	@mkdir -p bin
 	$(SPINEL) $< -o $@
 

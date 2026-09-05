@@ -313,6 +313,22 @@ TyKind ty_promote_numeric(TyKind a, TyKind b) {
   return ty_unify(a, b);
 }
 
+TyKind fold_seed_kind(TyKind resolved, const char *node_type) {
+  if (resolved != TY_UNKNOWN) return resolved;
+  if (node_type && sp_streq(node_type, "ArrayNode")) return TY_POLY_ARRAY;
+  if (node_type && sp_streq(node_type, "HashNode")) return TY_POLY_POLY_HASH;
+  return resolved;
+}
+
+int fold_seed_typed(TyKind seed, TyKind elem) {
+  /* A seed whose class is not settled yet says nothing about the accumulator,
+     and the boxed fold would be no more right than the typed one: keep what
+     the typed emitters already do for it. */
+  if (seed == TY_UNKNOWN) return 1;
+  if (seed == elem) return 1;
+  return elem == TY_FLOAT && seed == TY_INT;
+}
+
 /* The single-element-arg array iterators: a block bound to one of these
    receives exactly one param = the array element. Enumerated once here so the
    knowledge is not re-encoded as scattered method-name lists. */

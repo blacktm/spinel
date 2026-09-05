@@ -79,7 +79,17 @@ typedef struct {
   size_t      young_bytes;  /* live bytes on that list */
   sp_str_hdr *old;          /* per-worker old list head (swept on a major) */
   size_t      old_bytes;
-  char _pad[SP_CACHELINE - 2 * sizeof(sp_str_hdr *) - 2 * sizeof(size_t)];
+  /* The byte count at which this worker may next ASK for a collection. The
+     trigger below fires on this worker's own bytes against the threshold,
+     while sp_stw_collect's early-out wants the AGGREGATE over N * threshold --
+     so a worker that crosses first is refused, its bytes are not reset by any
+     sweep, and it asks again on the very next allocation. Each ask takes the
+     global scheduler lock: measured at 7.2 MILLION asks for 941 collections,
+     99.99% of them refused, which is uncontended and free at one worker and a
+     futex storm at eight (#4334). Raising the mark by one threshold on every
+     ask bounds it to one per threshold's worth of allocation. */
+  size_t      ask_at;
+  char _pad[SP_CACHELINE - 2 * sizeof(sp_str_hdr *) - 3 * sizeof(size_t)];
 } sp_str_wslot_t;
 extern sp_str_wslot_t sp_str_wslot[SP_MAX_WORKERS];
 #else
@@ -234,7 +244,16 @@ static inline char *sp_str_alloc(size_t len) {
      per worker independent of N. A shared aggregate check (threshold/N) instead
      multiplied the collection count by N and left allocation-heavy parallel
      workloads STW-bound; this keeps them flat. */
-  if (SP_GC_CTR_GET(sp_str_wslot[wid].young_bytes) > sp_str_threshold) sp_stw_collect();
+  { size_t _yb = SP_GC_CTR_GET(sp_str_wslot[wid].young_bytes);
+    /* over the threshold AND past this worker's ask mark; the threshold clause
+       stays first so a retune that LOWERS it still triggers at once. */
+    if (_yb > sp_str_threshold && _yb >= sp_str_wslot[wid].ask_at) {
+      sp_stw_collect();
+      /* A collection resets young_bytes, so this lands back at one threshold;
+         a refusal leaves it where it was, so the next ask is one threshold of
+         allocation later rather than the next allocation. */
+      sp_str_wslot[wid].ask_at = SP_GC_CTR_GET(sp_str_wslot[wid].young_bytes) + sp_str_threshold;
+    } }
   h = (sp_str_hdr *)malloc(total);
   if (!h) sp_oom_die();
   h->size = (uint32_t)total;

@@ -75,7 +75,7 @@ sp_int sp_StringIO_seek(sp_StringIO *s, sp_int off) { if (off < 0) off = 0; s->p
 sp_int sp_StringIO_tell(sp_StringIO *s) { return s->pos; }
 sp_bool sp_StringIO_eof_p(sp_StringIO *s) { return s->pos >= s->len; }
 sp_int sp_StringIO_truncate(sp_StringIO *s, sp_int l) { if (l < 0) l = 0; if (l < s->len) { sio_own(s); s->len = l; s->buf[l] = '\0'; } return 0; }
-sp_int sp_StringIO_close(sp_StringIO *s) { s->closed = 1; return 0; }
+void sp_StringIO_close(sp_StringIO *s) { s->closed = 1; }
 sp_bool sp_StringIO_closed_p(sp_StringIO *s) { return s->closed; }
 sp_StringIO *sp_StringIO_flush(sp_StringIO *s) { return s; }
 sp_bool sp_StringIO_sync(sp_StringIO *s) { (void)s; return 1; }

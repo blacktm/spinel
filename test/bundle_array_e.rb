@@ -217,22 +217,22 @@ def t_array_sum_init
   puts [1.5, 2.5].sum(1)            # 5.0 (int init implicitly widens)
   puts [1.5, 2.5].sum(-0.5)         # 3.5 (negative float init)
   
-  # Poly init: a heterogeneous-array element resolves to a poly local.
-  # compile_arg0_as_int / compile_arg0_as_float unbox via `.v.i` / `.v.f`;
-  # without them gcc rejects passing sp_RbVal to sp_int / sp_float.
+  # Poly init: a heterogeneous-array element resolves to a poly local,
+  # whose CLASS is only known at run time -- so the fold runs boxed and
+  # answers whatever that value's own `+` answers.
   poly_arr = [10, "x"]
   init_p = poly_arr[0]
-  puts [1, 2].sum(init_p)           # 13 (poly init unboxed as sp_int)
+  puts [1, 2].sum(init_p)           # 13 (poly init: the boxed fold)
   
   fpoly_arr = [1.5, "x"]
   finit_p = fpoly_arr[0]
-  puts [1.0, 2.0].sum(finit_p)      # 4.5 (poly init unboxed as sp_float)
+  puts [1.0, 2.0].sum(finit_p)      # 4.5 (poly init: the boxed fold)
   
-  # Tag-mixed: poly is INT-tagged but the FloatArray expects sp_float.
-  # sp_poly_to_f dispatches on the tag so the int value is coerced to
-  # float rather than reinterpreted bit-for-bit from `.v.f`.
+  # Tag-mixed: the poly value is INT-tagged and the elements are Floats.
+  # The boxed fold adds through the numeric tower, so the Integer widens
+  # to Float rather than being reinterpreted bit-for-bit from `.v.f`.
   ipoly_for_float = [1, "x"][0]
-  puts [1.0, 2.0].sum(ipoly_for_float)   # 4.0 (poly INT->float via sp_poly_to_f)
+  puts [1.0, 2.0].sum(ipoly_for_float)   # 4.0 (an Integer seed over Floats)
   
   # FloatArray + block + float init: compile_array_sum_block now picks
   # an sp_float accumulator and compile_arg0_as_float when recv_type is

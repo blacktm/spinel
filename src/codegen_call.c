@@ -4715,6 +4715,48 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                         " { sp_StringIO_rewind((sp_StringIO *)_t%d.v.p); }\nelse ",
                      tv, tv, sio_cid3, tv);
       }
+      /* A zero-arg IO method whose name a user class ALSO owns. The cls_id
+         switch below carries an arm per user class only, so an `@io` that
+         holds a Socket here and a plain object there left the real stream at
+         the NoMethodError default (#4341): `def close; @io.close; end` on a
+         wrapper reported `close` as undefined for the Socket. Guarded on
+         SP_BUILTIN_IO, which no user-class arm can alias, so an object still
+         takes its own arm -- the same shape the rewind pre-arm above uses.
+         `close` leaves the seed alone: nil is what it answers. */
+      if (argc == 0 && nt_ref(nt, id, "block") < 0) {
+        static const struct { const char *nm, *fn; TyKind rt; } IOZ[] = {
+          {"close",   "sp_File_close",    TY_VOID},
+          {"closed?", "sp_File_closed_p", TY_BOOL},
+          {"eof?",    "sp_File_eof_p",    TY_BOOL},
+          {"eof",     "sp_File_eof_p",    TY_BOOL},
+          {"tty?",    "sp_File_tty_p",    TY_BOOL},
+          {"isatty",  "sp_File_tty_p",    TY_BOOL},
+          {"flush",   "sp_File_flush",    TY_VOID},
+          {"fileno",  "sp_File_fileno",   TY_INT},
+          {"tell",    "sp_File_tell",     TY_INT},
+          {"pos",     "sp_File_tell",     TY_INT},
+          {NULL, NULL, TY_VOID}
+        };
+        for (int i = 0; IOZ[i].nm; i++) {
+          if (!sp_streq(name, IOZ[i].nm)) continue;
+          char ioex[128];
+          snprintf(ioex, sizeof ioex, "%s((sp_File *)_t%d.v.p)", IOZ[i].fn, tv);
+          buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO) { ",
+                     tv, tv);
+          /* the value only lands when the result slot can hold it: poly boxes
+             it, an exactly matching concrete slot takes it raw, anything else
+             keeps the call for its effect and leaves the seed */
+          if (ret == TY_POLY && IOZ[i].rt != TY_VOID) {
+            buf_printf(b, "_t%d = ", tr);
+            emit_boxed_text(c, IOZ[i].rt, ioex, b);
+          }
+          else if (ret == IOZ[i].rt && IOZ[i].rt != TY_VOID)
+            buf_printf(b, "_t%d = %s", tr, ioex);
+          else buf_puts(b, ioex);
+          buf_puts(b, "; }\nelse ");
+          break;
+        }
+      }
       /* A zero-arg CONTAINER reduction whose name a user class also owns
          (`TreeNode#sum` next to a real Array's). The switch below covers
          SP_TAG_OBJ user classes only, so an Array receiver fell through to the
@@ -6134,17 +6176,17 @@ else {
           int e7 = kwh_lookup(nt, kwh, "exception");
           no_exc7 = e7 >= 0 && nt_type(nt, e7) && sp_streq(nt_type(nt, e7), "FalseNode");
         }
-        int trd7 = ++g_tmp;
-        buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_sock_read_nb("
-                      "(sp_File *)_t%d.v.p, ", trd7, tv);
+        int trd7 = ++g_tmp, te7 = ++g_tmp;
+        buf_printf(b, " case SP_BUILTIN_IO: { sp_bool _e%d; const char *_t%d = sp_sock_read_nb("
+                      "(sp_File *)_t%d.v.p, ", te7, trd7, tv);
         if (atmp_ty[0] == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", atmp[0]);
         else buf_printf(b, "(sp_int)_t%d", atmp[0]);
-        buf_printf(b, ", %d, 0); ", no_exc7 ? 0 : 1);
+        buf_printf(b, ", %d, 0, &_e%d); ", no_exc7 ? 0 : 1, te7);
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY) {
           if (no_exc7)
-            buf_printf(b, "_t%d ? sp_box_str(_t%d) : sp_box_sym(sp_sym_intern(\"wait_readable\"))",
-                       trd7, trd7);
+            buf_printf(b, "_t%d ? sp_box_str(_t%d) : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\")))",
+                       trd7, trd7, te7);
           else buf_printf(b, "sp_box_str(_t%d)", trd7);
         }
         else buf_printf(b, "_t%d", trd7);
@@ -7469,6 +7511,19 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
               else emit_expr(c, vnode, &mv);
             }
             else if (cls->ivar_types[a] == TY_POLY && comp_ntype(c, vnode) != TY_POLY) emit_boxed(c, vnode, &mv);
+            /* The reverse of that box: a POLY value into a CONCRETE member
+               slot. A member name a second class also defines makes the read
+               a poly dispatch, whose value is an sp_RbVal, while the
+               synthesized constructor's parameter is the member's own C type
+               -- so the call did not compile, naming a line in
+               <spinel-synthesized> (#4348). */
+            else if (cls->ivar_types[a] != TY_POLY && cls->ivar_types[a] != TY_UNKNOWN &&
+                     comp_ntype(c, vnode) == TY_POLY) {
+              Buf pv; memset(&pv, 0, sizeof pv);
+              emit_expr(c, vnode, &pv);
+              emit_unbox_text(c, cls->ivar_types[a], pv.p ? pv.p : "sp_box_nil()", &mv);
+              free(pv.p);
+            }
             /* an unresolved call's raise token is an sp_RbVal; coerce it to
                the member's slot type as every ordinary argument site does, or
                the C build stops at a line past the file's end with neither
@@ -12736,17 +12791,17 @@ int emit_arg_type_guards(Compiler *c, int id, Buf *b) {
     TyKind art = ar >= 0 ? comp_ntype(c, ar) : TY_UNKNOWN;
     if (ar >= 0 && an2 && ac2 >= 1 && av2 && ty_is_array(art) &&
         !user_defines_or_reads(c, an2)) {
-      /* which argument has to be an Integer, and which an Array */
+      /* Which argument has to be an Integer, and which an Array. `sum` is
+         deliberately absent: its seed is not an Integer slot at all -- CRuby's
+         accumulator IS the seed, and a seed of any class folds from it with
+         that class's own `+`. The blanket "X can't be coerced into Integer"
+         this used to raise for a literal String/Symbol/Array/Hash seed was the
+         Integer wording for what is really String#+ or Symbol's missing `+`;
+         sp_poly_sum_seed reaches the operator, which words each one CRuby's
+         way. */
       int want_int = -1, want_arr = -1;
       if (sp_streq(an2, "rotate")) want_int = 0;
       else if (sp_streq(an2, "fill") && ac2 >= 2) want_int = 1;
-      /* Array#sum over a String or Array element list folds by concatenation,
-         and its seed is legitimately one of those: only a NUMERIC element list
-         wants an Integer seed. */
-      /* ... and a BLOCK decides what is summed (`a.sum("") { |x| x.to_s }`),
-         so only the blockless numeric form wants an Integer seed. */
-      else if (sp_streq(an2, "sum") && ty_is_numeric(ty_array_elem(art)) &&
-               nt_ref(nt, id, "block") < 0) want_int = 0;
       else if (sp_streq(an2, "product")) want_arr = 0;
       const char *badcls = NULL;
       int check = want_int >= 0 ? want_int : want_arr;
@@ -12768,11 +12823,8 @@ int emit_arg_type_guards(Compiler *c, int id, Buf *b) {
         TyKind rty3 = comp_ntype(c, id);
         const char *dv3 = default_value(rty3);
         buf_puts(b, "({ (void)("); emit_expr(c, ar, b); buf_puts(b, "); ");
-        if (want_int >= 0 && sp_streq(an2, "sum"))
-          buf_printf(b, "sp_raise_cls(\"TypeError\", \"%s can't be coerced into Integer\"); ", badcls);
-        else
-          buf_printf(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into %s\"); ",
-                     badcls, want_int >= 0 ? "Integer" : "Array");
+        buf_printf(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into %s\"); ",
+                   badcls, want_int >= 0 ? "Integer" : "Array");
         buf_printf(b, "%s; })", dv3 ? dv3 : "0");
         return 1;
       }
@@ -13260,6 +13312,33 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
                  (is_scalar_ret(vret) && vret != TY_UNKNOWN) ? default_value(vret) : "sp_box_nil()");
       return 1;
     }
+  }
+  /* An implicit self-call WITH arguments whose name the enclosing class's chain
+     does not have is CRuby's NoMethodError at run time, and the body holding it
+     may never run: codegen reachability is by NAME, so a live `sign_in` on one
+     class pulls an unrelated class's dead `sign_in` into codegen, and the
+     `post` inside it has no answer in THAT class's chain (#4340). CRuby runs
+     such a program; refusing to build it made a per-file result depend on what
+     else was linked in.
+
+     Narrow on purpose. The name must be defined by some user class or module
+     somewhere: that is what says "this receiver is the wrong class for it"
+     rather than "the compiler has no arm for this builtin", which must keep
+     failing loudly. The zero-argument spelling of the same thing is the vcall
+     arm above, and both ride the same gate switch. */
+  if (recv < 0 && g_gate_raise && !nt_int(nt, id, "vcall", 0) &&
+      nt_ref(nt, id, "block") < 0 && argc > 0 &&
+      g_emitting_class_id >= 0 &&
+      comp_method_in_chain(c, g_emitting_class_id, name, NULL) < 0 &&
+      an_user_defines_method(c, name)) {
+    const char *ucn = class_ruby_name(c, g_emitting_class_id);
+    TyKind uret = comp_ntype(c, id);
+    buf_puts(b, "(");
+    for (int k = 0; k < argc; k++) { buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, "), "); }
+    buf_printf(b, "sp_raise_cls(\"NoMethodError\", (&(\"\\xff\" \"undefined method '%s' for an instance of %s\")[1])), %s)",
+               name, ucn ? ucn : "Object",
+               (is_scalar_ret(uret) && uret != TY_UNKNOWN) ? default_value(uret) : "sp_box_nil()");
+    return 1;
   }
   if (recv >= 0) {
     TyKind grt = comp_ntype(c, recv);
@@ -18227,15 +18306,19 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (sp_streq(name, "recv_nonblock") && pos9 == 1) {
         if (no_exc) {
+          /* No EOF arm here: recv_nonblock answers "" at EOF, which the
+             runtime returns as an ordinary string, so NULL means would-block
+             and nothing else. (The statement-expression's opening `({` is
+             what the rest of this line closes.) */
           int tw = ++g_tmp;
           buf_printf(b, "({ const char *_t%d = sp_sock_read_nb(%s, ", tw, r);
           emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 0, 1); _t%d ? sp_box_str(_t%d)"
-                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw);
+          buf_printf(b, ", 0, 1, NULL); _t%d ? sp_box_str(_t%d)"
+                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw, tw);
         }
         else {
           buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);
-          buf_puts(b, ", 1, 1)");
+          buf_puts(b, ", 1, 1, NULL)");
         }
         free(rb.p); return;
       }
@@ -18498,15 +18581,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int no_exc8 = exc8 >= 0 && nt_type(nt, exc8) && sp_streq(nt_type(nt, exc8), "FalseNode");
       if (sp_streq(name, "read_nonblock")) {
         if (no_exc8) {
-          int tw = ++g_tmp;
-          buf_printf(b, "({ const char *_t%d = sp_sock_read_nb(%s, ", tw, r);
+          int tw = ++g_tmp, te = ++g_tmp;
+          buf_printf(b, "({ sp_bool _e%d; const char *_t%d = sp_sock_read_nb(%s, ", te, tw, r);
           emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 0, 0); _t%d ? sp_box_str(_t%d)"
-                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw);
+          buf_printf(b, ", 0, 0, &_e%d); _t%d ? sp_box_str(_t%d)"
+                        " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
+                     te, tw, tw, te);
         }
         else {
           buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);
-          buf_puts(b, ", 1, 0)");
+          buf_puts(b, ", 1, 0, NULL)");
         }
       }
       else {
@@ -18674,10 +18758,20 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          a static class/symbol name with no marker byte, which _bin would read
          out of bounds at s[-1]. */
       if (argc == 1) {
-        int sk = comp_ntype(c, argv[0]) == TY_STRING;
-        buf_printf(b, "%s(%s, ", sk ? "sp_File_write_bin" : "sp_File_write", r);
-        emit_to_s_expr(c, argv[0], b);
-        buf_puts(b, ")");
+        /* An operand whose class is only known at run time picks the entry by
+           its TAG, not by its static type: chosen statically it took the plain
+           entry and an embedded NUL truncated the write. */
+        if (comp_ntype(c, argv[0]) == TY_POLY) {
+          buf_printf(b, "sp_File_write_poly(%s, ", r);
+          emit_boxed(c, argv[0], b);
+          buf_puts(b, ")");
+        }
+        else {
+          int sk = comp_ntype(c, argv[0]) == TY_STRING;
+          buf_printf(b, "%s(%s, ", sk ? "sp_File_write_bin" : "sp_File_write", r);
+          emit_to_s_expr(c, argv[0], b);
+          buf_puts(b, ")");
+        }
       }
       else if (argc >= 2) {
         int tw = ++g_tmp;
@@ -18686,6 +18780,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
            interleaves them, so each write is its own held unit rather than
            the call's */
         for (int k = 0; k < argc; k++) {
+          if (comp_ntype(c, argv[k]) == TY_POLY) {   /* see the one-argument form */
+            buf_printf(b, " _t%d += sp_File_write_poly(%s, ", tw, r);
+            emit_boxed(c, argv[k], b);
+            buf_puts(b, ");");
+            continue;
+          }
           int sk = comp_ntype(c, argv[k]) == TY_STRING;
           ConvHold hk; memset(&hk, 0, sizeof hk);
           ConvHold *outer = g_conv_hold; g_conv_hold = &hk;
@@ -18967,16 +19067,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                       sp_streq(nt_type(nt, exc9), "FalseNode");
         if (sp_streq(name, "read_nonblock")) {
           if (no_exc9) {
-            int tw9 = ++g_tmp;
-            buf_printf(b, "const char *_t%d = sp_sock_read_nb(_t%d, ", tw9, tio2);
+            int tw9 = ++g_tmp, te9 = ++g_tmp;
+            buf_printf(b, "sp_bool _e%d; const char *_t%d = sp_sock_read_nb(_t%d, ", te9, tw9, tio2);
             emit_int_expr(c, argv[0], b);
-            buf_printf(b, ", 0, 0); _t%d ? sp_box_str(_t%d)"
-                          " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw9, tw9);
+            buf_printf(b, ", 0, 0, &_e%d); _t%d ? sp_box_str(_t%d)"
+                          " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
+                         te9, tw9, tw9, te9);
           }
           else {
             buf_printf(b, "sp_sock_read_nb(_t%d, ", tio2);
             emit_int_expr(c, argv[0], b);
-            buf_puts(b, ", 1, 0); })");
+            buf_puts(b, ", 1, 0, NULL); })");
           }
         }
         else {
@@ -20432,6 +20533,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             else if (a < sargc) vnode = sargv[a];
             if (vnode >= 0) {
               if (ncls->ivar_types[a] == TY_POLY && comp_ntype(c, vnode) != TY_POLY) emit_boxed(c, vnode, b);
+              /* and the reverse: a poly value into a concrete member slot
+                 (#4348), the same coercion the receiver path does */
+              else if (ncls->ivar_types[a] != TY_POLY && ncls->ivar_types[a] != TY_UNKNOWN &&
+                       comp_ntype(c, vnode) == TY_POLY) {
+                Buf pv2; memset(&pv2, 0, sizeof pv2);
+                emit_expr(c, vnode, &pv2);
+                emit_unbox_text(c, ncls->ivar_types[a], pv2.p ? pv2.p : "sp_box_nil()", b);
+                free(pv2.p);
+              }
               else emit_expr(c, vnode, b);
             }
             else buf_puts(b, default_value(ncls->ivar_types[a]));
@@ -27675,8 +27785,13 @@ else {
       buf_puts(b, "sp_StrPolyHash_new()"); return;   /* {}.to_h == {} (#2410) */
     }
     if (argc <= 1 && sp_streq(name, "sum") && nt_ref(nt, id, "block") < 0) {
-      /* {}.sum == the init (or 0) (#2416) */
-      if (argc == 1) emit_expr(c, argv[0], b); else buf_puts(b, "0");
+      /* {}.sum == the init (or 0) (#2416). A nil or Boolean init has no scalar
+         slot to be answered in and the call is typed poly for it, so the init
+         has to be boxed there -- emitted raw, `{}.sum(nil)` answered 0. */
+      TyKind hst = comp_ntype(c, id);
+      if (argc == 0) buf_puts(b, hst == TY_POLY ? "sp_box_int(0)" : "0");
+      else if (hst == TY_POLY) emit_boxed(c, argv[0], b);
+      else emit_expr(c, argv[0], b);
       return;
     }
     if (argc == 0 && (sp_streq(name, "min") || sp_streq(name, "max"))) {
@@ -27773,8 +27888,7 @@ else {
     for (int k = 0; k < c->nclasses; k++)
       if (comp_method_in_chain(c, k, name, NULL) >= 0) ncand9++;
     if (ncand9 == 0) {
-      buf_puts(b, "sp_poly_sum_seed("); emit_expr(c, recv, b); buf_puts(b, ", ");
-      emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      emit_poly_sum_seed(c, recv, argv[0], b);
       return;
     }
   }

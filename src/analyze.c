@@ -142,6 +142,40 @@ static int method_name_implicitly_invoked(const char *nm) {
   return 0;
 }
 
+/* Can this fold seed only ever be a BUILTIN? A literal, or an expression whose
+   value a literal decides, can never reach a user class's `+`, so a seeded
+   `sum` written with one must not keep every `+` in the program alive. Asked
+   of the Prism node because compute_reachable runs before inference. */
+static int an_seed_is_builtin(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  switch (nt_kind(nt, id)) {
+    case NK_IntegerNode: case NK_FloatNode: case NK_StringNode:
+    case NK_InterpolatedStringNode: case NK_SymbolNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_ArrayNode: case NK_HashNode: case NK_RangeNode:
+    case NK_RationalNode: case NK_ImaginaryNode:
+      return 1;
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int rcv = nt_ref(nt, id, "receiver");
+      if (!nm) return 0;
+      /* the Kernel constructors, which name a builtin class and answer one */
+      if (rcv < 0 &&
+          (sp_streq(nm, "Rational") || sp_streq(nm, "Complex") ||
+           sp_streq(nm, "Float") || sp_streq(nm, "Integer") ||
+           sp_streq(nm, "String") || sp_streq(nm, "Array")))
+        return 1;
+      /* arithmetic ON a literal is still a literal's class: `10**30`, `-1`.
+         An operator name is the one that does not start like an identifier. */
+      if (rcv >= 0 && nm[0] &&
+          !((nm[0] >= 'a' && nm[0] <= 'z') || (nm[0] >= 'A' && nm[0] <= 'Z') || nm[0] == '_'))
+        return an_seed_is_builtin(nt, rcv);
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
 void compute_reachable(Compiler *c) {
   /* Build per-scope call sets (CallNode names, not entering nested DefNodes). */
   char ***scope_calls = calloc((size_t)c->nscopes, sizeof(char **));
@@ -282,6 +316,40 @@ void compute_reachable(Compiler *c) {
       for (int k = 0; k < an; k++)
         if (nt_kind(c->nt, av[k]) == NK_SymbolNode && nt_str(c->nt, av[k], "value"))
           MARK_NAME(nt_str(c->nt, av[k], "value"));
+      /* `reduce(seed, &:sym)` spells the same operator in the block, where the
+         argument walk above cannot see it. */
+      { int blk = nt_ref(c->nt, id, "block");
+        if (blk >= 0 && nt_type(c->nt, blk) && sp_streq(nt_type(c->nt, blk), "BlockArgumentNode")) {
+          int ex = nt_ref(c->nt, blk, "expression");
+          if (ex >= 0 && nt_kind(c->nt, ex) == NK_SymbolNode && nt_str(c->nt, ex, "value"))
+            MARK_NAME(nt_str(c->nt, ex, "value"));
+        } }
+    }
+    /* `sum(seed)` names no operator at all: the fold applies the SEED's `+`
+       once per element. A user class used as the seed therefore needs its `+`
+       kept, exactly as `reduce(seed, :+)` does -- without it the dispatch arm
+       was emitted empty and the fold raised NoMethodError for a method the
+       program defines. MARK_NAME is by name and global, so ask first whether
+       the seed could BE a user object: a literal, or an expression that can
+       only build a builtin, never reaches a user `+`, and marking for one
+       resurrects every `+` in the program -- including bodies the emitter
+       cannot compile, which turned a program that built into one that does
+       not. A local, an ivar, a constant or a call such as `Money.new(0)`
+       marks, which is the same reach `reduce(seed, :+)` already has. */
+    for (int id = 0; id < c->nt->count; id++) {
+      if (nt_kind(c->nt, id) != NK_CallNode) continue;
+      { const char *nm = nt_str(c->nt, id, "name");
+        if (!nm || !sp_streq(nm, "sum")) continue; }
+      if (nt_ref(c->nt, id, "block") >= 0) continue;   /* a block decides what is summed */
+      /* `"abc".sum(16)` is String's checksum width, not a fold seed */
+      { int rcv = nt_ref(c->nt, id, "receiver");
+        if (rcv >= 0 && nt_kind(c->nt, rcv) == NK_StringNode) continue; }
+      { int args = nt_ref(c->nt, id, "arguments");
+        int an = 0; const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &an) : NULL;
+        if (an < 1 || !av) continue;
+        if (an_seed_is_builtin(c->nt, av[0])) continue;
+        MARK_NAME("+");
+        break; }
     }
     while (qhead < qtail) { int s = queue[qhead++]; for (int ni = 0; ni < sc_n[s]; ni++) MARK_NAME(scope_calls[s][ni]); }
   }
@@ -7451,6 +7519,83 @@ static void narrow_poly_int_locals(Compiler *c) {
   free(is_read); free(claimed);
 }
 
+/* ---- `rescue K => e`: an arm's reads take that arm's class (#4343) --------
+   A name bound by two rescue arms interns to ONE LocalVar, so the slot cannot
+   take either arm's class and lands on plain TY_EXCEPTION -- and a call naming
+   a method only the user class owns then had no route at all and stopped the
+   build. A read inside an arm still knows which class it is: the arm names it.
+   Every user exception subclass's struct opens with the sp_Exception header,
+   so reading the binding as that class there is a pointer cast, not a guess.
+
+   Marked in c->nilnarrow, the same read-site table the nil and is_a? guards
+   use, and only for the names the arm's class chain actually owns: everything
+   the builtin exception surface answers (#message, #backtrace) keeps the arms
+   it has today. A slot already specialized to one class needs nothing. */
+static int nng_has_write(Compiler *c, int root, const char *pn);
+
+static void nrar_mark_calls(Compiler *c, int root, Scope *s, const char *nm,
+                            int cid, TyKind t) {
+  if (root < 0) return;
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, root);
+  if (!ty) return;
+  /* a nested def has its own scope and its own `e`; the walk stops there */
+  if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode"))
+    return;
+  if (sp_streq(ty, "CallNode")) {
+    int recv = nt_ref(nt, root, "receiver");
+    const char *rty = recv >= 0 ? nt_type(nt, recv) : NULL;
+    const char *mn = nt_str(nt, root, "name");
+    if (rty && sp_streq(rty, "LocalVariableReadNode") && mn) {
+      const char *rn = nt_str(nt, recv, "name");
+      if (rn && sp_streq(rn, nm) && comp_scope_of(c, recv) == s &&
+          (comp_method_in_chain(c, cid, mn, NULL) >= 0 ||
+           comp_reader_in_chain(c, cid, mn, NULL) >= 0))
+        c->nilnarrow[recv] = t;
+    }
+  }
+  int nr = nt_num_refs(nt, root);
+  for (int i = 0; i < nr; i++) nrar_mark_calls(c, nt_ref_at(nt, root, i), s, nm, cid, t);
+  int na = nt_num_arrs(nt, root);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, root, i, &n);
+    for (int k = 0; k < n; k++) nrar_mark_calls(c, ids[k], s, nm, cid, t);
+  }
+}
+
+static void narrow_rescue_arm_reads(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || !sp_streq(ty, "RescueNode")) continue;
+    int ref = nt_ref(nt, id, "reference");
+    if (ref < 0 || !nt_type(nt, ref) ||
+        !sp_streq(nt_type(nt, ref), "LocalVariableTargetNode")) continue;
+    const char *nm = nt_str(nt, ref, "name");
+    if (!nm) continue;
+    /* exactly one named class, and a user exception subclass */
+    int nexc = 0;
+    const int *exc = nt_arr(nt, id, "exceptions", &nexc);
+    if (nexc != 1) continue;
+    const char *en = nt_type(nt, exc[0]);
+    if (!en || (!sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode")))
+      continue;
+    const char *enm = nt_str(nt, exc[0], "name");
+    int cid = enm ? comp_class_index(c, enm) : -1;
+    if (cid < 0 || !class_is_exc_subclass(c, cid)) continue;
+    Scope *vsc = comp_scope_of(c, ref);
+    LocalVar *lv = vsc ? scope_local(vsc, nm) : NULL;
+    /* only the slot the arms could not agree on: a specialized one already
+       reads as its class, and a builtin-typed one is what this repairs */
+    if (!lv || lv->type != TY_EXCEPTION) continue;
+    int body = nt_ref(nt, id, "statements");
+    /* an arm that reassigns the name is no longer holding what it caught:
+       the cast would be reading a class the value never was */
+    if (nng_has_write(c, body, nm)) continue;
+    nrar_mark_calls(c, body, vsc, nm, cid, ty_object(cid));
+  }
+}
+
 /* ---- `return <expr> if p.nil?` guard narrowing (#1661) --------------------
    A method whose call sites pass `T | nil` types its parameter poly (T has no
    first-class nullable slot: String, Time, ...). When the body OPENS with
@@ -13190,6 +13335,9 @@ void analyze_program(Compiler *c) {
      then-arm narrow to K's concrete type (post-fixpoint, same read-site unbox
      as the nil guards above). */
   narrow_isa_guards(c);
+  /* `rescue K => e` where a second arm binds the same name: reads inside an
+     arm take that arm's class (#4343). */
+  narrow_rescue_arm_reads(c);
   /* Post-backstop: re-run write type inference so multi-write locals whose
      RHS chains through a now-typed ivar (e.g. @h[bank][idx] where @h was
      just promoted from UNKNOWN to POLY) get their types resolved. */
