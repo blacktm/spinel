@@ -241,6 +241,12 @@ program rather than of the language. Only the manifest knows which kind of
 program this is. An application scaffolded by `spin new` has no `[package]`
 table; add one to use the field.
 
+The field applies to the executables *this* package produces. A dependent
+never compiles a dependency's `bin/`, so a dependency's `allocator` does not
+reach your program: the one that applies is the one in the manifest you are
+building. A process has a single allocator, and choosing it is not a decision
+a library makes for everyone who depends on it.
+
 The library has to be linkable at build time, which on Debian and Ubuntu means
 the development package (`libjemalloc-dev`) and not just the runtime one
 (`libjemalloc2`). Asking for an allocator that is not installed fails the

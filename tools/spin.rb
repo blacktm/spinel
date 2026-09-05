@@ -955,7 +955,10 @@ class Project
     # PROGRAM, not of the compiler: a server allocates for its whole life
     # where a batch job barely allocates at all, and only the manifest knows
     # which this is. "" (the default) and "system" both mean the platform's
-    # own allocator.
+    # own allocator. Read from THIS manifest only: a dependent never compiles
+    # a dependency's bin/, so a dependency's choice cannot reach the program
+    # being built -- and a process has one allocator, which is not a decision
+    # a library makes for its dependents.
     @allocator = toml.get("package", "allocator")
     # per-dependency feature enablement from THIS manifest's [dependencies]
     # inline specs (dep = { ..., features = ["cuda"] }); root-level only --
