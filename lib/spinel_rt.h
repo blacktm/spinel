@@ -1100,11 +1100,10 @@ const char *sp_File_readpartial(sp_File *f, sp_int n);
 /* IO#pread(len, offset): read without moving the file position. Inline
    because it allocates from this TU's string heap (#3038). */
 static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   if (len < 0) len = 0;
   char *buf = (char *)sp_str_alloc((size_t)len);
-  ssize_t got = pread(fd, buf, (size_t)len, (off_t)off);
+  ssize_t got = pread(fileno(f->fp), buf, (size_t)len, (off_t)off);
   if (got < 0) sp_raise_cls("IOError", "pread failed");
   if (got == 0 && len > 0) sp_raise_cls("EOFError", "end of file reached");
   buf[got] = '\0';
@@ -2036,10 +2035,11 @@ static sp_PolyArray *sp_sock_addr(sp_File *f, int peer) {
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for an instance of %s",
                                              peer ? "peeraddr" : "addr", sp_io_kind_name(f)));
+  SP_IO_OPEN(f);
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   char ip[64];
-  int port = (f && f->fp) ? sp_net_sock_ip(fileno(f->fp), peer, ip, (int)sizeof ip) : -1;
+  int port = sp_net_sock_ip(fileno(f->fp), peer, ip, (int)sizeof ip);
   if (port < 0) { ip[0] = '\0'; port = 0; }
   const char *fam = strchr(ip, ':') ? "AF_INET6" : "AF_INET";
   sp_PolyArray_push(a, sp_box_str(sp_sprintf("%s", fam)));
