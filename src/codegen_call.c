@@ -18219,12 +18219,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (sp_streq(name, "recv_nonblock") && pos9 == 1) {
         if (no_exc) {
-          int tw = ++g_tmp, te = ++g_tmp;
-          buf_printf(b, "sp_bool _e%d; const char *_t%d = sp_sock_read_nb(%s, ", te, tw, r);
+          /* No EOF arm here: recv_nonblock answers "" at EOF, which the
+             runtime returns as an ordinary string, so NULL means would-block
+             and nothing else. (The statement-expression's opening `({` is
+             what the rest of this line closes.) */
+          int tw = ++g_tmp;
+          buf_printf(b, "({ const char *_t%d = sp_sock_read_nb(%s, ", tw, r);
           emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 0, 1, &_e%d); _t%d ? sp_box_str(_t%d)"
-                        " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
-                     te, tw, tw, te);
+          buf_printf(b, ", 0, 1, NULL); _t%d ? sp_box_str(_t%d)"
+                        " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw, tw, tw);
         }
         else {
           buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);

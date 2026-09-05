@@ -2,4 +2,7 @@
 nil
 :wait_readable
 "EOFError"
+"y"
+""
+""
 done
