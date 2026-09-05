@@ -1,7 +1,12 @@
 # Every operation on a closed handle raises IOError, as in CRuby: the byte and
 # character readers, the flag accessors, the descriptor queries and the
 # positioning calls used to answer nil, EOF, false or a default instead.
-# #closed?, #close, #inspect and #path keep working on a closed handle.
+# #closed?, #close, #inspect and #path keep working on a closed handle. The
+# loops that read a handle keep it rooted for their whole run, and the sync
+# accessors evaluate their receiver once.
+
+require "io/console"
+require "socket"
 
 def try(label)
   r = yield
@@ -11,7 +16,16 @@ rescue IOError, EOFError => e
 end
 
 path = "/tmp/sp_io_closed_stream.txt"
+lines_path = "/tmp/sp_io_closed_stream_lines.txt"
+dir = "/tmp/sp_io_closed_stream_dir"
+if Dir.exist?(dir)
+  Dir.children(dir).each { |e| File.delete("#{dir}/#{e}") }
+  Dir.rmdir(dir)
+end
+Dir.mkdir(dir)
+3.times { |i| File.write("#{dir}/f#{i}", "") }
 File.write(path, "abc\ndef\n")
+File.write(lines_path, (1..200).map { |i| "line #{i}" }.join("\n") + "\n")
 
 io = File.open(path, "r+")
 io.close
@@ -86,6 +100,8 @@ try("advise") { io.advise(:normal) }
 try("fcntl") { io.fcntl(1) }
 try("wait_readable") { io.wait_readable(0) }
 try("wait_writable") { io.wait_writable(0) }
+try("wait") { io.wait(0, :read) }
+try("winsize") { io.winsize }
 
 puts "--- a pipe end read back out of its pair"
 r, w = IO.pipe
@@ -114,8 +130,48 @@ try("open getbyte at end") { io.getbyte }
 try("open readbyte at end") { io.readbyte }
 io.close
 
+puts "--- a temporary receiver keeps its handle for the whole loop"
+n = 0
+File.open(lines_path).each_line { |l| 100.times { "x" * 64 }; n += 1 }
+puts "each_line on a temporary receiver saw #{n} lines"
+n = 0
+File.new(lines_path).each_byte { |b| 20.times { "y" * 64 }; n += 1 }
+puts "each_byte on a temporary receiver saw #{n} bytes"
+n = 0
+File.open(lines_path).each_char { |c| 20.times { "z" * 64 }; n += 1 }
+puts "each_char on a temporary receiver saw #{n} chars"
+n = 0
+Dir.open(dir).each { |e| 100.times { "w" * 64 }; n += 1 }
+puts "Dir#each on a temporary receiver saw #{n} entries"
+
+puts "--- sync and sync= evaluate their receiver once"
+$count = 0
+$handle = File.open(lines_path)
+def handle
+  $count += 1
+  $handle
+end
+handle.sync
+puts "sync evaluated its receiver #{$count} time(s)"
+$count = 0
+handle.sync = true
+puts "sync= evaluated its receiver #{$count} time(s)"
+$handle.close
+
+puts "--- a closed socket"
+srv = TCPServer.new("127.0.0.1", 0)
+port = srv.addr[1]
+c = TCPSocket.new("127.0.0.1", port)
+s = srv.accept
+c.close
+srv.close
+try("socket addr") { c.addr }
+try("socket peeraddr") { c.peeraddr }
+try("server addr") { srv.addr }
+s.close
+
 puts "--- Dir"
-d = Dir.open("/tmp")
+d = Dir.open(dir)
 d.close
 try("dir close") { d.close }
 try("dir path") { d.path }
@@ -133,3 +189,6 @@ try("dir children") { d.children }
 try("dir entries") { d.entries }
 
 File.delete(path)
+File.delete(lines_path)
+Dir.children(dir).each { |e| File.delete("#{dir}/#{e}") }
+Dir.rmdir(dir)

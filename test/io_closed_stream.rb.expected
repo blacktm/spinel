@@ -64,6 +64,8 @@ advise: IOError: closed stream
 fcntl: IOError: closed stream
 wait_readable: IOError: closed stream
 wait_writable: IOError: closed stream
+wait: IOError: closed stream
+winsize: IOError: closed stream
 --- a pipe end read back out of its pair
 pipe sync: IOError: closed stream
 pipe sync=: IOError: closed stream
@@ -84,10 +86,22 @@ open eof? at end => true
 open getc at end => nil
 open getbyte at end => nil
 open readbyte at end: EOFError: end of file reached
+--- a temporary receiver keeps its handle for the whole loop
+each_line on a temporary receiver saw 200 lines
+each_byte on a temporary receiver saw 1692 bytes
+each_char on a temporary receiver saw 1692 chars
+Dir#each on a temporary receiver saw 5 entries
+--- sync and sync= evaluate their receiver once
+sync evaluated its receiver 1 time(s)
+sync= evaluated its receiver 1 time(s)
+--- a closed socket
+socket addr: IOError: closed stream
+socket peeraddr: IOError: closed stream
+server addr: IOError: closed stream
 --- Dir
 dir close => nil
-dir path => "/tmp"
-dir inspect => "#<Dir:/tmp>"
+dir path => "/tmp/sp_io_closed_stream_dir"
+dir inspect => "#<Dir:/tmp/sp_io_closed_stream_dir>"
 dir read: IOError: closed directory
 dir rewind: IOError: closed directory
 dir tell: IOError: closed directory
