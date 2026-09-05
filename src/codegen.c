@@ -3664,8 +3664,18 @@ int scope_creates_returning_proc(Compiler *c, int si) {
    fine only when it's a parameter of the enclosing method (passed by value).
    Captured outer locals (is_cell) are not yet supported — those fibers will
    produce a C compile error rather than silently miscompiling. */
-/* Returns 1 if a type needs a GC root when stored in a fiber capture struct. */
+/* Returns 1 if a type needs a GC root when stored in a fiber capture struct.
+   Specifically: the capture is a single GC POINTER, which is what both users
+   assume -- the scan writes `if (_c->c_x) sp_gc_mark(...)` and the body writes
+   SP_GC_ROOT, which registers `&lv_x` as a void**. A by-value struct is
+   neither: the scan's truth test on it is not valid C at all, and the root
+   would hand the collector the struct's first word (#4353). None of the
+   value-struct types carries a pointer the collector must follow, with the
+   single exception of sp_StrRange, whose two endpoints nothing marks
+   anywhere -- an ivar's scan does not either, so that gap is wider than this
+   function and is not closed here. */
 int fiber_cap_needs_root(TyKind t) {
+  if (ty_is_struct_valued(t)) return 0;
   return t == TY_STRING || t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) ||
          ty_is_object(t) || t == TY_POLY || t == TY_PROC || t == TY_FIBER || t == TY_THREAD || t == TY_QUEUE || t == TY_MUTEX || t == TY_CONDVAR ||
          t == TY_EXCEPTION ||
