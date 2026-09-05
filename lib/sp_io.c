@@ -286,9 +286,10 @@ sp_int sp_File_fileno(sp_File *f) {
   return (sp_int)fileno(f->fp);
 }
 
-/* IO#winsize -> [rows, cols]. Queries the terminal; a non-tty (pipe/file) has
-   no size, so CRuby raises there, but returning [0, 0] keeps the common
-   "STDOUT.winsize" probe compiling and running without an exception path. */
+/* IO#winsize -> [rows, cols]. Queries the terminal; an OPEN non-tty
+   (pipe/file) has no size, so CRuby raises there, but returning [0, 0] keeps
+   the common "STDOUT.winsize" probe compiling and running without an
+   exception path. A closed handle is the macro's IOError, as everywhere. */
 sp_IntArray *sp_File_winsize(sp_File *f) {
   SP_IO_OPEN(f);
   sp_int rows = 0, cols = 0;
@@ -661,7 +662,7 @@ sp_Addrinfo *sp_sock_address(sp_File *f, sp_int peer) {SP_GC_ROOT(f);
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method '%s' for an instance of %s",
                             peer ? "remote_address" : "local_address", sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   int fd = fileno(f->fp);
   const char *k = sp_io_kind_name(f);
   int is_unix = (strcmp(k, "UNIXSocket") == 0 || strcmp(k, "UNIXServer") == 0);
@@ -683,7 +684,7 @@ static void sp_sock_require(sp_File *f, const char *m) {SP_GC_ROOT(f);SP_GC_ROOT
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method '%s' for an instance of %s", m, sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
 }
 sp_int sp_sock_bind(sp_File *f, const char *host, sp_int port) {SP_GC_ROOT(f);SP_GC_ROOT_STR(host);
   extern int sp_net_udp_bind(int fd, const char *host, int port);
@@ -797,7 +798,7 @@ static void sp_sock_nb_prepare(sp_File *f, const char *m) {SP_GC_ROOT(f);SP_GC_R
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method '%s' for an instance of %s", m, sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
 }
 SP_NORETURN static void sp_sock_raise_wait(int writable, const char *op) {SP_GC_ROOT_STR(op);
   sp_raise_cls(writable ? "IO::EAGAINWaitWritable" : "IO::EAGAINWaitReadable",
@@ -862,7 +863,7 @@ const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
 const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv, sp_bool *eof) {SP_GC_ROOT(f);
   if (eof) *eof = 0;
   if (is_recv) sp_sock_nb_prepare(f, "recv_nonblock");
-  else if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  else SP_IO_OPEN(f);
   if (len <= 0) return sp_str_from_bytes("", 0);
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "read_nonblock");
@@ -917,11 +918,11 @@ static sp_int sp_sock_write_nb_len(sp_File *f, const char *data, size_t len, sp_
   sp_file_raise_errno("write", "");
 }
 sp_int sp_sock_write_nb(sp_File *f, const char *data, sp_bool exc) {SP_GC_ROOT(f);SP_GC_ROOT_STR(data);
-  if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   return sp_sock_write_nb_len(f, data, data ? strlen(data) : 0, exc);
 }
 sp_int sp_sock_write_nb_bin(sp_File *f, const char *data, sp_bool exc) {SP_GC_ROOT(f);SP_GC_ROOT_STR(data);
-  if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   return sp_sock_write_nb_len(f, data, data ? sp_str_byte_len(data) : 0, exc);
 }
 /* connect_nonblock: an in-flight connect is IO::EINPROGRESSWaitWritable. */
@@ -982,7 +983,7 @@ sp_File *sp_sock_accept(sp_File *f) {SP_GC_ROOT(f);
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method 'accept' for an instance of %s", sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   sp_io_wait_readable(f);
   return sp_io_fdopen_sock(sp_net_accept(fileno(f->fp)), "tcp");
 }
@@ -1211,7 +1212,7 @@ sp_bool sp_File_set_sync(sp_File *f, sp_bool on) {
   return on;
 }
 sp_bool sp_File_autoclose_p(sp_File *f) { SP_IO_OPEN(f); return !f->no_autoclose; }
-sp_bool sp_File_set_autoclose(sp_File *f, sp_bool on) { SP_IO_OPEN(f); f->no_autoclose = !on; return on; }
+void sp_File_set_autoclose(sp_File *f, sp_bool on) { SP_IO_OPEN(f); f->no_autoclose = !on; }
 /* IO#reopen(io): rebind this handle's descriptor onto the other stream. */
 sp_File *sp_File_reopen_io(sp_File *f, sp_File *other) {SP_GC_ROOT(f);SP_GC_ROOT(other); sp_gc_wb((void*)f);
   if (!f || !f->fp || !other || !other->fp) return f;

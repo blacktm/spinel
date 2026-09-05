@@ -1574,6 +1574,7 @@ sp_StrArray *sp_dir_children(const char *path);
 const char *sp_File_gets_sep(sp_File *f, const char *sep, sp_int limit, sp_bool chomp) {SP_GC_ROOT(f);SP_GC_ROOT_STR(sep);
   SP_IO_OPEN(f);
   sp_io_wait_readable(f);
+  SP_IO_OPEN(f);   /* the park can return after another thread closed the handle */
   size_t sl = sep ? strlen(sep) : 0;
   /* fast path: the default "\n" separator with no limit reads via fgets
      (the byte-wise loop below costs a call per character) */
@@ -3310,7 +3311,7 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
       int g1 = nrd ? 0 : 1;
       sp_RbVal io1 = src[g1]->data[0];
       sp_File *f1 = sp_select_io_of(io1);
-      if (!f1 || !f1->fp) sp_raise_cls("IOError", "closed stream");
+      SP_IO_OPEN(f1);
       if (!sp_sched_wait_io_timeout(fileno(f1->fp), g1 == 0 ? POLLIN : POLLOUT, timeout))
         return sp_box_nil();
       sp_PolyArray *one1 = sp_PolyArray_new();
@@ -3330,9 +3331,8 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
       sp_int n = src[g] ? src[g]->len : 0;
       for (sp_int i = 0; i < n; i++) {
         sp_File *f = sp_select_io_of(src[g]->data[i]);
-        int fd = (f && f->fp) ? fileno(f->fp) : -1;
-        if (fd < 0) { free(pfs); sp_raise_cls("IOError", "closed stream"); }
-        pfs[k].fd = fd;
+        if (!f || !f->fp) { free(pfs); sp_io_raise_closed(); }
+        pfs[k].fd = fileno(f->fp);
         pfs[k].events = (short)(g == 0 ? POLLIN : POLLOUT);
         pfs[k].revents = 0;
         k++;
@@ -3382,8 +3382,9 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
     sp_int n = src[g] ? src[g]->len : 0;
     for (sp_int i = 0; i < n; i++) {
       sp_File *f = sp_select_io_of(src[g]->data[i]);
-      int fd = (f && f->fp) ? fileno(f->fp) : -1;
-      if (fd < 0 || fd >= FD_SETSIZE) sp_raise_cls("IOError", "file descriptor out of range");
+      SP_IO_OPEN(f);
+      int fd = fileno(f->fp);
+      if (fd >= FD_SETSIZE) sp_raise_cls("IOError", "file descriptor out of range");
       FD_SET(fd, &sets[g]);
       if (fd > maxfd) maxfd = fd;
     }

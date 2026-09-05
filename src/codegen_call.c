@@ -18138,7 +18138,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int tdh = ++g_tmp, tdn = ++g_tmp;
       int skip_dots = sp_streq(name, "each_child");
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_Dir *_t%d = %s; const char *_t%d; ", tdh, dr, tdn);
+      /* rooted for the block's duration: a temporary receiver (Dir.open(d).each)
+         has no other reference, and a body that allocates would let the
+         collector close it mid-loop (the File loops below root theirs too) */
+      buf_printf(b, "sp_Dir *_t%d = %s; SP_GC_ROOT(_t%d); const char *_t%d; ", tdh, dr, tdh, tdn);
       buf_printf(b, "while ((_t%d = sp_Dir_read(_t%d)) != NULL) {", tdn, tdh);
       if (skip_dots)
         buf_printf(b, " if (sp_str_eq(_t%d, (&(\"\\xff\" \".\")[1])) ||"
@@ -18716,7 +18719,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int is_cp = sp_streq(name, "each_codepoint");
       int rf2 = ++g_tmp, lt2 = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_File *_t%d = %s; ", rf2, r);
+      buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf2, r, rf2);
       if (is_byte)
         buf_printf(b, "sp_int _t%d; while ((_t%d = sp_File_getbyte(_t%d)) != SP_INT_NIL) {", lt2, lt2, rf2);
       else if (is_cp)
@@ -18946,7 +18949,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int esep = (argc >= 1 && comp_ntype(c, argv[0]) == TY_STRING) ? argv[0] : -1;
       int lt = ++g_tmp, rf = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_File *_t%d = %s; ", rf, r);
+      /* rooted as the File.open block form roots its handle (below): a
+         temporary receiver -- File.open(p).each_line -- is otherwise swept by
+         a GC inside the body and the loop ends early */
+      buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf, r, rf);
       free(rb.p); r = NULL;
       /* Each iteration yields a FRESH heap line string, matching CRuby --
          a stored reference must keep its own line, not a mutated shared

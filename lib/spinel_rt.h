@@ -2035,10 +2035,11 @@ static sp_PolyArray *sp_sock_addr(sp_File *f, int peer) {
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for an instance of %s",
                                              peer ? "peeraddr" : "addr", sp_io_kind_name(f)));
+  SP_IO_OPEN(f);
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   char ip[64];
-  int port = (f && f->fp) ? sp_net_sock_ip(fileno(f->fp), peer, ip, (int)sizeof ip) : -1;
+  int port = sp_net_sock_ip(fileno(f->fp), peer, ip, (int)sizeof ip);
   if (port < 0) { ip[0] = '\0'; port = 0; }
   const char *fam = strchr(ip, ':') ? "AF_INET6" : "AF_INET";
   sp_PolyArray_push(a, sp_box_str(sp_sprintf("%s", fam)));

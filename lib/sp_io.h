@@ -83,18 +83,19 @@ sp_int sp_File_close(sp_File *f);
    metadata a File answers by its path (#size, #mtime, #chmod ...) still
    answers here where CRuby raises: a File::Stat rides this same struct with
    no descriptor, so that check cannot be this one. */
-void sp_io_raise_closed(void);
+SP_NORETURN SP_COLD void sp_io_raise_closed(void);
 #define SP_IO_OPEN(f) do { if (!(f) || !(f)->fp) sp_io_raise_closed(); } while (0)
 sp_bool sp_File_closed_p(sp_File *f);
 /* The handle flags codegen read straight off the struct (#lineno, #sync,
    #autoclose? and their setters): through here so a closed handle answers
-   IOError for them too. Each setter answers its value. */
+   IOError for them too. #lineno= and #sync= answer their value, which is the
+   expression's; #autoclose='s emitter keeps its own operand. */
 sp_int  sp_File_lineno(sp_File *f);
 sp_int  sp_File_set_lineno(sp_File *f, sp_int n);
 sp_bool sp_File_sync_p(sp_File *f);
 sp_bool sp_File_set_sync(sp_File *f, sp_bool on);
 sp_bool sp_File_autoclose_p(sp_File *f);
-sp_bool sp_File_set_autoclose(sp_File *f, sp_bool on);
+void    sp_File_set_autoclose(sp_File *f, sp_bool on);
 const char *sp_File_inspect(sp_File *f);
 const char *sp_io_kind_name(sp_File *f);
 sp_File *sp_sock_accept(sp_File *f);
@@ -193,7 +194,7 @@ void sp_file_rename(const char *from, const char *to);
 typedef struct { DIR *dp; const char *path; } sp_Dir;
 /* The Dir counterpart of SP_IO_OPEN: reading or positioning a closed handle
    is IOError "closed directory" in CRuby; #close, #path and #inspect work. */
-void sp_dir_raise_closed(void);
+SP_NORETURN SP_COLD void sp_dir_raise_closed(void);
 #define SP_DIR_OPEN(d) do { if (!(d) || !(d)->dp) sp_dir_raise_closed(); } while (0)
 
 /* ---- sp_io_pipe/sysopen relocated from spinel_rt.h (0 optcarrot uses). ---- */
