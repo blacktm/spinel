@@ -2855,6 +2855,8 @@ else {
       ty_object_protocol_answers(rt, argc == 1 ? infer_type(c, argv[0]) : TY_UNKNOWN, name, argc) &&
       !(rt == TY_EXCEPTION && exc_subclass_defines(c, name))) {
     if (sp_streq(name, "freeze")) return rt;
+    if (sp_streq(name, "to_s")) return TY_STRING;
+    if (sp_streq(name, "<=>")) return TY_POLY;   /* 0 or nil, boxed */
     return TY_BOOL;
   }
 
@@ -3206,6 +3208,15 @@ else {
     if (sp_streq(name, "nil?") && argc == 0) return TY_BOOL;
     if (argc == 1 && (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") ||
                       sp_streq(name, "instance_of?"))) return TY_BOOL;
+    /* Object's hash and object_id on the handle: the generic arms already
+       emit them (the pointer hash, the pointer), but the catch-all at the end
+       of this block typed the slot poly, so the C they produced refused to
+       compile. respond_to? stays untyped on purpose: the compile-time fold
+       reads the analyze-time probe, which that same catch-all answers for
+       every name, so a typed slot would turn today's refusal into a wrong
+       `true` for `f.respond_to?(:nope)`. */
+    if (argc == 0 && (sp_streq(name, "hash") || sp_streq(name, "object_id") ||
+                      sp_streq(name, "__id__"))) return TY_INT;
     /* the readiness family answers the handle itself or nil -- a nullable
        sp_File*, which TY_IO already models (NULL is nil) */
     if (sp_streq(name, "wait_readable") || sp_streq(name, "wait_writable") ||

@@ -25173,11 +25173,17 @@ else {
     buf_printf(b, "), %d)", sp_streq(name, "!=") ? 1 : 0);
     return;
   }
-  /* IO handles compare by pointer identity (f.flush.equal?(f), #2799) --
-     except two File::Stat handles, which compare by modification time as
-     Comparable gives them; Object's protocol arm knows both */
-  if (recv >= 0 && comp_ntype(c, recv) == TY_IO && argc == 1 &&
-      (sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")) &&
+  /* The IO family's share of Object's protocol, ahead of the generic
+     spaceship and to_s fallbacks below: IO handles compare by pointer identity
+     (f.flush.equal?(f), #2799) except two File::Stat handles, which compare by
+     modification time as Comparable gives them, and a File/IO or Dir handle
+     answers Object's to_s and <=>. Exactly these names: `!=` and `==` against
+     nil keep their own arm (a NULL handle IS nil), which claiming every
+     protocol name here shadowed. */
+  if (recv >= 0 && (comp_ntype(c, recv) == TY_IO || comp_ntype(c, recv) == TY_DIR) &&
+      ((argc == 0 && sp_streq(name, "to_s")) || (argc == 1 && sp_streq(name, "<=>")) ||
+       (comp_ntype(c, recv) == TY_IO && argc == 1 &&
+        (sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")))) &&
       emit_native_object_protocol(c, id, b)) return;
   if (recv >= 0 && comp_ntype(c, recv) == TY_REGEX && argc == 0) {
     /* a Regexp is frozen; freeze/itself/dup evaluate to the pattern itself. */
