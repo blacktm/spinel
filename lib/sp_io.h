@@ -75,12 +75,26 @@ sp_int sp_File_close(sp_File *f);
 /* Every operation on a handle whose descriptor is gone raises IOError in
    CRuby. Some of the read side already did; the write side and the position
    queries answered a seed instead, so a write to a closed socket looked like
-   a successful send of zero bytes and the loss went unnoticed. #closed?,
-   #close and #inspect stay exempt: they are the three that are meant to work
-   on a closed handle. */
+   a successful send of zero bytes and the loss went unnoticed. The byte and
+   character readers, the flag accessors and the descriptor queries answered
+   nil, EOF or a default the same way, so a program that kept using a handle
+   it had closed ran on silently. #closed?, #close, #inspect and #path stay
+   exempt: they are the ones that are meant to work on a closed handle. The
+   metadata a File answers by its path (#size, #mtime, #chmod ...) still
+   answers here where CRuby raises: a File::Stat rides this same struct with
+   no descriptor, so that check cannot be this one. */
 void sp_io_raise_closed(void);
 #define SP_IO_OPEN(f) do { if (!(f) || !(f)->fp) sp_io_raise_closed(); } while (0)
 sp_bool sp_File_closed_p(sp_File *f);
+/* The handle flags codegen read straight off the struct (#lineno, #sync,
+   #autoclose? and their setters): through here so a closed handle answers
+   IOError for them too. Each setter answers its value. */
+sp_int  sp_File_lineno(sp_File *f);
+sp_int  sp_File_set_lineno(sp_File *f, sp_int n);
+sp_bool sp_File_sync_p(sp_File *f);
+sp_bool sp_File_set_sync(sp_File *f, sp_bool on);
+sp_bool sp_File_autoclose_p(sp_File *f);
+sp_bool sp_File_set_autoclose(sp_File *f, sp_bool on);
 const char *sp_File_inspect(sp_File *f);
 const char *sp_io_kind_name(sp_File *f);
 sp_File *sp_sock_accept(sp_File *f);
@@ -177,6 +191,10 @@ void sp_file_rename(const char *from, const char *to);
 #include <dirent.h>
 /* Dir handle (Dir.open / Dir.each_child ...): ops live in lib/sp_cold.c. */
 typedef struct { DIR *dp; const char *path; } sp_Dir;
+/* The Dir counterpart of SP_IO_OPEN: reading or positioning a closed handle
+   is IOError "closed directory" in CRuby; #close, #path and #inspect work. */
+void sp_dir_raise_closed(void);
+#define SP_DIR_OPEN(d) do { if (!(d) || !(d)->dp) sp_dir_raise_closed(); } while (0)
 
 /* ---- sp_io_pipe/sysopen relocated from spinel_rt.h (0 optcarrot uses). ---- */
 sp_PolyArray *sp_io_pipe(void);

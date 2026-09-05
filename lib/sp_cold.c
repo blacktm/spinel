@@ -1572,8 +1572,8 @@ const char *sp_dir_home_user(const char *user);
 sp_StrArray *sp_dir_children(const char *path);
 
 const char *sp_File_gets_sep(sp_File *f, const char *sep, sp_int limit, sp_bool chomp) {SP_GC_ROOT(f);SP_GC_ROOT_STR(sep);
+  SP_IO_OPEN(f);
   sp_io_wait_readable(f);
-  if (!f || !f->fp) return NULL;
   size_t sl = sep ? strlen(sep) : 0;
   /* fast path: the default "\n" separator with no limit reads via fgets
      (the byte-wise loop below costs a call per character) */
@@ -1630,7 +1630,7 @@ const char *sp_File_readline_sep(sp_File *f, const char *sep, sp_int limit, sp_b
   return r;
 }
 const char *sp_File_getc(sp_File *f) {SP_GC_ROOT(f);
-  if (!f || !f->fp) return NULL;
+  SP_IO_OPEN(f);
   int ch = fgetc(f->fp);
   if (ch == EOF) return NULL;
   int extra = ((ch & 0xE0) == 0xC0) ? 1 : ((ch & 0xF0) == 0xE0) ? 2 : ((ch & 0xF8) == 0xF0) ? 3 : 0;
@@ -1652,40 +1652,38 @@ const char *sp_File_readchar(sp_File *f) {SP_GC_ROOT(f);
   return r;
 }
 sp_int sp_File_getbyte(sp_File *f) {
-  if (!f || !f->fp) return SP_INT_NIL;
+  SP_IO_OPEN(f);
   int ch = fgetc(f->fp);
   return ch == EOF ? SP_INT_NIL : (sp_int)ch;
 }
 sp_RbVal sp_File_ungetc(sp_File *f, sp_RbVal v) {
-  if (f && f->fp) {
-    if (v.tag == SP_TAG_STR && v.v.s && v.v.s[0]) {
-      size_t n = sp_str_byte_len(v.v.s);
-      for (size_t i = n; i > 0; i--) ungetc((unsigned char)v.v.s[i - 1], f->fp);
-    }
-    else if (v.tag == SP_TAG_INT) ungetc((int)v.v.i, f->fp);
+  SP_IO_OPEN(f);
+  if (v.tag == SP_TAG_STR && v.v.s && v.v.s[0]) {
+    size_t n = sp_str_byte_len(v.v.s);
+    for (size_t i = n; i > 0; i--) ungetc((unsigned char)v.v.s[i - 1], f->fp);
   }
+  else if (v.tag == SP_TAG_INT) ungetc((int)v.v.i, f->fp);
   return sp_box_nil();
 }
 sp_int sp_File_sysseek(sp_File *f, sp_int off, sp_int whence) {
-  if (!f || !f->fp) return 0;
+  SP_IO_OPEN(f);
   fseek(f->fp, (long)off, whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET);
   return (sp_int)ftell(f->fp);
 }
 sp_int sp_File_flock(sp_File *f, sp_int op) {
-  if (!f || !f->fp) return 0;
+  SP_IO_OPEN(f);
   return flock(fileno(f->fp), (int)op) == 0 ? 0 : 1;
 }
 sp_int sp_File_fsync(sp_File *f) {
-  if (!f || !f->fp) return 0;
+  SP_IO_OPEN(f);
   fflush(f->fp);
   fsync(fileno(f->fp));
   return 0;
 }
 sp_RbVal sp_File_putc(sp_File *f, sp_RbVal v) {
-  if (f && f->fp) {
-    if (v.tag == SP_TAG_INT) fputc((int)(v.v.i & 0xff), f->fp);
-    else if (v.tag == SP_TAG_STR && v.v.s && v.v.s[0]) fputc(v.v.s[0], f->fp);
-  }
+  SP_IO_OPEN(f);
+  if (v.tag == SP_TAG_INT) fputc((int)(v.v.i & 0xff), f->fp);
+  else if (v.tag == SP_TAG_STR && v.v.s && v.v.s[0]) fputc(v.v.s[0], f->fp);
   return v;
 }
 const char *sp_file_ftype(const char *path) {SP_GC_ROOT_STR(path);
@@ -1942,10 +1940,10 @@ static int sp_stat_pathless(sp_File *f) {
   return f && f->fp && (!f->path || f->path[0] == 0);
 }
 sp_File *sp_io_stat_handle(sp_File *f) {SP_GC_ROOT(f);
-  if (!f) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   if (f->path && f->path[0]) return sp_file_stat_handle(f->path);
   struct stat st;
-  if (!f->fp || fstat(fileno(f->fp), &st) != 0)
+  if (fstat(fileno(f->fp), &st) != 0)
     sp_raise_cls("Errno::EBADF", "Bad file descriptor");
   sp_File *h = (sp_File *)sp_gc_alloc(sizeof(sp_File), NULL, sp_file_stat_scan);
   h->fp = f->fp;
@@ -2114,7 +2112,7 @@ sp_Dir *sp_Dir_for_fd(sp_int fd) {
    to re-open, and re-opening by path would miss a directory that has since been
    renamed. Rewinds first so the listing is complete however far #read got. */
 sp_StrArray *sp_Dir_entries_h(sp_Dir *d, sp_int children) {SP_GC_ROOT(d);
-  if (!d || !d->dp) sp_raise_cls("IOError", "closed directory");
+  SP_DIR_OPEN(d);
   rewinddir(d->dp);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
@@ -2131,8 +2129,11 @@ sp_int sp_Dir_fchdir(sp_int fd) {
     sp_raise_cls("Errno::EBADF", "Bad file descriptor - fchdir");
   return 0;
 }
+SP_COLD void sp_dir_raise_closed(void) {
+  sp_raise_cls("IOError", "closed directory");
+}
 const char *sp_Dir_read(sp_Dir *d) {
-  if (!d || !d->dp) return NULL;
+  SP_DIR_OPEN(d);
   struct dirent *e = readdir(d->dp);
   return e ? sp_sprintf("%s", e->d_name) : NULL;
 }
@@ -2140,10 +2141,10 @@ const char *sp_Dir_read(sp_Dir *d) {
    and CRuby answers nil for it rather than an empty string (#3365). */
 const char *sp_Dir_path(sp_Dir *d) { return d ? d->path : NULL; }
 sp_RbVal sp_Dir_close(sp_Dir *d) { if (d && d->dp) { closedir(d->dp); d->dp = NULL; } return sp_box_nil(); }
-sp_Dir *sp_Dir_rewind(sp_Dir *d) { if (d && d->dp) rewinddir(d->dp); return d; }
-sp_int sp_Dir_tell(sp_Dir *d) { return d && d->dp ? (sp_int)telldir(d->dp) : 0; }
-sp_Dir *sp_Dir_seek(sp_Dir *d, sp_int pos) { if (d && d->dp) seekdir(d->dp, (long)pos); return d; }
-sp_int sp_Dir_fileno(sp_Dir *d) { return d && d->dp ? (sp_int)dirfd(d->dp) : -1; }
+sp_Dir *sp_Dir_rewind(sp_Dir *d) { SP_DIR_OPEN(d); rewinddir(d->dp); return d; }
+sp_int sp_Dir_tell(sp_Dir *d) { SP_DIR_OPEN(d); return (sp_int)telldir(d->dp); }
+sp_Dir *sp_Dir_seek(sp_Dir *d, sp_int pos) { SP_DIR_OPEN(d); seekdir(d->dp, (long)pos); return d; }
+sp_int sp_Dir_fileno(sp_Dir *d) { SP_DIR_OPEN(d); return (sp_int)dirfd(d->dp); }
 sp_StrArray *sp_dir_entries(const char *path) {SP_GC_ROOT_STR(path); return sp_dir_entries_impl(path, 0); }
 sp_bool sp_dir_empty(const char *path) {SP_GC_ROOT_STR(path);
   struct stat st;
@@ -3234,9 +3235,8 @@ static short sp_io_park_events(sp_int kind) {
 }
 #endif
 sp_File *sp_io_wait_events(sp_File *f, double timeout, sp_int kind) {SP_GC_ROOT(f);
-  if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   int fd = fileno(f->fp);
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
 #ifdef SP_THREADS
   if (sp_io_park_events(kind) && timeout != 0.0) {
     extern int sp_sched_wait_io_timeout(int fd, short events, double timeout_s);

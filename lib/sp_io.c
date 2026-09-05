@@ -276,12 +276,13 @@ sp_int sp_File_write_bin(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_ST
 }
 
 sp_bool sp_File_tty_p(sp_File *f) {
-  return (f && f->fp && isatty(fileno(f->fp))) ? 1 : 0;
+  SP_IO_OPEN(f);
+  return isatty(fileno(f->fp)) ? 1 : 0;
 }
 
 sp_int sp_File_fileno(sp_File *f) {
-  if (f && f->fno_plus1) return (sp_int)(f->fno_plus1 - 1);
   SP_IO_OPEN(f);
+  if (f->fno_plus1) return (sp_int)(f->fno_plus1 - 1);
   return (sp_int)fileno(f->fp);
 }
 
@@ -289,11 +290,10 @@ sp_int sp_File_fileno(sp_File *f) {
    no size, so CRuby raises there, but returning [0, 0] keeps the common
    "STDOUT.winsize" probe compiling and running without an exception path. */
 sp_IntArray *sp_File_winsize(sp_File *f) {
+  SP_IO_OPEN(f);
   sp_int rows = 0, cols = 0;
-  if (f && f->fp) {
-    struct winsize ws;
-    if (ioctl(fileno(f->fp), TIOCGWINSZ, &ws) == 0) { rows = ws.ws_row; cols = ws.ws_col; }
-  }
+  struct winsize ws;
+  if (ioctl(fileno(f->fp), TIOCGWINSZ, &ws) == 0) { rows = ws.ws_row; cols = ws.ws_col; }
   sp_IntArray *a = sp_IntArray_new();
   sp_IntArray_push(a, rows);
   sp_IntArray_push(a, cols);
@@ -839,7 +839,8 @@ sp_File *sp_sock_accept_nb(sp_File *f, sp_bool exc) {SP_GC_ROOT(f);
    before a #readpartial would lose bytes. Then a single BLOCKING read -- that
    is the only difference from the nonblocking sibling below. */
 const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
-  if (!f || !f->fp || n < 0) sp_raise_cls("EOFError", "end of file reached");
+  SP_IO_OPEN(f);
+  if (n < 0) sp_raise_cls("EOFError", "end of file reached");
   if (n == 0) return sp_str_from_bytes("", 0);
   char *r = sp_str_alloc((size_t)n);
   ssize_t got;
@@ -1180,20 +1181,37 @@ void sp_file_rename(const char *from, const char *to) { rename(from, to); }
 
 /* IO#readbyte: like #getbyte but EOFError at end of file. */
 sp_int sp_File_readbyte(sp_File *f) {
-  int ch = (f && f->fp) ? fgetc(f->fp) : EOF;
+  SP_IO_OPEN(f);
+  int ch = fgetc(f->fp);
   if (ch == EOF) sp_raise_cls("EOFError", "end of file reached");
   return (sp_int)(unsigned char)ch;
 }
 /* IO#ungetbyte: push one byte back onto the read buffer; returns nil. */
 void sp_File_ungetbyte(sp_File *f, sp_int byte) {
-  if (f && f->fp) ungetc((int)(unsigned char)byte, f->fp);
+  SP_IO_OPEN(f);
+  ungetc((int)(unsigned char)byte, f->fp);
 }
 /* IO#binmode?: true after #binmode, or for a handle opened in binary mode. */
 sp_bool sp_File_binmode_p(sp_File *f) {
-  if (f && f->bin_flag) return 1;
-  return f && f->mode && strchr(f->mode, 'b') != NULL;
+  SP_IO_OPEN(f);
+  if (f->bin_flag) return 1;
+  return f->mode && strchr(f->mode, 'b') != NULL;
 }
-void sp_File_set_binmode(sp_File *f) { if (f) f->bin_flag = 1; }
+void sp_File_set_binmode(sp_File *f) { SP_IO_OPEN(f); f->bin_flag = 1; }
+/* The handle flags codegen used to read straight off the struct (#2792,
+   #3131): a closed handle answers IOError for them as for everything else.
+   #sync= keeps the flush a truthy value implies (#4229). */
+sp_int sp_File_lineno(sp_File *f) { SP_IO_OPEN(f); return f->lineno; }
+sp_int sp_File_set_lineno(sp_File *f, sp_int n) { SP_IO_OPEN(f); f->lineno = n; return n; }
+sp_bool sp_File_sync_p(sp_File *f) { SP_IO_OPEN(f); return (f->is_sock || f->sync_on) ? 1 : 0; }
+sp_bool sp_File_set_sync(sp_File *f, sp_bool on) {
+  SP_IO_OPEN(f);
+  f->sync_on = on ? 1 : 0;
+  if (on) fflush(f->fp);
+  return on;
+}
+sp_bool sp_File_autoclose_p(sp_File *f) { SP_IO_OPEN(f); return !f->no_autoclose; }
+sp_bool sp_File_set_autoclose(sp_File *f, sp_bool on) { SP_IO_OPEN(f); f->no_autoclose = !on; return on; }
 /* IO#reopen(io): rebind this handle's descriptor onto the other stream. */
 sp_File *sp_File_reopen_io(sp_File *f, sp_File *other) {SP_GC_ROOT(f);SP_GC_ROOT(other); sp_gc_wb((void*)f);
   if (!f || !f->fp || !other || !other->fp) return f;
@@ -1208,43 +1226,41 @@ sp_File *sp_File_reopen_io(sp_File *f, sp_File *other) {SP_GC_ROOT(f);SP_GC_ROOT
 }
 /* IO#close_on_exec? / #close_on_exec= via the FD_CLOEXEC descriptor flag. */
 sp_bool sp_File_close_on_exec_p(sp_File *f) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) return 0;
-  int fl = fcntl(fd, F_GETFD);
+  SP_IO_OPEN(f);
+  int fl = fcntl(fileno(f->fp), F_GETFD);
   return fl >= 0 && (fl & FD_CLOEXEC) != 0;
 }
 void sp_File_set_close_on_exec(sp_File *f, sp_bool on) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) return;
+  SP_IO_OPEN(f);
+  int fd = fileno(f->fp);
   int fl = fcntl(fd, F_GETFD);
   if (fl < 0) return;
   fcntl(fd, F_SETFD, on ? (fl | FD_CLOEXEC) : (fl & ~FD_CLOEXEC));
 }
 /* IO#fcntl(cmd, arg=0): the raw descriptor command. */
 sp_int sp_File_fcntl(sp_File *f, sp_int cmd, sp_int arg) {SP_GC_ROOT(f);
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
-  int r = fcntl(fd, (int)cmd, (long)arg);
+  SP_IO_OPEN(f);
+  int r = fcntl(fileno(f->fp), (int)cmd, (long)arg);
   if (r < 0) sp_file_raise_errno("fcntl", f->path ? f->path : "");
   return (sp_int)r;
 }
 /* IO#pwrite(str, offset): write without moving the file position. */
 sp_int sp_File_pwrite(sp_File *f, const char *s, sp_int off) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   size_t n = s ? strlen(s) : 0;
   fflush(f->fp);
-  ssize_t put = pwrite(fd, s ? s : "", n, (off_t)off);
+  ssize_t put = pwrite(fileno(f->fp), s ? s : "", n, (off_t)off);
   if (put < 0) sp_file_raise_errno("pwrite", f->path ? f->path : "");
   return (sp_int)put;
 }
 /* IO#advise(sym, offset=0, len=0): a hint, and nil either way. POSIX
    fadvise is Linux-ish; where it is absent the hint is simply dropped. */
 void sp_File_advise(sp_File *f, const char *kind, sp_int off, sp_int len) {
+  SP_IO_OPEN(f);
 #ifdef POSIX_FADV_NORMAL
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
+  int fd = fileno(f->fp);
   int a = POSIX_FADV_NORMAL;
-  if (fd < 0 || !kind) return;
+  if (!kind) return;
   if (!strcmp(kind, "sequential")) a = POSIX_FADV_SEQUENTIAL;
   else if (!strcmp(kind, "random")) a = POSIX_FADV_RANDOM;
   else if (!strcmp(kind, "willneed")) a = POSIX_FADV_WILLNEED;
@@ -1252,7 +1268,7 @@ void sp_File_advise(sp_File *f, const char *kind, sp_int off, sp_int len) {
   else if (!strcmp(kind, "noreuse")) a = POSIX_FADV_NOREUSE;
   posix_fadvise(fd, (off_t)off, (off_t)len, a);
 #else
-  (void)f; (void)kind; (void)off; (void)len;
+  (void)kind; (void)off; (void)len;
 #endif
 }
 /* IO#close_read / #close_write. A plain file is not duplex, so half-closing

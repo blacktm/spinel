@@ -1100,11 +1100,10 @@ const char *sp_File_readpartial(sp_File *f, sp_int n);
 /* IO#pread(len, offset): read without moving the file position. Inline
    because it allocates from this TU's string heap (#3038). */
 static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   if (len < 0) len = 0;
   char *buf = (char *)sp_str_alloc((size_t)len);
-  ssize_t got = pread(fd, buf, (size_t)len, (off_t)off);
+  ssize_t got = pread(fileno(f->fp), buf, (size_t)len, (off_t)off);
   if (got < 0) sp_raise_cls("IOError", "pread failed");
   if (got == 0 && len > 0) sp_raise_cls("EOFError", "end of file reached");
   buf[got] = '\0';
