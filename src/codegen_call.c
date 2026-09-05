@@ -13250,6 +13250,33 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
   }
+  /* An implicit self-call WITH arguments whose name the enclosing class's chain
+     does not have is CRuby's NoMethodError at run time, and the body holding it
+     may never run: codegen reachability is by NAME, so a live `sign_in` on one
+     class pulls an unrelated class's dead `sign_in` into codegen, and the
+     `post` inside it has no answer in THAT class's chain (#4340). CRuby runs
+     such a program; refusing to build it made a per-file result depend on what
+     else was linked in.
+
+     Narrow on purpose. The name must be defined by some user class or module
+     somewhere: that is what says "this receiver is the wrong class for it"
+     rather than "the compiler has no arm for this builtin", which must keep
+     failing loudly. The zero-argument spelling of the same thing is the vcall
+     arm above, and both ride the same gate switch. */
+  if (recv < 0 && g_gate_raise && !nt_int(nt, id, "vcall", 0) &&
+      nt_ref(nt, id, "block") < 0 && argc > 0 &&
+      g_emitting_class_id >= 0 &&
+      comp_method_in_chain(c, g_emitting_class_id, name, NULL) < 0 &&
+      an_user_defines_method(c, name)) {
+    const char *ucn = class_ruby_name(c, g_emitting_class_id);
+    TyKind uret = comp_ntype(c, id);
+    buf_puts(b, "(");
+    for (int k = 0; k < argc; k++) { buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, "), "); }
+    buf_printf(b, "sp_raise_cls(\"NoMethodError\", (&(\"\\xff\" \"undefined method '%s' for an instance of %s\")[1])), %s)",
+               name, ucn ? ucn : "Object",
+               (is_scalar_ret(uret) && uret != TY_UNKNOWN) ? default_value(uret) : "sp_box_nil()");
+    return 1;
+  }
   if (recv >= 0) {
     TyKind grt = comp_ntype(c, recv);
     /* compare_by_identity? on a poly-carried value resolves here, not at the
