@@ -1,0 +1,44 @@
+--- Dir
+mkdir existing: Errno::EEXIST: File exists @ dir_s_mkdir - /tmp/sp_syscall_errno
+mkdir under a missing parent: Errno::ENOENT: No such file or directory @ dir_s_mkdir - /tmp/sp_syscall_errno/missing/child
+mkdir => 0
+rmdir => 0
+rmdir missing: Errno::ENOENT: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+rmdir non-empty: Errno::ENOTEMPTY: Directory not empty @ dir_s_rmdir - /tmp/sp_syscall_errno/sub
+rmdir a file: Errno::ENOTDIR: Not a directory @ dir_s_rmdir - /tmp/sp_syscall_errno/file.txt
+delete missing: Errno::ENOENT: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+unlink missing: Errno::ENOENT: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+chdir missing: Errno::ENOENT: No such file or directory @ chdir_path - /tmp/sp_syscall_errno/missing
+chdir a file: Errno::ENOTDIR: Not a directory @ chdir_path - /tmp/sp_syscall_errno/file.txt
+--- File
+delete missing: Errno::ENOENT: No such file or directory @ apply2files - /tmp/sp_syscall_errno/missing
+unlink missing: Errno::ENOENT: No such file or directory @ apply2files - /tmp/sp_syscall_errno/missing
+delete => 1
+delete two, second missing: Errno::ENOENT: No such file or directory @ apply2files - /tmp/sp_syscall_errno/missing
+deleted the first before raising => false
+rename missing: Errno::ENOENT: No such file or directory @ rb_file_s_rename - (/tmp/sp_syscall_errno/missing, /tmp/sp_syscall_errno/file.txt)
+rename into a missing directory: Errno::ENOENT: No such file or directory @ rb_file_s_rename - (/tmp/sp_syscall_errno/file.txt, /tmp/sp_syscall_errno/missing/x)
+rename => 0
+rename back => 0
+truncate negative: Errno::EINVAL: Invalid argument @ rb_file_s_truncate - /tmp/sp_syscall_errno/file.txt
+truncate missing: Errno::ENOENT: No such file or directory @ rb_file_s_truncate - /tmp/sp_syscall_errno/missing
+truncate => 0
+size missing: Errno::ENOENT: No such file or directory @ rb_file_s_size - /tmp/sp_syscall_errno/missing
+atime missing: Errno::ENOENT: No such file or directory @ rb_file_s_atime - /tmp/sp_syscall_errno/missing
+mtime missing: Errno::ENOENT: No such file or directory @ rb_file_s_mtime - /tmp/sp_syscall_errno/missing
+ctime missing: Errno::ENOENT: No such file or directory @ rb_file_s_ctime - /tmp/sp_syscall_errno/missing
+birthtime missing: Errno::ENOENT: No such file or directory @ rb_file_s_birthtime - /tmp/sp_syscall_errno/missing
+--- rescue shapes
+Errno::ENOENT caught: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+[true, true, Errno::ENOENT]
+:already_there
+--- Pathname
+rmdir: Errno::ENOENT: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+delete: Errno::ENOENT: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+unlink: Errno::ENOENT: No such file or directory @ dir_s_rmdir - /tmp/sp_syscall_errno/missing
+rename: Errno::ENOENT: No such file or directory @ rb_file_s_rename - (/tmp/sp_syscall_errno/missing, /tmp/sp_syscall_errno/elsewhere)
+size: Errno::ENOENT: No such file or directory @ rb_file_s_size - /tmp/sp_syscall_errno/missing
+mkdir existing: Errno::EEXIST: File exists @ dir_s_mkdir - /tmp/sp_syscall_errno/sub
+mkdir => 0
+rmdir made => 0
+false
