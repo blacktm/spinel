@@ -2143,6 +2143,24 @@ int infer_write_types(Compiler *c) {
         /* concat(other): the other array's elements splice in */
         is_push = 1; vt = splice_incoming_elem(c, argv[0]);
       }
+      else if (name && sp_streq(name, "replace") && an == 1 && recv >= 0 &&
+               ty_is_array(infer_type(c, argv[0])) &&
+               recv_has_array_write(c, recv)) {
+        /* replace(other) makes the other's elements the receiver's WHOLE
+           contents, which is the same evidence about what it holds -- and a
+           local's static type is an upper bound, so the union answers here as
+           it does for concat. Without it `[1, 2].replace(["x"])` left the
+           receiver an IntArray with no arm that could take a StrArray, and the
+           call answered NoMethodError (#4339).
+
+           Unlike concat, `replace` is also HASH's and String's, so BOTH sides
+           have to look like an array before this reads as array evidence: the
+           argument by its type, and the receiver by having an array written
+           into it somewhere. Without the first, `h1.replace(h2)` widened a
+           hash local into an array; without the second, `h.replace([1, 2])`
+           did -- and each stopped compiling. */
+        is_push = 1; vt = splice_incoming_elem(c, argv[0]);
+      }
       else if (name && sp_streq(name, "default_proc=") && an == 1) {
         /* installing a default proc needs the poly-valued variant (the proc
            can return any value, and only those variants carry the dproc

@@ -4606,6 +4606,15 @@ else {
         buf_puts(b, "sp_PolyArray_replace("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return 1;
       }
+      /* ...and a source of ANOTHER kind, which `[1, 2].replace(["x"])` is:
+         the widening makes the receiver poly, and the source is read through
+         the boxed accessors rather than needing an arm of its own (#4339). */
+      if (sp_streq(name, "replace") && argc == 1 && ty_is_array(rt) &&
+          (ty_is_array(a0) || a0 == TY_POLY)) {
+        buf_puts(b, "sp_PolyArray_replace_from("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
       if (sp_streq(name, "shuffle") && argc == 0) {
         buf_puts(b, "sp_PolyArray_shuffle("); emit_expr(c, recv, b); buf_puts(b, ")");
         return 1;
