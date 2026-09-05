@@ -3864,6 +3864,13 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
       emit_expr(c, pred, b);
       buf_puts(b, ";\n");
     }
+    /* the when operands are evaluated after the subject and may allocate; a
+       fresh subject held only by this temp was collected under them */
+    if (needs_root(pt) && !comp_ty_value_obj(c, pt)) {
+      emit_indent(b, indent);
+      emit_gc_root_tmp(c, pt, t, b);
+      buf_puts(b, "\n");
+    }
   }
 
   /* Fast path: `case <int/poly> when <integer literals>` lowers to a C switch
@@ -4338,6 +4345,8 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
       pt = TY_POLY;
     }
     else { emit_ctype(c, pt, b); buf_printf(b, " _t%d = ", t); emit_expr(c, pred, b); buf_puts(b, "; "); }
+    /* as in the statement form: the when operands may collect a fresh subject */
+    if (needs_root(pt) && !comp_ty_value_obj(c, pt)) { emit_gc_root_tmp(c, pt, t, b); buf_puts(b, " "); }
   }
 
   /* Fast path: `case <int> when <integer literals>` captures the branch value
