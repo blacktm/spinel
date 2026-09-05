@@ -44,7 +44,7 @@ sp_int sp_StringIO_seek(sp_StringIO *s, sp_int off);
 sp_int sp_StringIO_tell(sp_StringIO *s);
 sp_bool sp_StringIO_eof_p(sp_StringIO *s);
 sp_int sp_StringIO_truncate(sp_StringIO *s, sp_int l);
-sp_int sp_StringIO_close(sp_StringIO *s);
+void sp_StringIO_close(sp_StringIO *s);
 sp_bool sp_StringIO_closed_p(sp_StringIO *s);
 sp_StringIO *sp_StringIO_flush(sp_StringIO *s);
 sp_bool sp_StringIO_sync(sp_StringIO *s);

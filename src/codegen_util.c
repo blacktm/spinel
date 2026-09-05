@@ -1166,7 +1166,12 @@ const char *native_c_type(const char *spec) {
   if (sp_streq(spec, "regexp")) return "mrb_regexp_pattern *";
   if (sp_streq(spec, "int"))    return "sp_int";
   if (sp_streq(spec, "float"))  return "double";
-  if (sp_streq(spec, "bool"))   return "int";
+  /* sp_bool, NOT int: a package's C function returns sp_bool (_Bool, one
+     byte), so prototyping it here as int is a mismatched declaration. The
+     caller then reads a full register where the callee only wrote its low
+     byte -- gcc happened to zero the rest, ubuntu clang did not, and
+     StringIO.new("x").closed? answered true. */
+  if (sp_streq(spec, "bool"))   return "sp_bool";
   if (sp_streq(spec, "nil") || sp_streq(spec, "void")) return "void";
   return "sp_RbVal";
 }
