@@ -167,6 +167,14 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
   buf_printf(b, "sp_%s %s_t%d = sp_%s_new(", c->classes[ci].c_name, is_val ? "" : "*", st, c->classes[ci].c_name);
   emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
   buf_puts(b, ");\n");
+  /* The constructor rooted the fresh object for its own extent only: it
+     returns before the inlined body below runs, and that body allocates (an
+     ivar's `[]`, a push into it). Unrooted across those allocations the object
+     is swept out from under its own initializer and the writes land in freed
+     memory -- `Set[1, 2]` came out as `Set[]` under SPINEL_GC_STRESS=1, and a
+     longer program crashed. A value-type class has nothing to root: its
+     constructor answers the value itself. */
+  if (!is_val) { emit_indent(b, g_indent + 1); buf_printf(b, "SP_GC_ROOT(_t%d);\n", st); }
   snprintf(selfbuf, sizeof selfbuf, "_t%d", st);
   g_self = selfbuf;
   g_self_deref = is_val ? "." : "->";
