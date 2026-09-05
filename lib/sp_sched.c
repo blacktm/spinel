@@ -2199,6 +2199,7 @@ sp_mutex *sp_Mutex_new(void) {
   sp_mutex *m = (sp_mutex *)sp_gc_alloc(sizeof(sp_mutex), NULL, NULL);
   m->owner = NULL;
   m->waiters = NULL;
+  m->nwaiters = 0;
   return m;
 }
 
@@ -2217,40 +2218,98 @@ const char *sp_Queue_class_name(sp_queue *q) {
 }
 
 
+/* An UNCONTENDED lock/unlock does not touch the global scheduler lock.
+ *
+ * Both entries used to take it unconditionally, so every Ruby-level Mutex
+ * operation was a round trip through the one lock that also guards every run
+ * queue. A server taking a single lock per request stopped scaling at two OS
+ * workers: 12 workers served no more than 2 did, on 1.5 cores, with two of
+ * them holding most of the CPU (#4346). At one worker the same lock is free,
+ * which is the signature of contention rather than cost.
+ *
+ * The waiter list still lives under the scheduler lock, since parking and
+ * waking are its business. What the fast paths need is agreement about
+ * whether anyone is parked, and that is `nwaiters`. The two sides publish in
+ * opposite orders -- a waiter counts itself and then re-reads `owner`, an
+ * unlocker clears `owner` and then re-reads `nwaiters` -- so with sequential
+ * consistency at least one of them observes the other and no wake is lost. */
 void sp_Mutex_lock(sp_mutex *m) {
-  SCHED_LOCK();
   sp_thread *self = g_current;
+  sp_thread *expect = NULL;
+  if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
+                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+    return;                                  /* was unlocked: ours, no lock taken */
+  SCHED_LOCK();
   /* the owner re-entering its own Monitor just goes deeper */
-  if (m->owner == self && m->reentrant) { m->depth++; SCHED_UNLOCK(); return; }
-  if (m->owner == self) { SCHED_UNLOCK(); sp_raise_cls("ThreadError", "deadlock; recursive locking"); }
-  if (m->owner == NULL) { m->owner = self; SCHED_UNLOCK(); return; }
+  if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == self && m->reentrant) { m->depth++; SCHED_UNLOCK(); return; }
+  if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == self) { SCHED_UNLOCK(); sp_raise_cls("ThreadError", "deadlock; recursive locking"); }
+  expect = NULL;
+  if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
+                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+    { SCHED_UNLOCK(); return; }
+  /* Count ourselves BEFORE the last look at `owner`: an unlocker that clears
+     it after this point re-reads the count and finds us. */
+  m->nwaiters++;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  expect = NULL;
+  if (__atomic_compare_exchange_n(&m->owner, &expect, self, 0,
+                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    m->nwaiters--;                           /* released under us; took it instead */
+    SCHED_UNLOCK();
+    return;
+  }
   /* unlock hands ownership to us (sets m->owner) before waking us. */
   sp_sched_block(&m->waiters);
+  m->nwaiters--;
   SCHED_UNLOCK();
 }
 
 void sp_Mutex_unlock(sp_mutex *m) {
+  sp_thread *self = g_current;
+  /* depth is the owner's own field, so reading it as the owner needs no lock;
+     a non-owner fails the exchange below and takes the slow path, which is
+     where the ThreadError is raised. */
+  if (m->depth == 0 && __atomic_load_n(&m->nwaiters, __ATOMIC_SEQ_CST) == 0) {
+    sp_thread *expect = self;
+    if (__atomic_compare_exchange_n(&m->owner, &expect, NULL, 0,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+      if (__atomic_load_n(&m->nwaiters, __ATOMIC_SEQ_CST) == 0) return;
+      /* A waiter counted itself while we were releasing. It is parked, or is
+         about to look at `owner` one more time and take it; either way the
+         list is the authority, so finish the hand-off under the lock. */
+      SCHED_LOCK();
+      if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == NULL && m->waiters)
+        __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
+      SCHED_UNLOCK();
+      return;
+    }
+  }
   SCHED_LOCK();
-  if (m->depth > 0 && m->owner == g_current) { m->depth--; SCHED_UNLOCK(); return; }
-  if (m->owner != g_current) {
+  if (m->depth > 0 && __atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == self) { m->depth--; SCHED_UNLOCK(); return; }
+  if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) != self) {
     SCHED_UNLOCK();
     sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
   }
-  m->owner = sp_sched_wake_one(&m->waiters);   /* hand off, or NULL => unlocked */
+  __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
   SCHED_UNLOCK();
 }
 
+/* Every read and write of `owner` outside the scheduler lock is atomic, since
+   the uncontended lock/unlock paths above no longer take it. */
 sp_bool sp_Mutex_try_lock(sp_mutex *m) {
   SCHED_LOCK();
   sp_bool r;
-  if (m->owner == g_current && m->reentrant) { m->depth++; r = 1; }
-  else if (m->owner != NULL) r = 0;
-  else { m->owner = g_current; r = 1; }
+  if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == g_current && m->reentrant) { m->depth++; r = 1; }
+  else {
+    sp_thread *expect = NULL;
+    r = __atomic_compare_exchange_n(&m->owner, &expect, g_current, 0,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
+  }
   SCHED_UNLOCK();
   return r;
 }
-sp_bool sp_Mutex_locked(sp_mutex *m) { SCHED_LOCK(); sp_bool r = m->owner != NULL;      SCHED_UNLOCK(); return r; }
-sp_bool sp_Mutex_owned(sp_mutex *m)  { SCHED_LOCK(); sp_bool r = m->owner == g_current;  SCHED_UNLOCK(); return r; }
+sp_bool sp_Mutex_locked(sp_mutex *m) { return __atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) != NULL; }
+sp_bool sp_Mutex_owned(sp_mutex *m)  { return __atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == g_current; }
 
 /* ---- ConditionVariable ----
  * #wait releases the mutex, parks on the CV, and re-acquires the mutex on
@@ -2268,11 +2327,11 @@ void sp_CondVar_wait(sp_condvar *cv, sp_mutex *m) {
      inlined (its hand-off + ownership check) since sp_Mutex_unlock would take
      the lock again on its own. */
   SCHED_LOCK();
-  if (m->owner != g_current) {
+  if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) != g_current) {
     SCHED_UNLOCK();
     sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
   }
-  m->owner = sp_sched_wake_one(&m->waiters);   /* hand off the mutex, or NULL */
+  __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
   sp_sched_block(&cv->waiters);                /* park (drops+retakes the lock) */
   SCHED_UNLOCK();
   sp_Mutex_lock(m);   /* re-acquire (may block again on the mutex) */
@@ -2287,11 +2346,11 @@ void sp_CondVar_wait(sp_condvar *cv, sp_mutex *m) {
 void sp_CondVar_wait_nb(sp_condvar *cv, sp_mutex *m) {
   (void)cv;
   SCHED_LOCK();
-  if (m->owner != g_current) {
+  if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) != g_current) {
     SCHED_UNLOCK();
     sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
   }
-  m->owner = sp_sched_wake_one(&m->waiters);   /* hand off the mutex, or NULL */
+  __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
   SCHED_UNLOCK();
   sp_Mutex_lock(m);
 }

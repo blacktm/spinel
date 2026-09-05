@@ -198,6 +198,10 @@ typedef struct sp_mutex {
      re-acquisitions the owner holds beyond the first. */
   int reentrant;
   int depth;
+  /* Threads parked in #lock, counted so an uncontended #unlock can see that
+     there is nobody to hand off to without taking the global scheduler lock
+     (#4346). Mutated only under that lock; read atomically outside it. */
+  int nwaiters;
 } sp_mutex;
 
 sp_mutex  *sp_Mutex_new(void);
