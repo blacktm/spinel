@@ -221,6 +221,46 @@ compiles it unless something requires it, and an excluded `.h` is still on the
 include path for the C that is compiled. An application scaffolded by
 `spin new` has no `[package]` table; add one to use the field.
 
+## Choosing an allocator
+
+A program that runs for a second and exits spends no meaningful time in
+`malloc`. A server does: it allocates for every request for as long as it is
+up, and on that shape the allocator is a measurable fraction of the whole
+profile. `allocator` names the one this program wants:
+
+```toml
+[package]
+allocator = "jemalloc"
+```
+
+Anything `-l<name>` can link is accepted, and it becomes an ordinary link
+input. `"system"` and the absent key both mean the platform's own allocator,
+which is the default and stays the default: spinel compiles batch programs and
+benchmarks as readily as servers, and the right allocator is a property of the
+program rather than of the language. Only the manifest knows which kind of
+program this is. An application scaffolded by `spin new` has no `[package]`
+table; add one to use the field.
+
+The library has to be linkable at build time, which on Debian and Ubuntu means
+the development package (`libjemalloc-dev`) and not just the runtime one
+(`libjemalloc2`). Asking for an allocator that is not installed fails the
+build:
+
+```console
+$ spin build
+/usr/bin/ld: cannot find -ljemalloc: No such file or directory
+```
+
+That is deliberate. The manifest states what the program needs, and an unmet
+statement should fail the way an unresolvable dependency does — quietly
+building something slower than what was asked for is how one machine's binary
+comes to differ from another's without anyone noticing.
+
+On two Rails-derived applications compiled by spinel, `"jemalloc"` was worth
++58% on one OS worker and +25% on twelve for a 420 KB page, and +22% and +59%
+for a 6 KB one. It is the same reason Rails ships jemalloc in its production
+image.
+
 ## Building outside spin
 
 `spin build` owns the tree it sits in. When the build is driven from somewhere
