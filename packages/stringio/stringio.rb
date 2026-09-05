@@ -56,7 +56,7 @@ module StringIOPackage
   native_method :truncate, [:int], :int, "sp_StringIO_truncate"
   native_method :eof?,     [], :bool,    "sp_StringIO_eof_p"
   native_method :eof,      [], :bool,    "sp_StringIO_eof_p"
-  native_method :close,    [], :int,     "sp_StringIO_close"
+  native_method :close,    [], :void,    "sp_StringIO_close"
   native_method :closed?,  [], :bool,    "sp_StringIO_closed_p"
   native_method :sync,     [], :bool,    "sp_StringIO_sync"
   native_method :isatty,   [], :bool,    "sp_StringIO_isatty"
