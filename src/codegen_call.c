@@ -18227,9 +18227,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                      te, tw, tw, te);
         }
         else {
-          int te = ++g_tmp;
-          buf_printf(b, "sp_bool _e%d; sp_sock_read_nb(%s, ", te, r); emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 1, 1, &_e%d); })", te);
+          buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);
+          buf_puts(b, ", 1, 1, NULL)");
         }
         free(rb.p); return;
       }
@@ -18493,16 +18492,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       if (sp_streq(name, "read_nonblock")) {
         if (no_exc8) {
           int tw = ++g_tmp, te = ++g_tmp;
-          buf_printf(b, "sp_bool _e%d; const char *_t%d = sp_sock_read_nb(%s, ", te, tw, r);
+          buf_printf(b, "({ sp_bool _e%d; const char *_t%d = sp_sock_read_nb(%s, ", te, tw, r);
           emit_int_expr(c, argv[0], b);
           buf_printf(b, ", 0, 0, &_e%d); _t%d ? sp_box_str(_t%d)"
                         " : (_e%d ? sp_box_nil() : sp_box_sym(sp_sym_intern(\"wait_readable\"))); })",
                      te, tw, tw, te);
         }
         else {
-          int te = ++g_tmp;
-          buf_printf(b, "sp_bool _e%d; sp_sock_read_nb(%s, ", te, r); emit_int_expr(c, argv[0], b);
-          buf_printf(b, ", 1, 0, &_e%d); })", te);
+          buf_printf(b, "sp_sock_read_nb(%s, ", r); emit_int_expr(c, argv[0], b);
+          buf_puts(b, ", 1, 0, NULL)");
         }
       }
       else {
@@ -18971,10 +18969,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                          te9, tw9, tw9, te9);
           }
           else {
-            int te9 = ++g_tmp;
-            buf_printf(b, "sp_bool _e%d; sp_sock_read_nb(_t%d, ", te9, tio2);
+            buf_printf(b, "sp_sock_read_nb(_t%d, ", tio2);
             emit_int_expr(c, argv[0], b);
-            buf_printf(b, ", 1, 0, &_e%d); })", te9);
+            buf_puts(b, ", 1, 0, NULL); })");
           }
         }
         else {
