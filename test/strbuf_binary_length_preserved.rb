@@ -11,18 +11,26 @@
 
 n = 3
 
-# 1. The bytes survive the promotion, and setbyte through the original name
-#    still lands. Before the fix this raised IndexError on the first setbyte.
+# 1. The payload survives the promotion intact -- asserted BEFORE anything is
+#    written, so this is about the bytes that were already there rather than
+#    about the writes below. The interior NUL is the point: sized by strlen this
+#    became [1], and sized as all-NUL it became "" and the setbyte below raised
+#    IndexError. The ASCII-8BIT tag has to survive with it.
 kept = []
-buf = Array.new(n, 0).pack("C*")
+buf = [1, 0, 2].pack("C*")
 kept << buf
+p kept[0].bytes
+p kept[0].encoding == Encoding::BINARY
+
+# ...and setbyte through the original name still lands, with the alias in the
+# container observing the writes.
 i = 0
 while i < n
   buf.setbyte(i, 10)
   i += 1
 end
 p buf.bytes
-p kept[0].bytes          # the alias observes the writes
+p kept[0].bytes
 
 # 2. The promoted value has the right LENGTH when read back out and consumed by
 #    another operation -- here as the right-hand side of a slice assignment,

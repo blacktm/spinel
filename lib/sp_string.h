@@ -66,11 +66,12 @@ static inline int sp_fd_grow(sp_String *s, int64_t need){
   return 1;
 }
 static inline void sp_String_fin(void*p){sp_str_lcache_drop(((sp_String*)p)->data);free(sp_fd_base(((sp_String*)p)->data));}
-static inline sp_String*sp_String_new(const char*s){
-  /* Copy s's payload into a raw-malloc'd buffer BEFORE sp_gc_alloc: if s is a
-     heap string anchored only by this stack frame, sp_gc_alloc can trigger a
-     collection that frees it mid-call. The malloc'd buffer is off both heaps. */
-  int64_t len=(int64_t)strlen(s);
+/* Build a handle over an explicit byte length. Everything the caller needs to
+   read out of `s` must be read BEFORE this returns: the copy below happens
+   ahead of sp_gc_alloc precisely because a collection there frees an `s` that
+   this stack frame is the only anchor for (roots are explicit -- the C stack is
+   not scanned), so `s` may be dangling by the time it comes back. */
+static inline sp_String*sp_String_new_len(const char*s,int64_t len){
   int64_t cap=(len*2)+16;
   char*raw=(char*)malloc(SP_FD_OVH+cap);
   char*data=sp_fd_setup(raw);
@@ -81,6 +82,7 @@ static inline sp_String*sp_String_new(const char*s){
   sp_fd_publish(r);
   return r;
 }
+static inline sp_String*sp_String_new(const char*s){return sp_String_new_len(s,(int64_t)strlen(s));}
 /* Shared append core: `tl` is the operand byte length (strlen for the
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
 static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;memcpy(s->data+s->len,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish(s);}
@@ -98,23 +100,24 @@ static inline void sp_String_append_bin(sp_String*s,const char*t){if(!s||!t)retu
    sp_String_new above (reading s[-1] there is OOB and, under clang's rodata
    layout, misreads as frozen; cf. the #282 marker-probe lesson). */
 static inline sp_String*sp_String_new_shared(const char*s){
-  sp_String*r=sp_String_new(s);
-  /* the ASCII-8BIT tag is inherited too, not just the frozen bit: a pack /
-     String#b result captured by a block becomes one of these handles, and
-     dropping the tag put its bytes back on the character-counting path */
-  if(sp_str_is_binary(s)){
-    /* ...and so does the LENGTH. sp_String_new sizes its copy with strlen,
-       which stops at the first NUL, so a binary payload arrived here truncated:
-       `Array.new(n, 0).pack("C*")` became the empty string the moment it was
-       stored anywhere that promotes it to a handle, and the next setbyte on it
-       raised "index 0 out of string" against a zero-length buffer. The header
-       length is the real one -- re-fill from it. Done before the frozen bit
-       goes on, since the buffer is still being built here. */
-    size_t bl=sp_str_byte_len(s);
-    if(bl!=(size_t)r->len){r->len=0;sp_fd_append_len(r,s,(int64_t)bl);}
-    r->binary=1;sp_fd_publish(r);
-  }
-  if(((const unsigned char*)s)[-1]==0xf1){sp_gc_hdr*h=(sp_gc_hdr*)((char*)r-sizeof(sp_gc_hdr));h->frozen=1;}
+  /* Read every property of `s` HERE, before the allocation below: the handle's
+     constructor can collect, and `s` is typically an unrooted temporary (the
+     codegen hands this `sp_IntArray_pack(...)` directly), so touching it
+     afterwards is a read of freed memory.
+
+     The ASCII-8BIT tag is inherited, not just the frozen bit: a pack / String#b
+     result captured by a block becomes one of these handles, and dropping the
+     tag put its bytes back on the character-counting path. The LENGTH has to
+     come with it. strlen stops at the first NUL, so sizing a binary payload
+     that way truncated it: `Array.new(n, 0).pack("C*")` became the empty string
+     the moment it was stored anywhere that promotes it, and the next setbyte
+     raised "index 0 out of string" against a zero-length buffer. */
+  int bin=sp_str_is_binary(s);
+  int frozen=(((const unsigned char*)s)[-1]==0xf1);
+  int64_t len=bin?(int64_t)sp_str_byte_len(s):(int64_t)strlen(s);
+  sp_String*r=sp_String_new_len(s,len);
+  if(bin){r->binary=1;sp_fd_publish(r);}
+  if(frozen){sp_gc_hdr*h=(sp_gc_hdr*)((char*)r-sizeof(sp_gc_hdr));h->frozen=1;}
   return r;
 }
 static inline const char*sp_String_cstr(sp_String*s){return s->data;}
