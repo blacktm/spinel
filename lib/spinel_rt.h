@@ -1591,6 +1591,7 @@ static inline sp_bool sp_class_eq(sp_Class a, sp_Class b) {
   return (an && bn) ? strcmp(an, bn) == 0 : an == bn;
 }
 static inline const char *sp_poly_to_s(sp_RbVal v);   /* defined below; used by the user-object arm */
+static inline sp_File *sp_poly_to_file(sp_RbVal v); /* defined below; IO.select's user-#to_io unwrap */
 static inline void sp_poly_puts(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT: printf("%lld\n", (long long)v.v.i); break;
@@ -1827,6 +1828,20 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
       }
     default: return sp_str_empty;
   }
+}
+/* Unwrap a boxed IO value to its sp_File *. The user-#to_io dispatch
+   asks this for a poly return type, because the generated arm is forced
+   to box the answer through sp_RbVal (the codegen of a poly body has
+   no other channel). CRuby's IO.select only ever sees the IO itself;
+   the protocol is: a user class with #to_io is fine, anything else
+   is a TypeError raised by the caller of the hook (it never reaches
+   this function). A builtin IO is a sp_File directly; a boxed user
+   class is a pointer the user-defined #to_io just returned, and the
+   dispatch already vetted it. NULL is the "not an IO" answer the
+   dispatch turns into the caller's TypeError. */
+static inline sp_File *sp_poly_to_file(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return (sp_File *)v.v.p;
+  return NULL;
 }
 /* Class name of a boxed value, for `x.class` where x is poly. Returns a
    .rodata or names-table string (never GC-managed). */

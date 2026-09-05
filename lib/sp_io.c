@@ -851,7 +851,8 @@ const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   return r;
 }
 
-const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv) {SP_GC_ROOT(f);
+const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv, sp_bool *eof) {SP_GC_ROOT(f);
+  if (eof) *eof = 0;
   if (is_recv) sp_sock_nb_prepare(f, "recv_nonblock");
   else if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
   if (len <= 0) return sp_str_from_bytes("", 0);
@@ -873,6 +874,11 @@ const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv
   if (n > 0) { const char *s = sp_str_from_bytes(buf, (size_t)n); free(buf); return s; }
   if (n == 0) {
     free(buf);
+    if (eof) *eof = 1;
+    /* recv_nonblock answers "" at EOF in BOTH forms -- it does not raise
+       EOFError and it does not answer nil. read_nonblock is the one that
+       tells them apart: nil for `exception: false`, EOFError otherwise. */
+    if (is_recv) return sp_str_from_bytes("", 0);
     if (!exc) return NULL;                     /* CRuby: nil at EOF */
     sp_raise_cls("EOFError", "end of file reached");
   }
