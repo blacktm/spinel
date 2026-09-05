@@ -1561,6 +1561,8 @@ sp_StrArray *sp_Dir_entries_h(sp_Dir *d, sp_int children);
 sp_int sp_Dir_fchdir(sp_int fd);
 const char *sp_Dir_read(sp_Dir *d);
 const char *sp_Dir_path(sp_Dir *d);
+const char *sp_Dir_to_s(sp_Dir *d);
+sp_RbVal sp_Dir_cmp(sp_Dir *d, sp_RbVal other);
 sp_RbVal sp_Dir_close(sp_Dir *d);
 sp_Dir *sp_Dir_rewind(sp_Dir *d);
 sp_int sp_Dir_tell(sp_Dir *d);
@@ -1931,6 +1933,36 @@ sp_bool sp_io_eq(sp_File *a, sp_File *b) {
   return sa.st_mtim.tv_sec == sb.st_mtim.tv_sec && sa.st_mtim.tv_nsec == sb.st_mtim.tv_nsec;
 #endif
 }
+/* Object#<=> on a handle against any operand (boxed): 0 for the same object,
+   nil otherwise -- except two File::Stat handles, which Comparable orders by
+   modification time, the reading sp_io_eq takes for ==. A NULL handle is nil,
+   which is 0 against nil and nil against everything else. The answer is an
+   Integer or nil, boxed. */
+sp_RbVal sp_io_cmp(sp_File *a, sp_RbVal other) {
+  if (other.tag == SP_TAG_NIL) return a ? sp_box_nil() : sp_box_int(0);
+  if (other.tag != SP_TAG_OBJ || other.cls_id != SP_BUILTIN_IO) return sp_box_nil();
+  sp_File *b = (sp_File *)other.v.p;
+  if (a == b) return sp_box_int(0);
+  if (!sp_stat_handle_p(a) || !sp_stat_handle_p(b)) return sp_box_nil();
+  struct stat sa, sb;
+  if (!sp_stat_handle_mtime(a, &sa) || !sp_stat_handle_mtime(b, &sb)) return sp_box_nil();
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+  struct timespec ma = sa.st_mtimespec, mb = sb.st_mtimespec;
+#else
+  struct timespec ma = sa.st_mtim, mb = sb.st_mtim;
+#endif
+  if (ma.tv_sec != mb.tv_sec) return sp_box_int(ma.tv_sec < mb.tv_sec ? -1 : 1);
+  return sp_box_int(ma.tv_nsec < mb.tv_nsec ? -1 : ma.tv_nsec > mb.tv_nsec ? 1 : 0);
+}
+/* Object#to_s on a handle: #<Class:0xADDR> under the class the handle presents
+   as -- a stat handle is a File::Stat, and sp_io_kind_name tells File, IO and
+   the socket classes apart. #inspect keeps the handle's own render. A NULL
+   handle is nil, whose to_s is the empty string. */
+const char *sp_io_to_s(sp_File *f) {
+  if (!f) return SPL("");
+  return sp_sprintf("#<%s:0x%016llx>", sp_stat_handle_p(f) ? "File::Stat" : sp_io_kind_name(f),
+                    (unsigned long long)(uintptr_t)f);
+}
 /* True when the handle came from lstat, so a final symlink is not followed. */
 sp_bool sp_stat_nofollow(sp_File *f) {
   return f && f->mode && strcmp(f->mode, "lstat") == 0;
@@ -2139,6 +2171,18 @@ const char *sp_Dir_read(sp_Dir *d) {
 /* NULL is Ruby nil in the string convention: a Dir from Dir.for_fd has no path,
    and CRuby answers nil for it rather than an empty string (#3365). */
 const char *sp_Dir_path(sp_Dir *d) { return d ? d->path : NULL; }
+/* Object#to_s: #<Dir:0xADDR>; #inspect is the #<Dir:PATH> above. */
+const char *sp_Dir_to_s(sp_Dir *d) {
+  return d ? sp_sprintf("#<Dir:0x%016llx>", (unsigned long long)(uintptr_t)d) : SPL("");
+}
+/* Object#<=>: 0 for the same object, nil otherwise (a NULL handle is nil:
+   0 against nil, nil against everything else); boxed, like sp_io_cmp. */
+sp_RbVal sp_Dir_cmp(sp_Dir *d, sp_RbVal other) {
+  if (other.tag == SP_TAG_NIL) return d ? sp_box_nil() : sp_box_int(0);
+  if (other.tag == SP_TAG_OBJ && other.cls_id == SP_BUILTIN_DIR && (sp_Dir *)other.v.p == d)
+    return sp_box_int(0);
+  return sp_box_nil();
+}
 sp_RbVal sp_Dir_close(sp_Dir *d) { if (d && d->dp) { closedir(d->dp); d->dp = NULL; } return sp_box_nil(); }
 sp_Dir *sp_Dir_rewind(sp_Dir *d) { if (d && d->dp) rewinddir(d->dp); return d; }
 sp_int sp_Dir_tell(sp_Dir *d) { return d && d->dp ? (sp_int)telldir(d->dp) : 0; }

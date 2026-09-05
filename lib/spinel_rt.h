@@ -1775,6 +1775,8 @@ static const char *sp_convert_src_name(sp_RbVal v);  /* fwd: nil/true/false spel
 static inline int sp_poly_is_hash_kind(int cls_id);
 static inline const char *sp_poly_inspect(sp_RbVal v);
 static const char *sp_PolyArray_inspect(sp_PolyArray *a);  /* fwd: Array#to_s == inspect */
+const char *sp_io_to_s(sp_File *f);    /* fwd: Object#to_s on the IO family (sp_cold.c) */
+const char *sp_Dir_to_s(sp_Dir *d);
 static inline const char *sp_poly_to_s(sp_RbVal v) {
   switch (v.tag) {
     /* int-typed nil (SP_INT_NIL) is Ruby nil; nil.to_s is "" -- match it. */
@@ -1809,6 +1811,10 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
         /* MatchData#to_s is the whole match (#3641) */
         case SP_BUILTIN_MATCHDATA: { const char *_m0 = sp_MatchData_aref((sp_MatchData *)v.v.p, 0); return _m0 ? _m0 : sp_str_empty; }
         case SP_BUILTIN_EXCEPTION: return sp_exc_message((volatile struct sp_Exception_s *)v.v.p);
+        /* Object#to_s on a boxed handle of the IO family, as the typed arm
+           renders it: a boxed one fell through to "" (`puts [f, d]`) */
+        case SP_BUILTIN_IO: return sp_io_to_s((sp_File *)v.v.p);
+        case SP_BUILTIN_DIR: return sp_Dir_to_s((sp_Dir *)v.v.p);
         default:
           if ((v.cls_id >= 0 || v.cls_id == SP_BUILTIN_OBJECT) && v.v.p) {
             /* a class with a user #to_s renders through the generated
@@ -9629,6 +9635,8 @@ sp_StrArray *sp_Dir_entries_h(sp_Dir *d, sp_int children);
 sp_int sp_Dir_fchdir(sp_int fd);
 const char *sp_Dir_read(sp_Dir *d);
 const char *sp_Dir_path(sp_Dir *d);
+const char *sp_Dir_to_s(sp_Dir *d);
+sp_RbVal sp_Dir_cmp(sp_Dir *d, sp_RbVal other);
 sp_RbVal sp_Dir_close(sp_Dir *d);
 sp_Dir *sp_Dir_rewind(sp_Dir *d);
 sp_int sp_Dir_tell(sp_Dir *d);

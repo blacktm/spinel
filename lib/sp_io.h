@@ -44,8 +44,12 @@ typedef struct {
 sp_bool sp_io_frozen(sp_File *f);
 sp_File *sp_io_freeze(sp_File *f);
 /* Object#== on two handles: identity, except that two File::Stat handles
-   compare as Comparable does for File::Stat -- by modification time. */
+   compare as Comparable does for File::Stat -- by modification time. <=> reads
+   the same way (0 / nil, or the mtime order of two stats), boxed; to_s is
+   Object's #<Class:0xADDR> under the class the handle presents as. */
 sp_bool sp_io_eq(sp_File *a, sp_File *b);
+sp_RbVal sp_io_cmp(sp_File *a, sp_RbVal other);
+const char *sp_io_to_s(sp_File *f);
 
 /* File.open(path, mode) -> GC-managed handle (block form is codegen-only). */
 sp_File *sp_File_open(const char *path, const char *mode);

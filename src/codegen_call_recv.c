@@ -13301,14 +13301,21 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
-/* Object's universal protocol -- ===, ==, !=, equal?, eql?, frozen?, freeze --
-   on the native handle and value kinds that have no arm of their own. Reached
-   only from the tails of emit_call and emit_case_eq_call (and from the
-   MatchData, OpenStruct and IO arms, and the case/when emitter, which
-   delegate), after every typed arm and the user-method routing declined, so it
-   can never shadow a more specific answer: it turns a front-end rejection into
-   the answer Ruby gives. WHICH calls it answers is decided once, in
-   ty_object_protocol_answers (types.c), which infer_call types from as well.
+/* Object's universal protocol -- ===, ==, !=, equal?, eql?, frozen?, freeze,
+   and on the IO family (a File/IO/File::Stat handle, a Dir handle) to_s and
+   <=> as well -- on the native handle and value kinds that have no arm of
+   their own. Reached only from the tails of emit_call and emit_case_eq_call
+   (and from the MatchData, OpenStruct, IO and Dir arms, and the case/when
+   emitter, which delegate), after every typed arm and the user-method routing
+   declined, so it can never shadow a more specific answer: it turns a
+   front-end rejection into the answer Ruby gives. WHICH calls it answers is
+   decided once, in ty_object_protocol_answers (types.c), which infer_call
+   types from as well.
+
+   to_s is Object's #<Class:0xADDR> under the class the handle presents as
+   (#inspect stays the handle's own render). <=> is Object's identity answer,
+   0 or nil, boxed -- except two File::Stat handles, which Comparable orders by
+   modification time, the same reading == takes for them (sp_io_cmp).
 
    Two semantics, per CRuby. A heap handle (Fiber, Thread, Queue, Mutex,
    ConditionVariable, Dir, Addrinfo, IO, Enumerator, Method, Exception,
@@ -13333,6 +13340,23 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
   int kind = ty_object_protocol_kind(rt);
   Buf ct; memset(&ct, 0, sizeof ct); emit_ctype(c, rt, &ct);
   const char *cty = ct.p ? ct.p : "void *";
+  if (sp_streq(name, "to_s")) {
+    buf_printf(b, "%s(%s)", rt == TY_IO ? "sp_io_to_s" : "sp_Dir_to_s", r);
+    free(ct.p);
+    return;
+  }
+  if (sp_streq(name, "<=>")) {
+    /* receiver first, rooted across the operand, which may allocate; the
+       operand boxed whatever its static kind, so one runtime reading (a NULL
+       handle is nil) answers every shape */
+    int t = ++g_tmp;
+    Buf ab; memset(&ab, 0, sizeof ab); emit_boxed_text(c, at, a, &ab);
+    buf_printf(b, "({ %s _t%d = %s; SP_GC_ROOT(_t%d); sp_RbVal _u%d = %s; %s(_t%d, _u%d); })",
+               cty, t, r, t, t, ab.p ? ab.p : a, rt == TY_IO ? "sp_io_cmp" : "sp_Dir_cmp", t, t);
+    free(ab.p);
+    free(ct.p);
+    return;
+  }
   if (sp_streq(name, "frozen?")) {
     if (rt == TY_IO) buf_printf(b, "sp_io_frozen(%s)", r);
     else if (kind == 1) {

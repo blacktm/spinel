@@ -25171,11 +25171,12 @@ else {
     buf_printf(b, "), %d)", sp_streq(name, "!=") ? 1 : 0);
     return;
   }
-  /* IO handles compare by pointer identity (f.flush.equal?(f), #2799) --
-     except two File::Stat handles, which compare by modification time as
-     Comparable gives them; Object's protocol arm knows both */
-  if (recv >= 0 && comp_ntype(c, recv) == TY_IO && argc == 1 &&
-      (sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")) &&
+  /* The IO family's share of Object's protocol: handles compare by pointer
+     identity (f.flush.equal?(f), #2799) except two File::Stat handles, which
+     compare by modification time as Comparable gives them; to_s and <=> the
+     same way. The arm claims exactly the names ty_object_protocol_answers
+     lists, so this stands down for everything else. */
+  if (recv >= 0 && (comp_ntype(c, recv) == TY_IO || comp_ntype(c, recv) == TY_DIR) &&
       emit_native_object_protocol(c, id, b)) return;
   if (recv >= 0 && comp_ntype(c, recv) == TY_REGEX && argc == 0) {
     /* a Regexp is frozen; freeze/itself/dup evaluate to the pattern itself. */
