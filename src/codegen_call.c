@@ -7503,6 +7503,19 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
               else emit_expr(c, vnode, &mv);
             }
             else if (cls->ivar_types[a] == TY_POLY && comp_ntype(c, vnode) != TY_POLY) emit_boxed(c, vnode, &mv);
+            /* The reverse of that box: a POLY value into a CONCRETE member
+               slot. A member name a second class also defines makes the read
+               a poly dispatch, whose value is an sp_RbVal, while the
+               synthesized constructor's parameter is the member's own C type
+               -- so the call did not compile, naming a line in
+               <spinel-synthesized> (#4348). */
+            else if (cls->ivar_types[a] != TY_POLY && cls->ivar_types[a] != TY_UNKNOWN &&
+                     comp_ntype(c, vnode) == TY_POLY) {
+              Buf pv; memset(&pv, 0, sizeof pv);
+              emit_expr(c, vnode, &pv);
+              emit_unbox_text(c, cls->ivar_types[a], pv.p ? pv.p : "sp_box_nil()", &mv);
+              free(pv.p);
+            }
             /* an unresolved call's raise token is an sp_RbVal; coerce it to
                the member's slot type as every ordinary argument site does, or
                the C build stops at a line past the file's end with neither
@@ -20512,6 +20525,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             else if (a < sargc) vnode = sargv[a];
             if (vnode >= 0) {
               if (ncls->ivar_types[a] == TY_POLY && comp_ntype(c, vnode) != TY_POLY) emit_boxed(c, vnode, b);
+              /* and the reverse: a poly value into a concrete member slot
+                 (#4348), the same coercion the receiver path does */
+              else if (ncls->ivar_types[a] != TY_POLY && ncls->ivar_types[a] != TY_UNKNOWN &&
+                       comp_ntype(c, vnode) == TY_POLY) {
+                Buf pv2; memset(&pv2, 0, sizeof pv2);
+                emit_expr(c, vnode, &pv2);
+                emit_unbox_text(c, ncls->ivar_types[a], pv2.p ? pv2.p : "sp_box_nil()", b);
+                free(pv2.p);
+              }
               else emit_expr(c, vnode, b);
             }
             else buf_puts(b, default_value(ncls->ivar_types[a]));
