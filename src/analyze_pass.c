@@ -1624,12 +1624,27 @@ int infer_write_types(Compiler *c) {
     const int *lefts = nt_arr(nt, id, "lefts", &ln);
     int value = nt_ref(nt, id, "value");
     const char *vty = nt_type(nt, value);
-    /* `r, w = IO.pipe` -> both targets are IO handles. */
-    if (ln == 2 && vty && sp_streq(vty, "CallNode") && nt_str(nt, value, "name") &&
-        sp_streq(nt_str(nt, value, "name"), "pipe")) {
+    /* `r, w = IO.pipe` / `a, b = Socket.pair(...)` -> both targets are IO
+       handles. The general path below reads a USER method's multi-value
+       return; a builtin class method has no scope to read, so the few that
+       answer a fixed pair are named here. Without it both targets settle poly,
+       and every method gated on a typed receiver -- recv_nonblock is gated on
+       TY_IO -- cannot reach them, which reads as NoMethodError on a perfectly
+       good socket. The runtime kind is what answers #class, so a Socket pair
+       still says Socket. */
+    if (ln == 2 && vty && sp_streq(vty, "CallNode")) {
+      const char *vnm = nt_str(nt, value, "name");
       int vrecv = nt_ref(nt, value, "receiver");
-      if (vrecv >= 0 && nt_type(nt, vrecv) && sp_streq(nt_type(nt, vrecv), "ConstantReadNode") &&
-          nt_str(nt, vrecv, "name") && sp_streq(nt_str(nt, vrecv, "name"), "IO")) {
+      const char *vcn = (vrecv >= 0 && nt_type(nt, vrecv) &&
+                         sp_streq(nt_type(nt, vrecv), "ConstantReadNode"))
+                        ? nt_str(nt, vrecv, "name") : NULL;
+      int is_io_pair = vnm && vcn &&
+        ((sp_streq(vcn, "IO") && sp_streq(vnm, "pipe")) ||
+         (sp_streq(vcn, "Socket") &&
+          (sp_streq(vnm, "pair") || sp_streq(vnm, "socketpair"))));
+      /* UNIXSocket.pair is deliberately absent: the call itself has no arm, so
+         naming it here would claim a typing for something that cannot compile. */
+      if (is_io_pair) {
         for (int i = 0; i < 2; i++) {
           if (!sp_streq(nt_type(nt, lefts[i]) ? nt_type(nt, lefts[i]) : "", "LocalVariableTargetNode")) continue;
           const char *lnm = nt_str(nt, lefts[i], "name");
