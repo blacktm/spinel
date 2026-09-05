@@ -99,11 +99,22 @@ static inline void sp_String_append_bin(sp_String*s,const char*t){if(!s||!t)retu
    layout, misreads as frozen; cf. the #282 marker-probe lesson). */
 static inline sp_String*sp_String_new_shared(const char*s){
   sp_String*r=sp_String_new(s);
-  if(((const unsigned char*)s)[-1]==0xf1){sp_gc_hdr*h=(sp_gc_hdr*)((char*)r-sizeof(sp_gc_hdr));h->frozen=1;}
   /* the ASCII-8BIT tag is inherited too, not just the frozen bit: a pack /
      String#b result captured by a block becomes one of these handles, and
      dropping the tag put its bytes back on the character-counting path */
-  if(sp_str_is_binary(s)){r->binary=1;sp_fd_publish(r);}
+  if(sp_str_is_binary(s)){
+    /* ...and so does the LENGTH. sp_String_new sizes its copy with strlen,
+       which stops at the first NUL, so a binary payload arrived here truncated:
+       `Array.new(n, 0).pack("C*")` became the empty string the moment it was
+       stored anywhere that promotes it to a handle, and the next setbyte on it
+       raised "index 0 out of string" against a zero-length buffer. The header
+       length is the real one -- re-fill from it. Done before the frozen bit
+       goes on, since the buffer is still being built here. */
+    size_t bl=sp_str_byte_len(s);
+    if(bl!=(size_t)r->len){r->len=0;sp_fd_append_len(r,s,(int64_t)bl);}
+    r->binary=1;sp_fd_publish(r);
+  }
+  if(((const unsigned char*)s)[-1]==0xf1){sp_gc_hdr*h=(sp_gc_hdr*)((char*)r-sizeof(sp_gc_hdr));h->frozen=1;}
   return r;
 }
 static inline const char*sp_String_cstr(sp_String*s){return s->data;}
