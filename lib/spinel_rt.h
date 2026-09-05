@@ -1772,6 +1772,8 @@ static const char *sp_class_to_s(sp_Class c);
 #endif
 static const char *sp_poly_class_name(sp_RbVal v);  /* fwd: user-object to_s default */
 static const char *sp_convert_src_name(sp_RbVal v);  /* fwd: nil/true/false spell themselves */
+static sp_int sp_poly_Integer_ex(sp_RbVal v, sp_int base, int raise);  /* fwd: Kernel#Integer / #Float on a user object */
+static sp_float sp_poly_Float_ex(sp_RbVal v, int raise);
 static inline int sp_poly_is_hash_kind(int cls_id);
 static inline const char *sp_poly_inspect(sp_RbVal v);
 static const char *sp_PolyArray_inspect(sp_PolyArray *a);  /* fwd: Array#to_s == inspect */
@@ -2707,6 +2709,8 @@ static sp_int sp_poly_Integer(sp_RbVal v) {
     return (sp_int)v.v.f;
   }
   if (v.tag == SP_TAG_STR) return (sp_int)sp_str_to_i_strict(v.v.s ? v.v.s : sp_str_empty);
+  /* a user object converts through its own #to_int / #to_str / #to_i */
+  if (sp_poly_is_user_obj(v)) return sp_poly_Integer_ex(v, 0, 1);
   sp_raise_cls("TypeError", sp_sprintf("can't convert %s into Integer", sp_convert_src_name(v)));
   return 0;
 }
@@ -2718,6 +2722,8 @@ static sp_float sp_poly_Float(sp_RbVal v) {
      without an arm it reached the raise below as "can't convert Rational" */
   if (sp_poly_is_rational(v) || sp_poly_is_brat(v)) return sp_poly_to_f(v);
   if (v.tag == SP_TAG_STR) return sp_str_to_f_strict(v.v.s ? v.v.s : sp_str_empty);
+  /* a user object converts through its own #to_f */
+  if (sp_poly_is_user_obj(v)) return sp_poly_Float_ex(v, 1);
   sp_raise_cls("TypeError", sp_sprintf("can't convert %s into Float", sp_convert_src_name(v)));
   return 0.0;
 }
@@ -10696,6 +10702,154 @@ static int sp_at_exit_run(int status) {
   }
   return st;
 }
+/* ---- Kernel#Integer / Kernel#Float on a user object ----
+   CRuby's rb_convert_to_integer / rb_convert_to_float for an object of a
+   user class: its #to_int, #to_str and #to_i (Integer) or its #to_f
+   (Float), reached through the generated bridge (sp_obj_conv_fn) whatever
+   each method's static type, every answer judged here. One path for a
+   statically typed object and for one read out of a container, for the
+   strict and the `exception: false` forms; the typed entry points at the
+   end unbox for the slot the call site has. */
+enum { SP_CONV_TO_INT, SP_CONV_TO_I, SP_CONV_TO_F, SP_CONV_TO_STR };
+
+/* rb_protect: run fn(ctx) under a frame of its own and answer 1 when it
+   raised, the exception discarded -- the at_exit drain's frame shape.
+   Kernel#Integer probes #to_int this way, and the `exception: false` forms
+   probe every conversion this way. */
+static int sp_protect(void (*fn)(void *), void *ctx) {
+  sp_exc_check_depth();
+  sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
+  sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
+  if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) { fn(ctx); sp_exc_top--; return 0; }
+  sp_exc_top--;
+  sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];
+  return 1;
+}
+typedef struct { sp_RbVal obj; int which; int had; sp_RbVal ans; } sp_conv_probe;
+static void sp_conv_probe_run(void *p) {
+  sp_conv_probe *c = (sp_conv_probe *)p;
+  c->had = sp_obj_conv_fn((int)c->obj.cls_id, c->obj.v.p, c->which, &c->ans);
+}
+/* One conversion method of the object: 0 when its class has none, 1 with the
+   boxed answer in *ans, -1 when it raised (only under `protect`). The caller
+   roots the object across the call and the answer after it. */
+static int sp_obj_conv(sp_RbVal obj, int which, int protect, sp_RbVal *ans) {
+  sp_conv_probe c;
+  if (!sp_obj_conv_fn) return 0;
+  c.obj = obj; c.which = which; c.had = 0; c.ans = sp_box_nil();
+  if (!protect) sp_conv_probe_run(&c);
+  else if (sp_protect(sp_conv_probe_run, &c)) return -1;
+  *ans = c.ans;
+  return c.had;
+}
+static int sp_conv_is_integer(sp_RbVal a) { return a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; }
+/* The bytes of a String answer, or NULL for an answer of any other kind. */
+static const char *sp_conv_str_of(sp_RbVal a) {
+  if (a.tag == SP_TAG_STR) return a.v.s ? a.v.s : sp_str_empty;
+  if (sp_poly_is_strbuf(a)) return sp_String_cstr((sp_String *)a.v.p);
+  return NULL;
+}
+/* Integer("...") on a String: strict, or nil-answering for the
+   `exception: false` form. `base` 0 is the bare form. */
+static sp_RbVal sp_conv_str_Integer(const char *s, sp_int base, int raise) {
+  sp_int r;
+  if (raise) return sp_box_int(base ? sp_str_to_i_strict_base(s, base) : sp_str_to_i_strict(s));
+  r = sp_str_to_i_lenient_base(s, base);
+  return r == SP_INT_NIL ? sp_box_nil() : sp_box_int(r);
+}
+static sp_RbVal sp_obj_Integer_val(sp_RbVal v, sp_int base, int raise) {
+  sp_RbVal a = sp_box_nil();
+  const char *cn = sp_poly_class_name(v), *s;
+  int had;
+  SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(a);
+  if (base) {
+    /* with a base only a String converts, and an object is one through
+       #to_str alone */
+    had = sp_obj_conv(v, SP_CONV_TO_STR, 0, &a);
+    if (had > 0 && (s = sp_conv_str_of(a)) != NULL) return sp_conv_str_Integer(s, base, raise);
+    if (raise) sp_raise_cls("ArgumentError", "base specified for non string value");
+    return sp_box_nil();
+  }
+  /* #to_int, protected: an Integer answer wins; nil, another kind, or a
+     raise inside it are all swallowed and the search goes on */
+  had = sp_obj_conv(v, SP_CONV_TO_INT, 1, &a);
+  if (had > 0 && sp_conv_is_integer(a)) return a;
+  /* #to_str, bare: a String parses as Integer("...") does, and an answer of
+     any other kind is the conversion's own TypeError */
+  had = sp_obj_conv(v, SP_CONV_TO_STR, 0, &a);
+  if (had > 0 && (s = sp_conv_str_of(a)) != NULL) return sp_conv_str_Integer(s, 0, raise);
+  if (had > 0 && a.tag != SP_TAG_NIL)
+    sp_raise_cls("TypeError", sp_sprintf("can't convert %s to String (%s#to_str gives %s)",
+                                         cn, cn, sp_poly_class_name(a)));
+  /* #to_i: bare in the strict form, so a raise inside it propagates;
+     protected in the `exception: false` form, which answers nil for every
+     failure */
+  had = sp_obj_conv(v, SP_CONV_TO_I, !raise, &a);
+  if (had > 0 && sp_conv_is_integer(a)) return a;
+  if (!raise) return sp_box_nil();
+  if (had == 0) sp_raise_cls("TypeError", sp_sprintf("can't convert %s into Integer", cn));
+  sp_raise_cls("TypeError", sp_sprintf("can't convert %s to Integer (%s#to_i gives %s)",
+                                       cn, cn, sp_poly_class_name(a)));
+  return sp_box_nil();
+}
+static sp_RbVal sp_obj_Float_val(sp_RbVal v, int raise) {
+  sp_RbVal a = sp_box_nil();
+  const char *cn = sp_poly_class_name(v);
+  int had;
+  SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(a);
+  /* #to_f alone (never #to_str, never #to_int): bare in the strict form,
+     protected and nil-answering under `exception: false` */
+  had = sp_obj_conv(v, SP_CONV_TO_F, !raise, &a);
+  if (had > 0 && a.tag == SP_TAG_FLT) return a;
+  if (!raise) return sp_box_nil();
+  if (had == 0) sp_raise_cls("TypeError", sp_sprintf("can't convert %s into Float", cn));
+  sp_raise_cls("TypeError", sp_sprintf("can't convert %s to Float (%s#to_f gives %s)",
+                                       cn, cn, sp_poly_class_name(a)));
+  return sp_box_nil();
+}
+/* Kernel#Integer's answer, boxed: a user object through its conversions; a
+   plain value through the strict arms (sp_poly_Integer), or, under
+   `exception: false`, nil for everything those arms raise for. */
+static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
+  const char *s;
+  if (sp_poly_is_user_obj(v)) return sp_obj_Integer_val(v, base, raise);
+  if (raise && !base) return sp_box_int(sp_poly_Integer(v));
+  /* with a base only a String converts (a plain one or a shared handle) */
+  if (base) {
+    if ((s = sp_conv_str_of(v)) != NULL) return sp_conv_str_Integer(s, base, raise);
+    if (raise) sp_raise_cls("ArgumentError", "base specified for non string value");
+    return sp_box_nil();
+  }
+  if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v;
+  if (v.tag == SP_TAG_FLT) return isnan(v.v.f) || isinf(v.v.f) ? sp_box_nil() : sp_box_int((sp_int)v.v.f);
+  if (v.tag == SP_TAG_STR) return sp_conv_str_Integer(v.v.s ? v.v.s : sp_str_empty, 0, 0);
+  return sp_box_nil();
+}
+/* The entry points the Kernel#Integer / Kernel#Float emits call, one per
+   slot kind: the Integer slot (a Bignum answer truncates here, as one in a
+   boxed Integer(x) argument does), the Bignum slot the analysis types a call
+   as when the object's #to_int or #to_i answers one, and the Float slot. */
+static sp_int sp_poly_Integer_ex(sp_RbVal v, sp_int base, int raise) {
+  sp_RbVal r = sp_kernel_Integer_val(v, base, raise);
+  return r.tag == SP_TAG_NIL ? SP_INT_NIL : sp_poly_to_i(r);
+}
+static sp_Bigint *sp_poly_Integer_big(sp_RbVal v, sp_int base, int raise) {
+  sp_RbVal r = sp_kernel_Integer_val(v, base, raise);
+  return r.tag == SP_TAG_NIL ? NULL : sp_poly_as_bigint(r);
+}
+static sp_float sp_poly_Float_ex(sp_RbVal v, int raise) {
+  if (sp_poly_is_user_obj(v)) {
+    sp_RbVal r = sp_obj_Float_val(v, raise);
+    return r.tag == SP_TAG_NIL ? sp_float_nil() : r.v.f;
+  }
+  if (raise) return sp_poly_Float(v);
+  if (v.tag == SP_TAG_FLT) return v.v.f;
+  if (v.tag == SP_TAG_INT) return (sp_float)v.v.i;
+  if (v.tag == SP_TAG_BIGINT) return sp_poly_to_f(v);
+  if (v.tag == SP_TAG_STR) return sp_str_to_f_lenient(v.v.s ? v.v.s : sp_str_empty);
+  return sp_float_nil();
+}
+
 
 /* ---- Enumerable on a builtin Array receiver, driven by a real sp_Proc ----
 

@@ -1025,6 +1025,20 @@ TyKind infer_call(Compiler *c, int id) {
   return t;
 }
 
+/* Kernel#Integer's static kind: Integer, or Bignum when the argument is a
+   user object whose #to_int or #to_i answers one -- the answer is carried,
+   not truncated (a Bignum slot holds the small values too). */
+static TyKind kconv_integer_kind(Compiler *c, int arg) {
+  static const char *const names[] = { "to_int", "to_i" };
+  TyKind at = infer_type(c, arg);
+  if (!ty_is_object(at)) return TY_INT;
+  for (int k = 0; k < 2; k++) {
+    int mi = comp_method_in_chain(c, ty_object_class(at), names[k], NULL);
+    if (mi >= 0 && c->scopes[mi].nparams == 0 && c->scopes[mi].ret == TY_BIGINT) return TY_BIGINT;
+  }
+  return TY_INT;
+}
+
 static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* a yielder push (`y << v` inside an Enumerator.new generator) lowers to a
@@ -3707,7 +3721,7 @@ else {
                 ((krt == TY_NIL || krt == TY_POLY || krt == TY_UNKNOWN) &&
                  comp_method_index(c, name) < 0);
     if (kdisp) {
-      if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) return TY_INT;
+      if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) return kconv_integer_kind(c, argv[0]);
       if (kw_argc == 1) {
         if (sp_streq(name, "Float"))    return TY_FLOAT;
         if (sp_streq(name, "String"))   return TY_STRING;
@@ -3736,7 +3750,7 @@ else {
     if (mi < 0) mi = comp_included_method_index(c, name);
     if (mi >= 0) return method_call_ret(c, mi, id);
     /* Kernel conversions */
-    if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) return TY_INT;
+    if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) return kconv_integer_kind(c, argv[0]);
     if (sp_streq(name, "Float") && kw_argc == 1) return TY_FLOAT;
     if (sp_streq(name, "String") && argc == 1) return TY_STRING;
     if (sp_streq(name, "Array") && argc == 1) {

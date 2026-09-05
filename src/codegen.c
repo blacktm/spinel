@@ -6460,17 +6460,19 @@ static void emit_obj_with_dispatch(Compiler *c, Buf *b) {
    every callee it names, then the cls_id switch. `with_ok` adds the *ok
    out-flag the sp_int form needs (NULL can carry "no method" for a string). */
 static int conv_bridge_callee(Compiler *c, int i, const char *mname, TyKind want,
-                              int *out_mi) {
+                              int any_shape, int *out_mi) {
   ClassInfo *ci2 = &c->classes[i];
   if (is_builtin_reopen(ci2->name) || ci2->is_native_class) return -1;
-  if (comp_ty_value_obj(c, ty_object(i))) return -1;
+  if (!any_shape && comp_ty_value_obj(c, ty_object(i))) return -1;
   int dn = ci2->def_node;
   const char *dt = dn >= 0 ? nt_type(c->nt, dn) : NULL;
   if (dt && sp_streq(dt, "ModuleNode")) return -1;   /* no instances */
   int tdef = -1;
   int tmi = comp_method_in_chain(c, i, mname, &tdef);
-  if (tmi < 0 || !c->scopes[tmi].reachable || c->scopes[tmi].ret != want ||
-      c->scopes[tmi].nparams != 0) return -1;
+  if (tmi < 0 || !c->scopes[tmi].reachable || c->scopes[tmi].nparams != 0) return -1;
+  /* the Kernel#Integer / #Float bridge takes the method whatever it answers
+     (`any_shape`), and a value-type class's too, called on the boxed copy */
+  if (!any_shape && c->scopes[tmi].ret != want) return -1;
   int ddn = c->classes[tdef].def_node;
   const char *ddt = ddn >= 0 ? nt_type(c->nt, ddn) : NULL;
   *out_mi = tmi;
@@ -6483,7 +6485,7 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
                              const char *dflt) {
   for (int i = 0; i < c->nclasses; i++) {
     int tmi = -1;
-    int callee = conv_bridge_callee(c, i, mname, want, &tmi);
+    int callee = conv_bridge_callee(c, i, mname, want, 0, &tmi);
     if (callee != i) continue;   /* an ancestor's own row declares it */
     buf_printf(b, "%s%s sp_%s_%s(sp_%s *self);\n", g_debug ? "" : "static ",
                rett, c->classes[callee].c_name, mc(c->scopes[tmi].name),
@@ -6492,7 +6494,7 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
   buf_printf(b, "%s {\n  switch (cls_id) {\n", sig);
   for (int i = 0; i < c->nclasses; i++) {
     int tmi = -1;
-    int callee = conv_bridge_callee(c, i, mname, want, &tmi);
+    int callee = conv_bridge_callee(c, i, mname, want, 0, &tmi);
     if (callee < 0) continue;
     buf_printf(b, "    case %d: %sreturn sp_%s_%s((sp_%s *)p);\n",
                i, with_ok ? "*ok = 1; " : "",
@@ -6500,6 +6502,54 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
                c->classes[callee].c_name);
   }
   buf_printf(b, "    default: %s\n  }\n}\n", dflt);
+}
+
+/* The Kernel#Integer / Kernel#Float bridge (sp_obj_conv_fn): the runtime's
+   conversion search reaches a boxed user object's #to_int, #to_i, #to_f and
+   #to_str through it WHATEVER each method's static type. CRuby calls the
+   method and judges the answer, so a #to_int answering a String or a
+   Bignum, or nothing at all (a body that raises), is called and its answer
+   boxed for the runtime to judge. Answers 1 with the boxed value, 0 for a
+   class without the method. */
+static void emit_kconv_bridge(Compiler *c, Buf *b) {
+  static const char *const names[] = { "to_int", "to_i", "to_f", "to_str" };
+  for (int i = 0; i < c->nclasses; i++) {
+    for (int w = 0; w < 4; w++) {
+      int tmi = -1;
+      int callee = conv_bridge_callee(c, i, names[w], TY_UNKNOWN, 1, &tmi);
+      if (callee != i) continue;   /* an ancestor's own row declares it */
+      buf_puts(b, g_debug ? "" : "static ");
+      emit_ctype(c, (TyKind)c->scopes[tmi].ret, b);
+      buf_printf(b, " sp_%s_%s(sp_%s %sself);\n", c->classes[callee].c_name,
+                 mc(c->scopes[tmi].name), c->classes[callee].c_name,
+                 comp_ty_value_obj(c, ty_object(callee)) ? "" : "*");
+    }
+  }
+  buf_puts(b, "static int sp_obj_conv_sw(int cls_id, void *p, int which, sp_RbVal *out) {\n"
+              "  switch (cls_id) {\n");
+  for (int i = 0; i < c->nclasses; i++) {
+    int rows = 0;
+    for (int w = 0; w < 4; w++) {
+      int tmi = -1;
+      int callee = conv_bridge_callee(c, i, names[w], TY_UNKNOWN, 1, &tmi);
+      if (callee < 0) continue;
+      if (rows++ == 0) buf_printf(b, "    case %d: switch (which) {\n", i);
+      char call[256];
+      snprintf(call, sizeof call, "sp_%s_%s(%s(sp_%s *)p)", c->classes[callee].c_name,
+               mc(c->scopes[tmi].name),
+               comp_ty_value_obj(c, ty_object(callee)) ? "*" : "", c->classes[callee].c_name);
+      TyKind rt = (TyKind)c->scopes[tmi].ret;
+      buf_printf(b, "      case %d: *out = ", w);
+      /* a Float slot's nil is a NaN payload, which the plain box would carry
+         as a Float answer */
+      if (rt == TY_FLOAT)
+        buf_printf(b, "({ sp_float _f = %s; sp_float_is_nil(_f) ? sp_box_nil() : sp_box_float(_f); })", call);
+      else emit_boxed_text(c, rt, call, b);
+      buf_puts(b, "; return 1;\n");
+    }
+    if (rows) buf_puts(b, "      default: return 0;\n    }\n");
+  }
+  buf_puts(b, "    default: return 0;\n  }\n}\n");
 }
 
 static int class_inspectable(Compiler *c, int i) {
@@ -6565,6 +6615,7 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
   emit_conv_bridge(c, b, "to_path", TY_STRING,
                    "const char *", "static const char *sp_obj_to_path_sw(int cls_id, void *p)",
                    0, "return NULL;");
+  emit_kconv_bridge(c, b);
   buf_puts(b, "static const char *sp_obj_cls_name_rt(int cls_id) {\n"
               "  sp_Class _c = {cls_id}; return sp_class_to_s(_c);\n}\n");
   buf_puts(b, "static const char *sp_obj_inspect_sw(int cls_id, void *p) {\n");
@@ -7680,6 +7731,7 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_obj_to_int_fn = sp_obj_to_int_sw;\n");
     buf_puts(b, "  sp_obj_to_str_fn = sp_obj_to_str_sw;\n");
     buf_puts(b, "  sp_obj_to_path_fn = sp_obj_to_path_sw;\n");
+    buf_puts(b, "  sp_obj_conv_fn = sp_obj_conv_sw;\n");
     buf_puts(b, "  sp_obj_cls_name_fn = sp_obj_cls_name_rt;\n");
   }
   if (g_uses_marshal) {
@@ -9781,6 +9833,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "static sp_int sp_obj_to_int_sw(int cls_id, void *p, int *ok) __attribute__((cold, noinline));\n");
     buf_puts(&b, "static const char *sp_obj_to_str_sw(int cls_id, void *p) __attribute__((cold, noinline));\n");
     buf_puts(&b, "static const char *sp_obj_to_path_sw(int cls_id, void *p) __attribute__((cold, noinline));\n");
+    buf_puts(&b, "static int sp_obj_conv_sw(int cls_id, void *p, int which, sp_RbVal *out) __attribute__((cold, noinline));\n");
     buf_puts(&b, "static const char *sp_obj_cls_name_rt(int cls_id) __attribute__((cold, noinline));\n");
   }
   /* The #message / #to_s dispatchers below call these bodies unconditionally,

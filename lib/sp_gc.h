@@ -376,6 +376,11 @@ extern const char *(*sp_obj_to_str_fn)(int cls_id, void *p);
 /* #to_path, which File/Dir/IO's path slots ask before #to_str (CRuby's
    rb_get_path); NULL when the class defines none. */
 extern const char *(*sp_obj_to_path_fn)(int cls_id, void *p);
+/* Kernel#Integer / Kernel#Float on a boxed user object: the class's #to_int,
+   #to_i, #to_f or #to_str (`which`, in that order), WHATEVER the method's
+   static type -- CRuby calls it and judges the answer -- boxed into *out.
+   Answers 1 when the class has the method, 0 when it does not. */
+extern int (*sp_obj_conv_fn)(int cls_id, void *p, int which, sp_RbVal *out);
 /* Ruby class name for a user cls_id (the generated id->name table), so a
    runtime TU can word a TypeError the way CRuby does. */
 extern const char *(*sp_obj_cls_name_fn)(int cls_id);
