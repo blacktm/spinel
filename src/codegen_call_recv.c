@@ -3672,6 +3672,17 @@ else {
           emit_poly_sum_seed(c, recv, argv[0], b);
           return 1;
         }
+        /* A FLOAT seed over Floats does not compensate: CRuby reaches the
+           compensated loop only out of the exact phase, and a seed that is
+           already a Float never has one. An INTEGER seed does have one, so it
+           keeps the compensated call -- `[0.1, 0.2, 0.3].sum(0)` is 0.6 and
+           `.sum(0.0)` is 0.6000000000000001. The boxed fold draws the same
+           line; the two paths must not disagree. */
+        if (rt == TY_FLOAT_ARRAY && init_t == TY_FLOAT) {
+          buf_puts(b, "sp_FloatArray_sum_plain("); emit_expr(c, recv, b); buf_puts(b, ", ");
+          emit_expr(c, argv[0], b); buf_puts(b, ")");
+          return 1;
+        }
         buf_printf(b, "sp_%sArray_sum(", k); emit_expr(c, recv, b); buf_puts(b, ", ");
         if (rt == TY_FLOAT_ARRAY && init_t == TY_INT) {
           buf_puts(b, "(sp_float)("); emit_expr(c, argv[0], b); buf_puts(b, ")");

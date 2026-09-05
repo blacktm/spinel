@@ -141,6 +141,7 @@ sp_FloatArray *sp_FloatArray_from_step(sp_float beg, sp_float end, sp_float step
 sp_float sp_FloatArray_min(sp_FloatArray *a);
 sp_float sp_FloatArray_max(sp_FloatArray *a);
 sp_float sp_FloatArray_sum(sp_FloatArray *a, sp_float init);
+sp_float sp_FloatArray_sum_plain(sp_FloatArray *a, sp_float init);
 void sp_FloatArray_replace(sp_FloatArray *dst, sp_FloatArray *src);
 sp_FloatArray *sp_FloatArray_slice(sp_FloatArray *a, sp_int start, sp_int len);
 sp_FloatArray *sp_FloatArray_slice_range(sp_FloatArray *a, sp_int start, sp_int end_, sp_int excl);

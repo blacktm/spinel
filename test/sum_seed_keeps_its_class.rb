@@ -104,3 +104,19 @@ def nums
 end
 p nums.sum(Rational(1, 2))
 p $m
+
+# A FLOAT seed does not compensate. CRuby reaches the compensated float loop
+# only out of the exact phase, and a seed that is already a Float never has
+# one -- so `.sum` and `.sum(0)` are 0.6 while `.sum(0.0)` is not. Both the
+# typed float sum and the boxed fold have to draw that line in the same place.
+p [0.1, 0.2, 0.3].sum
+p [0.1, 0.2, 0.3].sum(0)
+p [0.1, 0.2, 0.3].sum(0.0)
+p [0.1, 0.2, 0.3].sum(1)
+p [0.1, 0.2, 0.3].sum(1.0)
+p [1, 0.1, 0.2, 0.3].sum(0.0)
+p [0.1, 0.2, 0.3].sum(Rational(0, 1))
+p [[0.1, 0.2, 0.3], 0][0].sum(0.0)
+p [[0.1, 0.2, 0.3], 0][0].sum(0)
+p [[0.1, 0.2, 0.3], 0][0].sum
+p [Float::INFINITY, 1.0].sum(0.0)

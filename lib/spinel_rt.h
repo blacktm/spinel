@@ -7808,7 +7808,13 @@ static sp_RbVal sp_poly_sum_seed(sp_RbVal v, sp_RbVal seed) {
      all: nil, a String, an Array start at plain `+` from the first element,
      which is the whole point -- that is the operator whose failure CRuby
      reports. */
-  sp_bool numeric_seed = sp_poly_sum_exact_p(acc) || acc.tag == SP_TAG_FLT;
+  /* ...and only an EXACT seed reaches the compensated phase. CRuby enters
+     the float loop from the exact phase, so a seed that is already a Float
+     has neither: it runs plain `+` from the first element, which is why
+     `[0.1, 0.2, 0.3].sum(0.0)` is 0.6000000000000001 while `.sum(0)` and
+     `.sum` are 0.6. Reading a Float seed as "numeric, so compensate" made
+     the two agree, which they do not. */
+  sp_bool numeric_seed = sp_poly_sum_exact_p(acc);
   if (sp_poly_sum_exact_p(acc)) {
     for (; i < n; i++) {
       sp_RbVal e = sp_poly_sum_item(v, items, i);
@@ -7816,13 +7822,13 @@ static sp_RbVal sp_poly_sum_seed(sp_RbVal v, sp_RbVal seed) {
       acc = sp_poly_add(acc, e);
     }
   }
-  /* The compensated phase, entered from a Float seed or from the first Float
-     element -- and running the very step sp_FloatArray_sum runs, NaN and
+  /* The compensated phase, entered from the first Float element that ends the
+     exact phase -- and running the very step sp_FloatArray_sum runs, NaN and
      Infinity arms included. `e` is carried across the turn boundary so the
      element that decided the entry is not read a second time. */
   if (numeric_seed && i < n) {
     sp_RbVal e = sp_poly_sum_item(v, items, i);
-    if (acc.tag == SP_TAG_FLT || e.tag == SP_TAG_FLT) {
+    if (e.tag == SP_TAG_FLT) {
       sp_float f = sp_poly_to_f(acc), c = 0.0;
       while (i < n && (e.tag == SP_TAG_FLT || sp_poly_sum_exact_p(e))) {
         sp_float_sum_step(&f, &c, sp_poly_to_f(e));
