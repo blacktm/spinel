@@ -333,6 +333,10 @@ const char *sp_exc_parent_of_name(const char *cls) {
     {"LoadError",             "StandardError"},
     {"RegexpError",           "StandardError"},
     {"StringScanner_Error",   "StandardError"},
+    /* the json package raises these by name; NestingError is what a document
+       too deep to serialize raises, and `rescue JSON::ParserError` catches it
+       in CRuby because it is a ParserError */
+    {"JSON::NestingError",    "JSON::ParserError"},
     {"FiberError",            "StandardError"},
     {"UncaughtThrowError",    "ArgumentError"},
     {"SyntaxError",           "ScriptError"},
