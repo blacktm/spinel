@@ -7519,6 +7519,83 @@ static void narrow_poly_int_locals(Compiler *c) {
   free(is_read); free(claimed);
 }
 
+/* ---- `rescue K => e`: an arm's reads take that arm's class (#4343) --------
+   A name bound by two rescue arms interns to ONE LocalVar, so the slot cannot
+   take either arm's class and lands on plain TY_EXCEPTION -- and a call naming
+   a method only the user class owns then had no route at all and stopped the
+   build. A read inside an arm still knows which class it is: the arm names it.
+   Every user exception subclass's struct opens with the sp_Exception header,
+   so reading the binding as that class there is a pointer cast, not a guess.
+
+   Marked in c->nilnarrow, the same read-site table the nil and is_a? guards
+   use, and only for the names the arm's class chain actually owns: everything
+   the builtin exception surface answers (#message, #backtrace) keeps the arms
+   it has today. A slot already specialized to one class needs nothing. */
+static int nng_has_write(Compiler *c, int root, const char *pn);
+
+static void nrar_mark_calls(Compiler *c, int root, Scope *s, const char *nm,
+                            int cid, TyKind t) {
+  if (root < 0) return;
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, root);
+  if (!ty) return;
+  /* a nested def has its own scope and its own `e`; the walk stops there */
+  if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode"))
+    return;
+  if (sp_streq(ty, "CallNode")) {
+    int recv = nt_ref(nt, root, "receiver");
+    const char *rty = recv >= 0 ? nt_type(nt, recv) : NULL;
+    const char *mn = nt_str(nt, root, "name");
+    if (rty && sp_streq(rty, "LocalVariableReadNode") && mn) {
+      const char *rn = nt_str(nt, recv, "name");
+      if (rn && sp_streq(rn, nm) && comp_scope_of(c, recv) == s &&
+          (comp_method_in_chain(c, cid, mn, NULL) >= 0 ||
+           comp_reader_in_chain(c, cid, mn, NULL) >= 0))
+        c->nilnarrow[recv] = t;
+    }
+  }
+  int nr = nt_num_refs(nt, root);
+  for (int i = 0; i < nr; i++) nrar_mark_calls(c, nt_ref_at(nt, root, i), s, nm, cid, t);
+  int na = nt_num_arrs(nt, root);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, root, i, &n);
+    for (int k = 0; k < n; k++) nrar_mark_calls(c, ids[k], s, nm, cid, t);
+  }
+}
+
+static void narrow_rescue_arm_reads(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || !sp_streq(ty, "RescueNode")) continue;
+    int ref = nt_ref(nt, id, "reference");
+    if (ref < 0 || !nt_type(nt, ref) ||
+        !sp_streq(nt_type(nt, ref), "LocalVariableTargetNode")) continue;
+    const char *nm = nt_str(nt, ref, "name");
+    if (!nm) continue;
+    /* exactly one named class, and a user exception subclass */
+    int nexc = 0;
+    const int *exc = nt_arr(nt, id, "exceptions", &nexc);
+    if (nexc != 1) continue;
+    const char *en = nt_type(nt, exc[0]);
+    if (!en || (!sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode")))
+      continue;
+    const char *enm = nt_str(nt, exc[0], "name");
+    int cid = enm ? comp_class_index(c, enm) : -1;
+    if (cid < 0 || !class_is_exc_subclass(c, cid)) continue;
+    Scope *vsc = comp_scope_of(c, ref);
+    LocalVar *lv = vsc ? scope_local(vsc, nm) : NULL;
+    /* only the slot the arms could not agree on: a specialized one already
+       reads as its class, and a builtin-typed one is what this repairs */
+    if (!lv || lv->type != TY_EXCEPTION) continue;
+    int body = nt_ref(nt, id, "statements");
+    /* an arm that reassigns the name is no longer holding what it caught:
+       the cast would be reading a class the value never was */
+    if (nng_has_write(c, body, nm)) continue;
+    nrar_mark_calls(c, body, vsc, nm, cid, ty_object(cid));
+  }
+}
+
 /* ---- `return <expr> if p.nil?` guard narrowing (#1661) --------------------
    A method whose call sites pass `T | nil` types its parameter poly (T has no
    first-class nullable slot: String, Time, ...). When the body OPENS with
@@ -13258,6 +13335,9 @@ void analyze_program(Compiler *c) {
      then-arm narrow to K's concrete type (post-fixpoint, same read-site unbox
      as the nil guards above). */
   narrow_isa_guards(c);
+  /* `rescue K => e` where a second arm binds the same name: reads inside an
+     arm take that arm's class (#4343). */
+  narrow_rescue_arm_reads(c);
   /* Post-backstop: re-run write type inference so multi-write locals whose
      RHS chains through a now-typed ivar (e.g. @h[bank][idx] where @h was
      just promoted from UNKNOWN to POLY) get their types resolved. */

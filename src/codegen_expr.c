@@ -1154,6 +1154,20 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     if (c->nilnarrow[id] != TY_UNKNOWN) {
       Buf rb2; memset(&rb2, 0, sizeof rb2);
       emit_local_ref(c, id, lrn, &rb2);
+      /* A `rescue K => e` arm's read of a binding two arms share (#4343). The
+         slot is a sp_Exception *, and every user exception subclass's struct
+         opens with that header, so the arm's class is a plain pointer cast --
+         not the poly unbox the guards below want. */
+      {
+        LocalVar *elv = lrn ? scope_local(comp_scope_of(c, id), lrn) : NULL;
+        if (elv && elv->type == TY_EXCEPTION && ty_is_object(c->nilnarrow[id])) {
+          buf_puts(b, "((");
+          emit_ctype(c, c->nilnarrow[id], b);
+          buf_printf(b, ")%s)", rb2.p ? rb2.p : "");
+          free(rb2.p);
+          return;
+        }
+      }
       /* An `is_a?(Array)`-narrowed read: a boxed array can be any element-typed
          representation (Int/Float/Str/Poly array), so normalize to a PolyArray
          at runtime rather than casting the raw .v.p to one kind. */
