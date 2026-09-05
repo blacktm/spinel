@@ -183,6 +183,31 @@ static TyKind emit_product_operand(Compiler *c, int node, TyKind at, Buf *b) {
   return at;
 }
 
+/* The class a builtin type answers to #class, for a "no implicit conversion of
+   X into Array" message. Only the kinds conv_to_ary_impossible admits. */
+static const char *conv_builtin_class_name(TyKind t) {
+  if (t == TY_STRING || t == TY_STRBUF) return "String";
+  if (t == TY_INT || t == TY_BIGINT) return "Integer";
+  if (t == TY_FLOAT) return "Float";
+  if (t == TY_SYMBOL) return "Symbol";
+  if (t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE) return "Range";
+  if (t == TY_PROC) return "Proc";
+  if (t == TY_TIME) return "Time";
+  if (ty_is_hash(t)) return "Hash";
+  return "Object";
+}
+/* True for a builtin type that certainly has no #to_ary, so an Array method
+   taking "something Array-like" can say so at compile time rather than reach
+   an arm that cannot serve it. Deliberately excludes TY_POLY / TY_UNKNOWN (may
+   be an array at run time) and every OBJECT type (a user class may define
+   #to_ary, which CRuby honours). */
+static int conv_to_ary_impossible(TyKind t) {
+  return t == TY_STRING || t == TY_STRBUF || t == TY_INT || t == TY_BIGINT ||
+         t == TY_FLOAT || t == TY_SYMBOL || t == TY_PROC || t == TY_TIME ||
+         t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE ||
+         ty_is_hash(t);
+}
+
 int emit_array_call(Compiler *c, int id, Buf *b) {
   /* The variadic Array mutators accept zero elements and return the receiver
      unchanged; every arm below is written for argc >= 1, so a no-argument call
@@ -1480,7 +1505,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       int bad = -1;
       for (int ai = 0; ai < argc; ai++) {
         TyKind at = comp_ntype(c, argv[ai]);
-        if (at == TY_NIL || at == TY_BOOL) { bad = ai; break; }
+        if (at == TY_NIL || at == TY_BOOL || conv_to_ary_impossible(at)) { bad = ai; break; }
       }
       if (bad >= 0) {
         TyKind arty = comp_ntype(c, id);
@@ -1496,10 +1521,13 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         }
         if (comp_ntype(c, argv[bad]) == TY_NIL)
           buf_puts(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of nil into Array\");");
-        else
+        else if (comp_ntype(c, argv[bad]) == TY_BOOL)
           buf_printf(b, "sp_raise_cls(\"TypeError\", _t%d"
                         " ? \"no implicit conversion of true into Array\""
                         " : \"no implicit conversion of false into Array\");", tb);
+        else
+          buf_printf(b, "sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into Array\");",
+                     conv_builtin_class_name(comp_ntype(c, argv[bad])));
         buf_printf(b, " %s; })", raise_tail_value(arty));
         return 1;
       }
