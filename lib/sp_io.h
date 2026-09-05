@@ -71,6 +71,15 @@ const char *sp_slurp_stream_parked(sp_File *f);
 sp_int sp_File_write(sp_File *f, const char *s);
 sp_int sp_File_write_bin(sp_File *f, const char *s);
 sp_int sp_File_close(sp_File *f);
+
+/* Every operation on a handle whose descriptor is gone raises IOError in
+   CRuby. Some of the read side already did; the write side and the position
+   queries answered a seed instead, so a write to a closed socket looked like
+   a successful send of zero bytes and the loss went unnoticed. #closed?,
+   #close and #inspect stay exempt: they are the three that are meant to work
+   on a closed handle. */
+void sp_io_raise_closed(void);
+#define SP_IO_OPEN(f) do { if (!(f) || !(f)->fp) sp_io_raise_closed(); } while (0)
 sp_bool sp_File_closed_p(sp_File *f);
 const char *sp_File_inspect(sp_File *f);
 const char *sp_io_kind_name(sp_File *f);

@@ -1046,7 +1046,7 @@ const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *v
    whose per-TU sp_str_heap can't be shared across translation units. */
 #include "sp_io.h"
 static inline const char *sp_File_gets(sp_File *f) {
-  if (!f || !f->fp) return NULL;
+  SP_IO_OPEN(f);
   sp_io_wait_readable(f);
   /* heap scratch, NOT a stack buffer: a green thread runs on a 64KB fiber
      stack (SP_FIBER_STACK_SIZE), which a 64KB local overran straight into
@@ -1122,7 +1122,7 @@ sp_RbVal sp_File_putc(sp_File *f, sp_RbVal v);
 sp_int sp_io_copy_stream(const char *src, const char *dst);
 const char *sp_slurp_stream(FILE *fp);
 static inline const char *sp_File_read(sp_File *f) {
-  if (!f || !f->fp) return sp_str_empty;
+  SP_IO_OPEN(f);
   sp_io_wait_readable(f);
   /* A handle whose read can block fills to EOF through the parking slurp: the
      plain one asks fread for a whole buffer and sits in the kernel between a
@@ -1138,7 +1138,7 @@ static inline const char *sp_File_read(sp_File *f) {
    negative n (treated as the no-count read). A short read produces a
    string of the bytes actually read. */
 static inline const char *sp_File_read_n(sp_File *f, sp_int n) {
-  if (!f || !f->fp) return NULL;
+  SP_IO_OPEN(f);
   sp_io_wait_readable(f);
   if (n < 0) return sp_File_read(f);
   if (n == 0) return sp_str_empty;

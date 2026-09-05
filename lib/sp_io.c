@@ -243,6 +243,10 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
 
 /* Shared write core: `n` is the operand byte length (strlen for the
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
+SP_COLD void sp_io_raise_closed(void) {
+  sp_raise_cls("IOError", "closed stream");
+}
+
 static sp_int sp_File_write_len(sp_File *f, const char *s, size_t n) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
   if (f->is_sock) return sp_sock_write(f, s, n);
   /* An IO.pipe write end is sync, so setvbuf left it unbuffered and stdio
@@ -253,7 +257,8 @@ static sp_int sp_File_write_len(sp_File *f, const char *s, size_t n) {SP_GC_ROOT
 }
 
 sp_int sp_File_write(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
-  if (!f || !f->fp || !s) return 0;
+  SP_IO_OPEN(f);
+  if (!s) return 0;
   return sp_File_write_len(f, s, strlen(s));
 }
 
@@ -265,7 +270,8 @@ sp_int sp_File_write(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s)
    callers and codegen's synthesized "" / "\n" literals are bare C literals
    with no marker byte and must use the plain entry above. */
 sp_int sp_File_write_bin(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
-  if (!f || !f->fp || !s) return 0;
+  SP_IO_OPEN(f);
+  if (!s) return 0;
   return sp_File_write_len(f, s, sp_str_byte_len(s));
 }
 
@@ -275,7 +281,8 @@ sp_bool sp_File_tty_p(sp_File *f) {
 
 sp_int sp_File_fileno(sp_File *f) {
   if (f && f->fno_plus1) return (sp_int)(f->fno_plus1 - 1);
-  return (f && f->fp) ? (sp_int)fileno(f->fp) : -1;
+  SP_IO_OPEN(f);
+  return (sp_int)fileno(f->fp);
 }
 
 /* IO#winsize -> [rows, cols]. Queries the terminal; a non-tty (pipe/file) has
@@ -999,7 +1006,8 @@ const char *sp_File_inspect(sp_File *f) {SP_GC_ROOT(f);
 }
 
 void sp_File_puts(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
-  if (!f || !f->fp || !s) return;
+  SP_IO_OPEN(f);
+  if (!s) return;
   size_t n = strlen(s);
   if (f->is_sock) {
     sp_sock_write(f, s, n);
@@ -1011,18 +1019,20 @@ void sp_File_puts(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
 }
 
 void sp_File_print(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
-  if (!f || !f->fp || !s) return;
+  SP_IO_OPEN(f);
+  if (!s) return;
   if (f->is_sock) { sp_sock_write(f, s, strlen(s)); return; }
   fputs(s, f->fp);
 }
 
 sp_int sp_File_flush(sp_File *f) {
-  if (f && f->fp) fflush(f->fp);
+  SP_IO_OPEN(f);
+  fflush(f->fp);
   return 0;
 }
 
 sp_bool sp_File_eof_p(sp_File *f) {
-  if (!f || !f->fp) return TRUE;
+  SP_IO_OPEN(f);
   int c = fgetc(f->fp);
   if (c == EOF) return TRUE;
   ungetc(c, f->fp);
@@ -1030,7 +1040,7 @@ sp_bool sp_File_eof_p(sp_File *f) {
 }
 
 sp_int sp_File_seek(sp_File *f, sp_int off, sp_int whence) {
-  if (!f || !f->fp) return -1;
+  SP_IO_OPEN(f);
   /* whence uses the Ruby IO::SEEK_* values (0/1/2), mapped explicitly so we
      never depend on the platform's SEEK_SET/CUR/END numbering. fseeko/ftello
      take off_t rather than fseek's long, so offsets past 2GB survive even
@@ -1040,12 +1050,12 @@ sp_int sp_File_seek(sp_File *f, sp_int off, sp_int whence) {
 }
 
 sp_int sp_File_tell(sp_File *f) {
-  if (!f || !f->fp) return -1;
+  SP_IO_OPEN(f);
   return (sp_int)ftello(f->fp);
 }
 
 sp_int sp_File_rewind(sp_File *f) {
-  if (!f || !f->fp) return -1;
+  SP_IO_OPEN(f);
   rewind(f->fp);
   return 0;
 }
