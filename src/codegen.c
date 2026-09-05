@@ -2461,6 +2461,13 @@ static int gc_elide_call_ok(const char *id, size_t n, const char *lvname) {
     "sp_box_int", "sp_box_bool", "sp_box_nil", "sp_box_sym", "sp_box_float",
     "sp_box_obj", "sp_box_nullable_obj", "sp_box_poly_array", "sp_box_int_or_nil",
     "sp_box_float_or_nil", "sp_poly_to_i", "sp_poly_to_f", "sp_poly_truthy",
+    /* The _or_nil siblings are the same conversions with one tag test in front,
+       so they are exactly as safe as the two above -- and they are what a
+       narrowing into an int or float slot uses since #4288. Left out, the veto
+       fired on the very calls the elision exists for: optcarrot's per-pixel
+       sprite function grew a GC frame and the whole benchmark lost 8%,
+       2310 fps to 2128. */
+    "sp_poly_to_i_or_nil", "sp_poly_to_f_or_nil",
     "sp_poly_length", "sp_imod", "sp_idiv", "sp_int_bit",
     "sp_IntArray_get", "sp_FloatArray_get", "sp_StrArray_get", "sp_PolyArray_get",
     "sp_IntArray_length", "sp_PolyArray_length",
