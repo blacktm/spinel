@@ -380,7 +380,10 @@ class Pathname
     self
   end
 
-  # rm -r. Files and symlinks are unlinked; directories are emptied first.
+  # rm -rf, as CRuby's FileUtils.rm_rf: files and symlinks are unlinked,
+  # directories are emptied first, and a path that is not there or an entry
+  # that cannot be removed is skipped -- the answer is self either way. Each
+  # child's own rescue keeps a failure inside from stopping its siblings.
   def rmtree
     if directory? && !symlink?
       children.each { |child| child.rmtree }
@@ -388,6 +391,8 @@ class Pathname
     else
       File.delete(@path)
     end
+    self
+  rescue SystemCallError
     self
   end
 

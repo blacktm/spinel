@@ -23952,10 +23952,20 @@ else {
       buf_printf(b, "; !sp_file_directory(_t%d) && sp_file_exist(_t%d); })", tfp, tfp); return;
     }
     if ((sp_streq(name, "delete") || sp_streq(name, "unlink")) && argc >= 1) {
+      if (argc == 1) {
+        buf_puts(b, "({ sp_file_delete("); emit_path_expr(c, argv[0], b);
+        buf_puts(b, "); (sp_int)1; })"); return;
+      }
+      /* several paths: every one is evaluated, and rooted, before the first
+         unlink, as CRuby's apply2files converts them all first -- now that a
+         failing path raises, it must not skip a later argument's effects */
+      int td = ++g_tmp;
       buf_puts(b, "({ ");
       for (int k = 0; k < argc; k++) {
-        buf_puts(b, "sp_file_delete("); emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
+        buf_printf(b, "const char *_del_%d_%d = ", td, k); emit_path_expr(c, argv[k], b);
+        buf_printf(b, "; SP_GC_ROOT_STR(_del_%d_%d); ", td, k);
       }
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_delete(_del_%d_%d); ", td, k);
       buf_printf(b, "(sp_int)%d; })", argc); return;
     }
     if (sp_streq(name, "rename") && argc == 2) {

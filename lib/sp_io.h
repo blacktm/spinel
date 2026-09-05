@@ -174,10 +174,12 @@ const char *sp_file_readlink(const char *path);  /* defined in sp_cold.c */
 void sp_file_delete(const char *path);
 void sp_file_rename(const char *from, const char *to);
 /* A filesystem call that failed raises the Errno:: class CRuby raises for the
-   errno, with CRuby's message shape "<strerror> @ <op> - <path>", where op is
-   the name of CRuby's own entry point (dir_s_mkdir, apply2files,
-   rb_file_s_rename ...) so a program matching on the text reads the same
-   words. An errno with no class here raises SystemCallError. */
+   errno, with CRuby's message shape "<strerror> @ <op> - <path>". op is the
+   label after the @: for the File and Dir class methods it is CRuby's own
+   entry-point name (dir_s_mkdir, apply2files, rb_file_s_rename ...), so a
+   program matching on the text reads the same words; the socket calls and
+   the older File sites (readlink, symlink, mkfifo ...) pass the syscall's
+   name. An errno with no class here raises SystemCallError. */
 SP_NORETURN void sp_file_raise_errno(const char *op, const char *path);
 
 #include <dirent.h>

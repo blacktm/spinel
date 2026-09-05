@@ -853,11 +853,16 @@ sp_Time sp_file_birthtime(const char *path) {SP_GC_ROOT_STR(path);  /* (#2985) *
   if (!path) { sp_raise_cls("TypeError", "no implicit conversion of nil into String"); return (sp_Time){0, 0, 0}; }
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
   struct stat st;
-  if (stat(path, &st) == -1) { sp_file_raise_errno("rb_file_s_birthtime", path); return (sp_Time){0, 0, 0}; }
+  if (stat(path, &st) == -1) sp_file_raise_errno("rb_file_s_birthtime", path);
   return (sp_Time){(int64_t)st.st_birthtimespec.tv_sec, (int32_t)st.st_birthtimespec.tv_nsec, 0};
 #elif defined(__linux__) && defined(STATX_BTIME)
+  /* a statx that fails is the path's Errno (a missing file is ENOENT, as in
+     CRuby's rb_file_s_birthtime); only a filesystem that answers without a
+     birth time is the NotImplementedError */
   struct statx stx;
-  if (statx(AT_FDCWD, path, AT_STATX_SYNC_AS_STAT, STATX_BTIME, &stx) == 0 && (stx.stx_mask & STATX_BTIME))
+  if (statx(AT_FDCWD, path, AT_STATX_SYNC_AS_STAT, STATX_BTIME, &stx) != 0)
+    sp_file_raise_errno("rb_file_s_birthtime", path);
+  if (stx.stx_mask & STATX_BTIME)
     return (sp_Time){(int64_t)stx.stx_btime.tv_sec, (int32_t)stx.stx_btime.tv_nsec, 0};
   sp_raise_cls("NotImplementedError", "birthtime() function is unimplemented on this filesystem");
   return (sp_Time){0, 0, 0};
@@ -1782,7 +1787,8 @@ sp_int sp_file_chmod(sp_int mode, const char *path) {SP_GC_ROOT_STR(path);
   return 1;
 }
 sp_int sp_file_truncate(const char *path, sp_int n) {SP_GC_ROOT_STR(path);
-  if (truncate(path ? path : "", (off_t)n) != 0) sp_file_raise_errno("rb_file_s_truncate", path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+  if (truncate(path, (off_t)n) != 0) sp_file_raise_errno("rb_file_s_truncate", path);
   return 0;
 }
 sp_int sp_file_write_at(const char *path, const char *data, sp_int off) {SP_GC_ROOT_STR(path);SP_GC_ROOT_STR(data);
@@ -2068,19 +2074,23 @@ const char *sp_dir_pwd(void) {
   memcpy(buf, tmp, n + 1);
   return buf;
 }
-/* Dir.mkdir / Dir.rmdir / Dir.chdir: 0, or the Errno CRuby raises. The
-   labels are CRuby's; its block-form chdir says dir_chdir0 where this one
-   says chdir_path for both. */
+/* Dir.mkdir / Dir.rmdir / Dir.chdir: 0, or the Errno CRuby raises, under
+   CRuby's labels; its block-form chdir says dir_chdir0 where this wrapper
+   says chdir_path in both forms. A nil path (a NULL string at run time) is
+   CRuby's TypeError, as it is for File.size and the time readers above. */
 sp_int sp_dir_mkdir(const char *path) {SP_GC_ROOT_STR(path);
-  if (mkdir(path ? path : "", 0777) != 0) sp_file_raise_errno("dir_s_mkdir", path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+  if (mkdir(path, 0777) != 0) sp_file_raise_errno("dir_s_mkdir", path);
   return 0;
 }
 sp_int sp_dir_rmdir(const char *path) {SP_GC_ROOT_STR(path);
-  if (rmdir(path ? path : "") != 0) sp_file_raise_errno("dir_s_rmdir", path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+  if (rmdir(path) != 0) sp_file_raise_errno("dir_s_rmdir", path);
   return 0;
 }
 sp_int sp_dir_chdir(const char *path) {SP_GC_ROOT_STR(path);
-  if (chdir(path ? path : "") != 0) sp_file_raise_errno("chdir_path", path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+  if (chdir(path) != 0) sp_file_raise_errno("chdir_path", path);
   return 0;
 }
 const char *sp_dir_home(void) {
