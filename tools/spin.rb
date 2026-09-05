@@ -939,7 +939,7 @@ end
 # --- manifest ----------------------------------------------------------------
 
 class Project
-  attr_reader :root, :name, :dep_paths
+  attr_reader :root, :name, :dep_paths, :allocator
 
   def initialize(root)
     @root = root
@@ -951,6 +951,15 @@ class Project
       nm = base
     end
     @name = nm
+    # `[package] allocator`. A malloc replacement is a property of the
+    # PROGRAM, not of the compiler: a server allocates for its whole life
+    # where a batch job barely allocates at all, and only the manifest knows
+    # which this is. "" (the default) and "system" both mean the platform's
+    # own allocator. Read from THIS manifest only: a dependent never compiles
+    # a dependency's bin/, so a dependency's choice cannot reach the program
+    # being built -- and a process has one allocator, which is not a decision
+    # a library makes for its dependents.
+    @allocator = toml.get("package", "allocator")
     # per-dependency feature enablement from THIS manifest's [dependencies]
     # inline specs (dep = { ..., features = ["cuda"] }); root-level only --
     # transitive feature unification is out of scope
@@ -1089,6 +1098,13 @@ def spin_flags(prj)
   # that is not already cached, which is what makes the --link paths real.
   prj.native_objs.each { |o| f += " --link #{o}" }
   prj.native_build_libs.split("\n").each { |l| f += " --link #{l}" if l != "" }
+  # The allocator the manifest asked for, as an ordinary link input. Declared
+  # and missing is a hard link error, deliberately: the manifest states what
+  # the program needs, and an unmet statement should fail the way an
+  # unresolvable dependency does rather than quietly building something
+  # slower than what was asked for. Ordering is free -- this is a whole -l,
+  # not an object the earlier ones resolve symbols against.
+  f += " --link -l" + prj.allocator if prj.allocator != "" && prj.allocator != "system"
   f
 end
 
