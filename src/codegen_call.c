@@ -4707,6 +4707,48 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                         " { sp_StringIO_rewind((sp_StringIO *)_t%d.v.p); }\nelse ",
                      tv, tv, sio_cid3, tv);
       }
+      /* A zero-arg IO method whose name a user class ALSO owns. The cls_id
+         switch below carries an arm per user class only, so an `@io` that
+         holds a Socket here and a plain object there left the real stream at
+         the NoMethodError default (#4341): `def close; @io.close; end` on a
+         wrapper reported `close` as undefined for the Socket. Guarded on
+         SP_BUILTIN_IO, which no user-class arm can alias, so an object still
+         takes its own arm -- the same shape the rewind pre-arm above uses.
+         `close` leaves the seed alone: nil is what it answers. */
+      if (argc == 0 && nt_ref(nt, id, "block") < 0) {
+        static const struct { const char *nm, *fn; TyKind rt; } IOZ[] = {
+          {"close",   "sp_File_close",    TY_VOID},
+          {"closed?", "sp_File_closed_p", TY_BOOL},
+          {"eof?",    "sp_File_eof_p",    TY_BOOL},
+          {"eof",     "sp_File_eof_p",    TY_BOOL},
+          {"tty?",    "sp_File_tty_p",    TY_BOOL},
+          {"isatty",  "sp_File_tty_p",    TY_BOOL},
+          {"flush",   "sp_File_flush",    TY_VOID},
+          {"fileno",  "sp_File_fileno",   TY_INT},
+          {"tell",    "sp_File_tell",     TY_INT},
+          {"pos",     "sp_File_tell",     TY_INT},
+          {NULL, NULL, TY_VOID}
+        };
+        for (int i = 0; IOZ[i].nm; i++) {
+          if (!sp_streq(name, IOZ[i].nm)) continue;
+          char ioex[128];
+          snprintf(ioex, sizeof ioex, "%s((sp_File *)_t%d.v.p)", IOZ[i].fn, tv);
+          buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO) { ",
+                     tv, tv);
+          /* the value only lands when the result slot can hold it: poly boxes
+             it, an exactly matching concrete slot takes it raw, anything else
+             keeps the call for its effect and leaves the seed */
+          if (ret == TY_POLY && IOZ[i].rt != TY_VOID) {
+            buf_printf(b, "_t%d = ", tr);
+            emit_boxed_text(c, IOZ[i].rt, ioex, b);
+          }
+          else if (ret == IOZ[i].rt && IOZ[i].rt != TY_VOID)
+            buf_printf(b, "_t%d = %s", tr, ioex);
+          else buf_puts(b, ioex);
+          buf_puts(b, "; }\nelse ");
+          break;
+        }
+      }
       /* A zero-arg CONTAINER reduction whose name a user class also owns
          (`TreeNode#sum` next to a real Array's). The switch below covers
          SP_TAG_OBJ user classes only, so an Array receiver fell through to the
