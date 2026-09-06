@@ -6169,11 +6169,26 @@ static void emit_obj_to_hash_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "    default: return sp_box_nil();\n  }\n}\n");
 }
 
+/* The method answers no value: its emitted C return type is `void`. A body
+   whose only statement is a raise infers that, and so does one that ends in an
+   assignment. */
+static int scope_ret_is_void(Compiler *c, int mi) {
+  TyKind r = (TyKind)c->scopes[mi].ret;
+  return !ty_is_object(r) && !c_type_name(r);
+}
+
 /* A user class's own #to_json, keyed by cls_id and installed as
    sp_obj_to_json_fn: the json package asks for it before the generic field
    reflection, so an object nested in a container serializes the way CRuby's
    json does (which calls #to_json on every value). Only the two shapes that
-   occur in practice are dispatched: `def to_json` and `def to_json(*args)`. */
+   occur in practice are dispatched: `def to_json` and `def to_json(*args)`.
+
+   A method that answers no value is dispatched too, for its effect. Refusing
+   it here is what kept a `to_json` that only raises from ever running: the
+   object fell through to the reflection arm below and serialized as if the
+   method were not there, and CRuby's ArgumentError never came. The call
+   answers NULL, so the document is what it always was for a method that
+   returns -- and for one that does not, the raise is the answer. */
 static int obj_to_json_method(Compiler *c, int cid, int *defc) {
   ClassInfo *ci = &c->classes[cid];
   if (ci->is_native_class || !ci->instantiated) return -1;
@@ -6181,7 +6196,16 @@ static int obj_to_json_method(Compiler *c, int cid, int *defc) {
   int mi = comp_method_in_chain(c, cid, "to_json", &dc);
   if (mi < 0) return -1;
   Scope *m = &c->scopes[mi];
-  if (m->is_cmethod || m->ret != TY_STRING) return -1;
+  if (m->is_cmethod) return -1;
+  if (m->ret != TY_STRING) {
+    /* The no-value arm takes only a shape the dispatch below can call and
+       CRuby's json would call: an `&block` parameter is one the emitted call
+       does not pass, and a private or protected #to_json is one CRuby never
+       reaches, so it serializes the object instead. Both fell through to the
+       reflection arm before this arm existed, and still do. */
+    if (!scope_ret_is_void(c, mi) || m->blk_param) return -1;
+    if (comp_method_vis_in_chain(c, cid, "to_json") != SP_VIS_PUBLIC) return -1;
+  }
   if (!scope_has_callable_symbol(c, mi)) return -1;
   if (m->nparams > 1 || (m->nparams == 1 && m->rest_idx != 0)) return -1;
   if (m->nparams == 1) {
@@ -6208,10 +6232,13 @@ static void emit_obj_to_json_dispatch(Compiler *c, Buf *b) {
     int mi = obj_to_json_method(c, i, &defc);
     if (mi < 0) continue;
     int vobj = comp_ty_value_obj(c, ty_object(defc));
-    buf_printf(b, "    case %d: return sp_%s_%s(%s(sp_%s *)v.v.p%s);\n", i,
+    int novalue = scope_ret_is_void(c, mi);
+    buf_printf(b, "    case %d: %s", i, novalue ? "" : "return ");
+    buf_printf(b, "sp_%s_%s(%s(sp_%s *)v.v.p%s);",
                c->classes[defc].c_name, mc(c->scopes[mi].name), vobj ? "*" : "",
                c->classes[defc].c_name,
                c->scopes[mi].nparams == 1 ? ", sp_PolyArray_new()" : "");
+    buf_puts(b, novalue ? " return NULL;\n" : "\n");
   }
   buf_puts(b, "    default: return NULL;\n  }\n}\n");
 }

@@ -15,27 +15,87 @@
    (matches spinel_rt.h's SPL). Used for the fixed tokens true/false/null. */
 #define JSPL(s) (&("\xff" s)[1])
 
-/* Off-GC-heap growable buffer; finalized into a GC string at the end. */
-typedef struct { char *p; size_t len, cap; } jbuf;
-/* `s` is not rooted: this buffer is off the GC heap and grows with realloc,
-   so nothing here can collect -- and most callers hand it a raw literal or a
-   stack byte, which have no marker byte in front for the collector to read
-   (ASAN: global-buffer-overflow, and a stray write into rodata or the stack). */
+/* Growable buffer, finalized into a right-sized GC string at the end.
+
+   It starts off the GC heap, and it has to: the escaper below reads an
+   unrooted source through it -- one that may be a rodata literal, whose [-1]
+   is not a marker byte for the collector to read -- and that is only safe
+   while nothing in here can collect.
+
+   A document walk, though, does not always return through its frame. A user
+   #to_json can raise, throw, or return from a proc, and every one of those
+   longjmps over the frame, leaving a malloc'd block owned by nothing at all.
+   So a walk MOVES its buffer onto the GC string heap before it calls user code
+   (jb_to_heap), into a slot it has rooted, and from then on the collector owns
+   it: the landing frame drops that root along with every other root the walk
+   was holding, whichever way the walk was left. Once moved, growing the buffer
+   allocates -- so an append whose source is a GC string roots that source too
+   (jb_gcs). The move happens at most once per walk, and not at all for a
+   document with no user objects in it, which is why it costs nothing to
+   measure. */
+typedef struct {
+  char *p; size_t len, cap;
+  char *heap;   /* NULL while p is malloc'd; == p once moved, and the rooted slot */
+} jbuf;
+/* A moved buffer's grow, out of line: jb_add is inlined into loops that append
+   a byte at a time, and a second allocator inside its body stops that. With
+   the grow written inline, nm gives jb_add a symbol of its own and the
+   generate benchmark goes from 1.98 s to 2.58 s. */
+SP_COLD static __attribute__((noinline)) void jb_grow_heap(jbuf *b, size_t cap) {
+  char *q = sp_str_alloc(cap);   /* collects; b->heap is the walk's root */
+  if (b->len) memcpy(q, b->p, b->len);
+  b->p = b->heap = q;
+  b->cap = cap;
+}
 static void jb_add(jbuf *b, const char *s, size_t n) {
   if (b->len + n + 1 > b->cap) {
-    b->cap = (b->len + n + 1) * 2;
-    b->p = (char *)realloc(b->p, b->cap);
-    if (!b->p) sp_oom_die();
+    size_t cap = (b->len + n + 1) * 2;
+    if (b->heap) jb_grow_heap(b, cap);
+    else {
+      b->p = (char *)realloc(b->p, cap);
+      if (!b->p) sp_oom_die();
+      b->cap = cap;
+    }
   }
   memcpy(b->p + b->len, s, n);
   b->len += n;
 }
 static void jb_c(jbuf *b, char c) { jb_add(b, &c, 1); }
+/* Hand the buffer to the collector before running code that may not come back.
+   The allocation here can collect, and that is safe at exactly this moment:
+   b->heap is still NULL, so the walk's root marks nothing, and what it is
+   copying out of is a malloc'd block the collector cannot touch. */
+static void jb_to_heap(jbuf *b) {
+  if (b->heap) return;
+  size_t cap = b->cap ? b->cap : 1;
+  char *q = sp_str_alloc(cap);
+  if (b->len) memcpy(q, b->p, b->len);
+  free(b->p);
+  b->p = b->heap = q;
+  b->cap = cap;
+}
+/* Append a GC string to a buffer that has moved: growing it allocates now, and
+   the source is held in nothing but this argument slot -- the same reason
+   sp_json_parse roots its input. A source with no marker byte in front of it must not come through
+   here: the collector reads that byte. Every caller's does -- a fresh heap
+   string, sp_str_empty, or a JSPL literal. */
+static void jb_gcs_rooted(jbuf *b, const char *s, size_t n) {
+  SP_GC_ROOT_STR(s);
+  jb_add(b, s, n);
+}
+/* Every GC string a walk appends comes through here, once per scalar and once
+   per key. Before the buffer moves nothing in jb_add can collect, so no root
+   is pushed; the push is in its own function above to keep the cleanup it
+   declares out of the path that runs when there is nothing to root. */
+static inline void jb_gcs(jbuf *b, const char *s, size_t n) {
+  if (b->heap) { jb_gcs_rooted(b, s, n); return; }
+  jb_add(b, s, n);
+}
 static const char *jb_finish(jbuf *b) {
   char *r = sp_str_alloc(b->len);
   if (b->len) memcpy(r, b->p, b->len);
   sp_str_set_len(r, b->len);
-  free(b->p);
+  if (!b->heap) free(b->p);
   return r;
 }
 
@@ -75,11 +135,13 @@ static const char *sp_json_key(sp_RbVal k) {
    whether or not anything repeats. */
 #define SP_JSON_MAX_NESTING 100
 SP_COLD static __attribute__((noinline, noreturn)) void sp_json_too_deep(jbuf *b) {
-  free(b->p);  /* this walk's buffer; a walk a user #to_json runs inside it owns its own */
+  /* The walk's own raise, so the walk can hand it the buffer to release (#4355).
+     One it has already moved onto the GC heap needs nothing: the collector
+     takes that with the root the landing frame drops. */
+  if (!b->heap) free(b->p);
   sp_raise_cls("JSON::NestingError",
                "nesting of 100 is too deep. Did you try to serialize objects with circular references?");
 }
-static void jb_s(jbuf *b, const char *s) { jb_add(b, s, strlen(s)); }
 /* Everything but a container: the leaf arms, answering one GC string. */
 static const char *sp_json_scalar(sp_RbVal v) {
   switch (v.tag) {
@@ -94,18 +156,26 @@ static const char *sp_json_scalar(sp_RbVal v) {
 }
 static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth);
 /* A compact document is appended into ONE buffer for the whole walk, as the
-   pretty form below already does, so the nesting error has exactly one
-   allocation to release before it unwinds (sp_json_too_deep frees it). */
+   pretty form below already does, so the walk has exactly one allocation to
+   account for.
+
+   That buffer is released whichever way the walk is left. Its own nesting
+   error is handed it to free. The raises it cannot be handed -- a user
+   #to_json that raises, throws or returns from a proc, and a #to_json answer
+   that does not parse -- leave this frame without coming back to it, so the
+   walk moves the buffer to the collector before it calls any of that code. */
 const char *sp_json_val(sp_RbVal v) {
   if (v.tag != SP_TAG_OBJ) return sp_json_scalar(v);
+  SP_GC_ROOT_RBVAL(v);   /* see sp_json_pretty below */
   jbuf b; memset(&b, 0, sizeof b);
+  SP_GC_ROOT_STR(b.heap);
   sp_json_val_b(&b, v, 0);
   return jb_finish(&b);
 }
 /* `depth` counts the containers already entered, so a container reached at
    depth 100 would be the 101st level. */
 static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
-  if (v.tag != SP_TAG_OBJ) { jb_s(b, sp_json_scalar(v)); return; }
+  if (v.tag != SP_TAG_OBJ) { const char *sc = sp_json_scalar(v); jb_gcs(b, sc, strlen(sc)); return; }
   int kind = sp_json_kind_fn ? sp_json_kind_fn(v) : 0;
   if (kind == 1) {  /* array */
     if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep(b);
@@ -126,7 +196,7 @@ static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
       if (i) jb_c(b, ',');
       sp_RbVal k, val;
       sp_json_hpair_fn(v, i, &k, &val);
-      jb_s(b, sp_json_key(k));
+      { const char *jk = sp_json_key(k); jb_gcs(b, jk, strlen(jk)); }
       jb_c(b, ':');
       sp_json_val_b(b, val, depth + 1);
     }
@@ -141,8 +211,9 @@ static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
   /* the answer is a Ruby String, appended by its own length: a NUL inside it
      is the user's to keep */
   if (sp_obj_to_json_fn) {
+    jb_to_heap(b);   /* the user's method may raise, throw, or return past us */
     const char *uj = sp_obj_to_json_fn(v);
-    if (uj) { jb_add(b, uj, (size_t)sp_str_byte_len(uj)); return; }
+    if (uj) { jb_gcs(b, uj, (size_t)sp_str_byte_len(uj)); return; }
   }
   if (sp_obj_to_hash_fn) {
     /* The reflected hash is fresh, and the walk below allocates a GC string for
@@ -155,7 +226,7 @@ static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
     sp_json_val_b(b, h, depth);
     return;
   }
-  jb_s(b, "null");
+  jb_add(b, "null", 4);
 }
 
 /* ---------- JSON.pretty_generate ----------
@@ -197,7 +268,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
         sp_json_indent(b, depth + 1);
         sp_RbVal k, val;
         sp_json_hpair_fn(v, i, &k, &val);
-        jb_s(b, sp_json_key(k));
+        { const char *jk = sp_json_key(k); jb_gcs(b, jk, strlen(jk)); }
         jb_add(b, ": ", 2);
         sp_json_pretty_val(b, val, depth + 1);
       }
@@ -209,6 +280,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
     /* the user's #to_json answers a compact document; re-read it so it lays
        out with the surrounding indentation instead of on one line */
     if (sp_obj_to_json_fn) {
+      jb_to_heap(b);   /* the user's method may raise, throw, or return past us */
       const char *uj = sp_obj_to_json_fn(v);
       if (uj) {
         /* the re-parsed document is this walk's only reference to it */
@@ -227,11 +299,20 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
     jb_add(b, "null", 4);
     return;
   }
-  jb_s(b, sp_json_val(v));
+  { const char *sc = sp_json_val(v); jb_gcs(b, sc, strlen(sc)); }
 }
 
+/* The document is rooted for the walk, for the reason sp_json_parse roots its
+   input and the reflection arms root theirs: a caller that hands over an
+   expression -- JSON.generate(Foo.new) -- holds it in nothing but the C
+   argument slot, and everything the walk reaches is reached through it. The
+   walk allocates from its first escaped string onward, and moving the buffer
+   to the heap allocates too, so an unrooted document is read after it is
+   freed. */
 const char *sp_json_pretty(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
   jbuf b; memset(&b, 0, sizeof b);
+  SP_GC_ROOT_STR(b.heap);
   sp_json_pretty_val(&b, v, 0);
   return jb_finish(&b);
 }
