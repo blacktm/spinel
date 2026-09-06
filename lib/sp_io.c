@@ -97,7 +97,6 @@ sp_File *sp_io_fdopen_sock(int fd, const char *kind) {SP_GC_ROOT_STR(kind);
   return f;
 }
 
-SP_NORETURN static void sp_file_raise_errno(const char *op, const char *path);
 /* Park the calling green thread until the handle has readable data, so a
    blocking fgets/fread does not pin its worker while the peer is idle. A
    no-op when stdio already buffered data (waiting then would stall on the
@@ -243,7 +242,7 @@ static sp_int sp_sock_write(sp_File *f, const char *s, size_t n) {
 
 /* Shared write core: `n` is the operand byte length (strlen for the
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
-SP_COLD void sp_io_raise_closed(void) {
+SP_NORETURN SP_COLD void sp_io_raise_closed(void) {
   sp_raise_cls("IOError", "closed stream");
 }
 
@@ -276,24 +275,25 @@ sp_int sp_File_write_bin(sp_File *f, const char *s) {SP_GC_ROOT(f);SP_GC_ROOT_ST
 }
 
 sp_bool sp_File_tty_p(sp_File *f) {
-  return (f && f->fp && isatty(fileno(f->fp))) ? 1 : 0;
+  SP_IO_OPEN(f);
+  return isatty(fileno(f->fp)) ? 1 : 0;
 }
 
 sp_int sp_File_fileno(sp_File *f) {
-  if (f && f->fno_plus1) return (sp_int)(f->fno_plus1 - 1);
   SP_IO_OPEN(f);
+  if (f->fno_plus1) return (sp_int)(f->fno_plus1 - 1);
   return (sp_int)fileno(f->fp);
 }
 
-/* IO#winsize -> [rows, cols]. Queries the terminal; a non-tty (pipe/file) has
-   no size, so CRuby raises there, but returning [0, 0] keeps the common
-   "STDOUT.winsize" probe compiling and running without an exception path. */
+/* IO#winsize -> [rows, cols]. Queries the terminal; an OPEN non-tty
+   (pipe/file) has no size, so CRuby raises there, but returning [0, 0] keeps
+   the common "STDOUT.winsize" probe compiling and running without an
+   exception path. A closed handle is the macro's IOError, as everywhere. */
 sp_IntArray *sp_File_winsize(sp_File *f) {
+  SP_IO_OPEN(f);
   sp_int rows = 0, cols = 0;
-  if (f && f->fp) {
-    struct winsize ws;
-    if (ioctl(fileno(f->fp), TIOCGWINSZ, &ws) == 0) { rows = ws.ws_row; cols = ws.ws_col; }
-  }
+  struct winsize ws;
+  if (ioctl(fileno(f->fp), TIOCGWINSZ, &ws) == 0) { rows = ws.ws_row; cols = ws.ws_col; }
   sp_IntArray *a = sp_IntArray_new();
   sp_IntArray_push(a, rows);
   sp_IntArray_push(a, cols);
@@ -661,7 +661,7 @@ sp_Addrinfo *sp_sock_address(sp_File *f, sp_int peer) {SP_GC_ROOT(f);
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method '%s' for an instance of %s",
                             peer ? "remote_address" : "local_address", sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   int fd = fileno(f->fp);
   const char *k = sp_io_kind_name(f);
   int is_unix = (strcmp(k, "UNIXSocket") == 0 || strcmp(k, "UNIXServer") == 0);
@@ -683,7 +683,7 @@ static void sp_sock_require(sp_File *f, const char *m) {SP_GC_ROOT(f);SP_GC_ROOT
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method '%s' for an instance of %s", m, sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
 }
 sp_int sp_sock_bind(sp_File *f, const char *host, sp_int port) {SP_GC_ROOT(f);SP_GC_ROOT_STR(host);
   extern int sp_net_udp_bind(int fd, const char *host, int port);
@@ -797,7 +797,7 @@ static void sp_sock_nb_prepare(sp_File *f, const char *m) {SP_GC_ROOT(f);SP_GC_R
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method '%s' for an instance of %s", m, sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
 }
 SP_NORETURN static void sp_sock_raise_wait(int writable, const char *op) {SP_GC_ROOT_STR(op);
   sp_raise_cls(writable ? "IO::EAGAINWaitWritable" : "IO::EAGAINWaitReadable",
@@ -839,7 +839,8 @@ sp_File *sp_sock_accept_nb(sp_File *f, sp_bool exc) {SP_GC_ROOT(f);
    before a #readpartial would lose bytes. Then a single BLOCKING read -- that
    is the only difference from the nonblocking sibling below. */
 const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
-  if (!f || !f->fp || n < 0) sp_raise_cls("EOFError", "end of file reached");
+  SP_IO_OPEN(f);
+  if (n < 0) sp_raise_cls("EOFError", "end of file reached");
   if (n == 0) return sp_str_from_bytes("", 0);
   char *r = sp_str_alloc((size_t)n);
   ssize_t got;
@@ -861,7 +862,7 @@ const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
 const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv, sp_bool *eof) {SP_GC_ROOT(f);
   if (eof) *eof = 0;
   if (is_recv) sp_sock_nb_prepare(f, "recv_nonblock");
-  else if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  else SP_IO_OPEN(f);
   if (len <= 0) return sp_str_from_bytes("", 0);
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "read_nonblock");
@@ -916,11 +917,11 @@ static sp_int sp_sock_write_nb_len(sp_File *f, const char *data, size_t len, sp_
   sp_file_raise_errno("write", "");
 }
 sp_int sp_sock_write_nb(sp_File *f, const char *data, sp_bool exc) {SP_GC_ROOT(f);SP_GC_ROOT_STR(data);
-  if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   return sp_sock_write_nb_len(f, data, data ? strlen(data) : 0, exc);
 }
 sp_int sp_sock_write_nb_bin(sp_File *f, const char *data, sp_bool exc) {SP_GC_ROOT(f);SP_GC_ROOT_STR(data);
-  if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   return sp_sock_write_nb_len(f, data, data ? sp_str_byte_len(data) : 0, exc);
 }
 /* connect_nonblock: an in-flight connect is IO::EINPROGRESSWaitWritable. */
@@ -981,7 +982,7 @@ sp_File *sp_sock_accept(sp_File *f) {SP_GC_ROOT(f);
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError",
                  sp_sprintf("undefined method 'accept' for an instance of %s", sp_io_kind_name(f)));
-  if (!f->fp) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   sp_io_wait_readable(f);
   return sp_io_fdopen_sock(sp_net_accept(fileno(f->fp)), "tcp");
 }
@@ -1078,25 +1079,32 @@ sp_bool sp_file_symlink(const char *path) {
   return path && lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
 }
 
-/* map errno to the matching Errno:: class the way sp_cold.c's File ops do */
-SP_NORETURN static void sp_file_raise_errno(const char *op, const char *path) {SP_GC_ROOT_STR(op);SP_GC_ROOT_STR(path);
-  sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" :
-               errno == EACCES ? "Errno::EACCES" :
-               errno == EEXIST ? "Errno::EEXIST" :
-               errno == EPERM  ? "Errno::EPERM"  :
-               errno == EBADF  ? "Errno::EBADF"  :
-               errno == EINVAL ? "Errno::EINVAL" :
-               errno == EISDIR ? "Errno::EISDIR" :
-               errno == ENOTDIR ? "Errno::ENOTDIR" :
-               errno == EADDRINUSE ? "Errno::EADDRINUSE" :
-               errno == EADDRNOTAVAIL ? "Errno::EADDRNOTAVAIL" :
-               errno == ECONNREFUSED ? "Errno::ECONNREFUSED" :
-               errno == ECONNRESET ? "Errno::ECONNRESET" :
-               errno == EPIPE  ? "Errno::EPIPE"  :
-               errno == EAGAIN ? "Errno::EAGAIN" :
-               errno == EAFNOSUPPORT ? "Errno::EAFNOSUPPORT" :
-               errno == ENOTCONN ? "Errno::ENOTCONN" : "SystemCallError",
-               sp_sprintf("%s @ %s - %s", strerror(errno), op, path ? path : ""));
+/* map errno to the matching Errno:: class (see sp_io.h) */
+SP_NORETURN void sp_file_raise_errno(const char *op, const char *path) {SP_GC_ROOT_STR(op);SP_GC_ROOT_STR(path);
+  int e = errno;   /* read once, before the formatting can touch it */
+  sp_raise_cls(e == ENOENT ? "Errno::ENOENT" :
+               e == EACCES ? "Errno::EACCES" :
+               e == EEXIST ? "Errno::EEXIST" :
+               e == EPERM  ? "Errno::EPERM"  :
+               e == EBADF  ? "Errno::EBADF"  :
+               e == EINVAL ? "Errno::EINVAL" :
+               e == EISDIR ? "Errno::EISDIR" :
+               e == ENOTDIR ? "Errno::ENOTDIR" :
+               e == ENOTEMPTY ? "Errno::ENOTEMPTY" :
+               e == ELOOP ? "Errno::ELOOP" :
+               e == ENAMETOOLONG ? "Errno::ENAMETOOLONG" :
+               e == EROFS ? "Errno::EROFS" :
+               e == EXDEV ? "Errno::EXDEV" :
+               e == EBUSY ? "Errno::EBUSY" :
+               e == EADDRINUSE ? "Errno::EADDRINUSE" :
+               e == EADDRNOTAVAIL ? "Errno::EADDRNOTAVAIL" :
+               e == ECONNREFUSED ? "Errno::ECONNREFUSED" :
+               e == ECONNRESET ? "Errno::ECONNRESET" :
+               e == EPIPE  ? "Errno::EPIPE"  :
+               e == EAGAIN ? "Errno::EAGAIN" :
+               e == EAFNOSUPPORT ? "Errno::EAFNOSUPPORT" :
+               e == ENOTCONN ? "Errno::ENOTCONN" : "SystemCallError",
+               sp_sprintf("%s @ %s - %s", strerror(e), op, path ? path : ""));
 }
 
 sp_bool sp_file_owned(const char *path) {
@@ -1173,27 +1181,60 @@ sp_int sp_file_utime(double atime, double mtime, const char *path) {SP_GC_ROOT_S
    the old fopen probe hung File.exist? on a fresh mkfifo path (#3118). stat
    also answers true for directories, matching CRuby. */
 sp_bool sp_file_exist(const char *path) { struct stat st; return path && stat(path, &st) == 0; }
-void sp_file_delete(const char *path) { remove(path); }
-void sp_file_rename(const char *from, const char *to) { rename(from, to); }
+/* unlink(2), not remove(3): remove would take a directory too, which
+   File.delete refuses (EPERM here, EISDIR on Linux), as CRuby does. */
+void sp_file_path_check(const char *path) {
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+}
+void sp_file_delete(const char *path) {SP_GC_ROOT_STR(path);
+  sp_file_path_check(path);
+  if (unlink(path) != 0) sp_file_raise_errno("apply2files", path);
+}
+void sp_file_rename(const char *from, const char *to) {SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);
+  sp_file_path_check(from); sp_file_path_check(to);
+  if (rename(from, to) != 0) {
+    int e = errno;
+    const char *pair = sp_sprintf("(%s, %s)", from, to);
+    errno = e;
+    sp_file_raise_errno("rb_file_s_rename", pair);
+  }
+}
 
 /* --- IO instance methods that ride the underlying fd (#3038) ------------- */
 
 /* IO#readbyte: like #getbyte but EOFError at end of file. */
 sp_int sp_File_readbyte(sp_File *f) {
-  int ch = (f && f->fp) ? fgetc(f->fp) : EOF;
+  SP_IO_OPEN(f);
+  int ch = fgetc(f->fp);
   if (ch == EOF) sp_raise_cls("EOFError", "end of file reached");
   return (sp_int)(unsigned char)ch;
 }
 /* IO#ungetbyte: push one byte back onto the read buffer; returns nil. */
 void sp_File_ungetbyte(sp_File *f, sp_int byte) {
-  if (f && f->fp) ungetc((int)(unsigned char)byte, f->fp);
+  SP_IO_OPEN(f);
+  ungetc((int)(unsigned char)byte, f->fp);
 }
 /* IO#binmode?: true after #binmode, or for a handle opened in binary mode. */
 sp_bool sp_File_binmode_p(sp_File *f) {
-  if (f && f->bin_flag) return 1;
-  return f && f->mode && strchr(f->mode, 'b') != NULL;
+  SP_IO_OPEN(f);
+  if (f->bin_flag) return 1;
+  return f->mode && strchr(f->mode, 'b') != NULL;
 }
-void sp_File_set_binmode(sp_File *f) { if (f) f->bin_flag = 1; }
+void sp_File_set_binmode(sp_File *f) { SP_IO_OPEN(f); f->bin_flag = 1; }
+/* The handle flags codegen used to read straight off the struct (#2792,
+   #3131): a closed handle answers IOError for them as for everything else.
+   #sync= keeps the flush a truthy value implies (#4229). */
+sp_int sp_File_lineno(sp_File *f) { SP_IO_OPEN(f); return f->lineno; }
+sp_int sp_File_set_lineno(sp_File *f, sp_int n) { SP_IO_OPEN(f); f->lineno = n; return n; }
+sp_bool sp_File_sync_p(sp_File *f) { SP_IO_OPEN(f); return (f->is_sock || f->sync_on) ? 1 : 0; }
+sp_bool sp_File_set_sync(sp_File *f, sp_bool on) {
+  SP_IO_OPEN(f);
+  f->sync_on = on ? 1 : 0;
+  if (on) fflush(f->fp);
+  return on;
+}
+sp_bool sp_File_autoclose_p(sp_File *f) { SP_IO_OPEN(f); return !f->no_autoclose; }
+void sp_File_set_autoclose(sp_File *f, sp_bool on) { SP_IO_OPEN(f); f->no_autoclose = !on; }
 /* IO#reopen(io): rebind this handle's descriptor onto the other stream. */
 sp_File *sp_File_reopen_io(sp_File *f, sp_File *other) {SP_GC_ROOT(f);SP_GC_ROOT(other); sp_gc_wb((void*)f);
   if (!f || !f->fp || !other || !other->fp) return f;
@@ -1208,43 +1249,41 @@ sp_File *sp_File_reopen_io(sp_File *f, sp_File *other) {SP_GC_ROOT(f);SP_GC_ROOT
 }
 /* IO#close_on_exec? / #close_on_exec= via the FD_CLOEXEC descriptor flag. */
 sp_bool sp_File_close_on_exec_p(sp_File *f) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) return 0;
-  int fl = fcntl(fd, F_GETFD);
+  SP_IO_OPEN(f);
+  int fl = fcntl(fileno(f->fp), F_GETFD);
   return fl >= 0 && (fl & FD_CLOEXEC) != 0;
 }
 void sp_File_set_close_on_exec(sp_File *f, sp_bool on) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) return;
+  SP_IO_OPEN(f);
+  int fd = fileno(f->fp);
   int fl = fcntl(fd, F_GETFD);
   if (fl < 0) return;
   fcntl(fd, F_SETFD, on ? (fl | FD_CLOEXEC) : (fl & ~FD_CLOEXEC));
 }
 /* IO#fcntl(cmd, arg=0): the raw descriptor command. */
 sp_int sp_File_fcntl(sp_File *f, sp_int cmd, sp_int arg) {SP_GC_ROOT(f);
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
-  int r = fcntl(fd, (int)cmd, (long)arg);
+  SP_IO_OPEN(f);
+  int r = fcntl(fileno(f->fp), (int)cmd, (long)arg);
   if (r < 0) sp_file_raise_errno("fcntl", f->path ? f->path : "");
   return (sp_int)r;
 }
 /* IO#pwrite(str, offset): write without moving the file position. */
 sp_int sp_File_pwrite(sp_File *f, const char *s, sp_int off) {SP_GC_ROOT(f);SP_GC_ROOT_STR(s);
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   size_t n = s ? strlen(s) : 0;
   fflush(f->fp);
-  ssize_t put = pwrite(fd, s ? s : "", n, (off_t)off);
+  ssize_t put = pwrite(fileno(f->fp), s ? s : "", n, (off_t)off);
   if (put < 0) sp_file_raise_errno("pwrite", f->path ? f->path : "");
   return (sp_int)put;
 }
 /* IO#advise(sym, offset=0, len=0): a hint, and nil either way. POSIX
    fadvise is Linux-ish; where it is absent the hint is simply dropped. */
 void sp_File_advise(sp_File *f, const char *kind, sp_int off, sp_int len) {
+  SP_IO_OPEN(f);
 #ifdef POSIX_FADV_NORMAL
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
+  int fd = fileno(f->fp);
   int a = POSIX_FADV_NORMAL;
-  if (fd < 0 || !kind) return;
+  if (!kind) return;
   if (!strcmp(kind, "sequential")) a = POSIX_FADV_SEQUENTIAL;
   else if (!strcmp(kind, "random")) a = POSIX_FADV_RANDOM;
   else if (!strcmp(kind, "willneed")) a = POSIX_FADV_WILLNEED;
@@ -1252,7 +1291,7 @@ void sp_File_advise(sp_File *f, const char *kind, sp_int off, sp_int len) {
   else if (!strcmp(kind, "noreuse")) a = POSIX_FADV_NOREUSE;
   posix_fadvise(fd, (off_t)off, (off_t)len, a);
 #else
-  (void)f; (void)kind; (void)off; (void)len;
+  (void)kind; (void)off; (void)len;
 #endif
 }
 /* IO#close_read / #close_write. A plain file is not duplex, so half-closing

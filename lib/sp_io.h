@@ -44,8 +44,12 @@ typedef struct {
 sp_bool sp_io_frozen(sp_File *f);
 sp_File *sp_io_freeze(sp_File *f);
 /* Object#== on two handles: identity, except that two File::Stat handles
-   compare as Comparable does for File::Stat -- by modification time. */
+   compare as Comparable does for File::Stat -- by modification time. <=> reads
+   the same way (0 / nil, or the mtime order of two stats), boxed; to_s is
+   Object's #<Class:0xADDR> under the class the handle presents as. */
 sp_bool sp_io_eq(sp_File *a, sp_File *b);
+sp_RbVal sp_io_cmp(sp_File *a, sp_RbVal other);
+const char *sp_io_to_s(sp_File *f);
 
 /* File.open(path, mode) -> GC-managed handle (block form is codegen-only). */
 sp_File *sp_File_open(const char *path, const char *mode);
@@ -75,12 +79,27 @@ sp_int sp_File_close(sp_File *f);
 /* Every operation on a handle whose descriptor is gone raises IOError in
    CRuby. Some of the read side already did; the write side and the position
    queries answered a seed instead, so a write to a closed socket looked like
-   a successful send of zero bytes and the loss went unnoticed. #closed?,
-   #close and #inspect stay exempt: they are the three that are meant to work
-   on a closed handle. */
-void sp_io_raise_closed(void);
+   a successful send of zero bytes and the loss went unnoticed. The byte and
+   character readers, the flag accessors and the descriptor queries answered
+   nil, EOF or a default the same way, so a program that kept using a handle
+   it had closed ran on silently. #closed?, #close, #inspect and #path stay
+   exempt: they are the ones that are meant to work on a closed handle. The
+   metadata a File answers by its path (#size, #mtime, #chmod ...) still
+   answers here where CRuby raises: a File::Stat rides this same struct with
+   no descriptor, so that check cannot be this one. */
+SP_NORETURN SP_COLD void sp_io_raise_closed(void);
 #define SP_IO_OPEN(f) do { if (!(f) || !(f)->fp) sp_io_raise_closed(); } while (0)
 sp_bool sp_File_closed_p(sp_File *f);
+/* The handle flags codegen read straight off the struct (#lineno, #sync,
+   #autoclose? and their setters): through here so a closed handle answers
+   IOError for them too. #lineno= and #sync= answer their value, which is the
+   expression's; #autoclose='s emitter keeps its own operand. */
+sp_int  sp_File_lineno(sp_File *f);
+sp_int  sp_File_set_lineno(sp_File *f, sp_int n);
+sp_bool sp_File_sync_p(sp_File *f);
+sp_bool sp_File_set_sync(sp_File *f, sp_bool on);
+sp_bool sp_File_autoclose_p(sp_File *f);
+void    sp_File_set_autoclose(sp_File *f, sp_bool on);
 const char *sp_File_inspect(sp_File *f);
 const char *sp_io_kind_name(sp_File *f);
 sp_File *sp_sock_accept(sp_File *f);
@@ -173,10 +192,30 @@ sp_int sp_file_utime(double atime, double mtime, const char *path);
 const char *sp_file_readlink(const char *path);  /* defined in sp_cold.c */
 void sp_file_delete(const char *path);
 void sp_file_rename(const char *from, const char *to);
+/* A filesystem call that failed raises the Errno:: class CRuby raises for the
+   errno, with CRuby's message shape "<strerror> @ <op> - <path>". op is the
+   label after the @: for the File and Dir class methods it is CRuby's own
+   entry-point name (dir_s_mkdir, apply2files, rb_file_s_rename ...), so a
+   program matching on the text reads the same words; the socket calls and
+   the older File sites (readlink, symlink, mkfifo ...) pass the syscall's
+   name. An errno with no class here raises SystemCallError. */
+SP_NORETURN void sp_file_raise_errno(const char *op, const char *path);
+/* A nil path (a NULL string at run time) is CRuby's TypeError, raised before
+   any syscall sees it; the multi-path File.delete checks every path first. */
+void sp_file_path_check(const char *path);
 
 #include <dirent.h>
 /* Dir handle (Dir.open / Dir.each_child ...): ops live in lib/sp_cold.c. */
 typedef struct { DIR *dp; const char *path; } sp_Dir;
+/* The Dir counterpart of SP_IO_OPEN: reading or positioning a closed handle
+   is IOError "closed directory" in CRuby; #close, #path and #inspect work. */
+SP_NORETURN SP_COLD void sp_dir_raise_closed(void);
+#define SP_DIR_OPEN(d) do { if (!(d) || !(d)->dp) sp_dir_raise_closed(); } while (0)
+
+/* Object's to_s and <=> on the handle (sp_cold.c), declared here with the
+   struct because the poly to_s and spaceship in spinel_rt.h call them. */
+const char *sp_Dir_to_s(sp_Dir *d);
+sp_RbVal sp_Dir_cmp(sp_Dir *d, sp_RbVal other);
 
 /* ---- sp_io_pipe/sysopen relocated from spinel_rt.h (0 optcarrot uses). ---- */
 sp_PolyArray *sp_io_pipe(void);

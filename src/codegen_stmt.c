@@ -157,6 +157,11 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     }
     buf_puts(b, ")); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
   }
+  else if (t == TY_IO || t == TY_DIR) {
+    /* a handle renders as Object's to_s does for it (the protocol arm's render) */
+    buf_puts(b, t == TY_IO ? "puts(sp_io_to_s(" : "puts(sp_Dir_to_s("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
+  }
   else if (ty_is_object(t)) {
     /* default Object#to_s: #<Name:0xADDR>, like CRuby (no ivars) */
     int cid = ty_object_class(t);
@@ -3841,6 +3846,23 @@ static int emit_when_string_range(Compiler *c, int cond, int t, Buf *b) {
 }
 
 static int emit_when_lambda_inline(Compiler *c, int cond, int t, Buf *b);
+/* Does the subject temp of a `case` need a root? The subject is bound before
+   the `when` operands are evaluated, and a fresh subject held only by its
+   temp was collected under an operand that allocates. A constant, a literal
+   or a regexp operand cannot collect anything, so `case x when Klass` and
+   the integer switch fast path generate what they did. The subject is
+   rooted even when it was read from a local: a `when` operand can reassign
+   that local, and the temporary is then the only reference left. */
+static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int nw) {
+  const NodeTable *nt = c->nt;
+  if (!needs_root(pt) || comp_ty_value_obj(c, pt)) return 0;
+  for (int w = 0; w < nw; w++) {
+    int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+    for (int k = 0; k < wc; k++) if (subtree_may_allocate(nt, conds[k])) return 1;
+  }
+  return 0;
+}
+
 void emit_case(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
@@ -3863,6 +3885,11 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, " _t%d = ", t);
       emit_expr(c, pred, b);
       buf_puts(b, ";\n");
+    }
+    if (case_subject_needs_root(c, pt, whens, nw)) {
+      emit_indent(b, indent);
+      emit_gc_root_tmp(c, pt, t, b);
+      buf_puts(b, "\n");
     }
   }
 
@@ -4338,6 +4365,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
       pt = TY_POLY;
     }
     else { emit_ctype(c, pt, b); buf_printf(b, " _t%d = ", t); emit_expr(c, pred, b); buf_puts(b, "; "); }
+    if (case_subject_needs_root(c, pt, whens, nw)) { emit_gc_root_tmp(c, pt, t, b); buf_puts(b, " "); }
   }
 
   /* Fast path: `case <int> when <integer literals>` captures the branch value

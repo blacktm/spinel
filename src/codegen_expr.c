@@ -261,12 +261,18 @@ void emit_interp(Compiler *c, int id, Buf *b) {
         buf_puts(&conv, "sp_bigint_to_s(");
         EMIT_IV(); buf_puts(&conv, ")");
       }
+      else if (t == TY_IO || t == TY_DIR) {
+        /* the IO family has Object's to_s (the protocol arm's render) */
+        buf_puts(&conv, t == TY_IO ? "sp_io_to_s(" : "sp_Dir_to_s(");
+        EMIT_IV(); buf_puts(&conv, ")");
+      }
       else if (ty_nullable_builtin_id(t)) {
-        /* a reference-backed builtin handle (IO, Proc, Fiber, Thread, ...):
-           renders as `#<IO:fd 3>` and friends rather than refusing the
-           interpolation. CRuby's #to_s for these prints the object address,
-           which nothing here can reproduce; its #inspect form is the same
-           shape and actually informative (#3539). */
+        /* a reference-backed builtin handle (Proc, Fiber, Thread, ...):
+           renders as its #inspect form rather than refusing the interpolation.
+           CRuby's #to_s for these prints the object address, which the
+           runtime does not reproduce for them (the IO family above has it);
+           the #inspect form is the same shape and actually informative
+           (#3539). */
         buf_puts(&conv, "sp_poly_inspect(sp_box_nullable_obj((void *)(");
         EMIT_IV(); buf_printf(&conv, "), %s))", ty_nullable_builtin_id(t));
       }

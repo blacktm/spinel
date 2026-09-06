@@ -3152,7 +3152,12 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
        unlinks it. val starts nil so a GC before any return marks nothing. */
     buf_puts(b, "    sp_proc_home _h;\n");
     buf_puts(b, "    _h.val = sp_box_nil(); _h.id = sp_proc_home_next();\n");
+    /* ...and the walk path's depth, so a non-local return out of a container
+       walk (a user #inspect that returns through a proc) drops the frames the
+       longjmp jumps over; the exception and catch stacks record theirs inside
+       the runtime calls that open their arms, but this node is built here. */
     buf_puts(b, "    _h.exc_top = sp_exc_top; _h.catch_top = sp_catch_top;\n");
+    buf_puts(b, "    _h.recur_mark = sp_poly_recur_save();\n");
     buf_puts(b, "    _h.prev = sp_proc_ret_head; sp_proc_ret_head = &_h;\n");
     if (!is_void) {
       buf_puts(b, "    "); emit_ctype(c, s->ret, b); buf_puts(b, " _prret = ");
@@ -3659,8 +3664,18 @@ int scope_creates_returning_proc(Compiler *c, int si) {
    fine only when it's a parameter of the enclosing method (passed by value).
    Captured outer locals (is_cell) are not yet supported — those fibers will
    produce a C compile error rather than silently miscompiling. */
-/* Returns 1 if a type needs a GC root when stored in a fiber capture struct. */
+/* Returns 1 if a type needs a GC root when stored in a fiber capture struct.
+   Specifically: the capture is a single GC POINTER, which is what both users
+   assume -- the scan writes `if (_c->c_x) sp_gc_mark(...)` and the body writes
+   SP_GC_ROOT, which registers `&lv_x` as a void**. A by-value struct is
+   neither: the scan's truth test on it is not valid C at all, and the root
+   would hand the collector the struct's first word (#4353). None of the
+   value-struct types carries a pointer the collector must follow, with the
+   single exception of sp_StrRange, whose two endpoints nothing marks
+   anywhere -- an ivar's scan does not either, so that gap is wider than this
+   function and is not closed here. */
 int fiber_cap_needs_root(TyKind t) {
+  if (ty_is_struct_valued(t)) return 0;
   return t == TY_STRING || t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) ||
          ty_is_object(t) || t == TY_POLY || t == TY_PROC || t == TY_FIBER || t == TY_THREAD || t == TY_QUEUE || t == TY_MUTEX || t == TY_CONDVAR ||
          t == TY_EXCEPTION ||
@@ -5808,6 +5823,15 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
       const char *rn = class_ruby_name(c, cid); if (!rn) rn = ci->name;
       buf_printf(b, "static const char *sp_%s_inspect(sp_%s *self) {\n", ci->c_name, ci->c_name);
       buf_puts(b, "  if (!self) return \"nil\";\n");
+      /* A member can hold the struct itself (`s.a = s`), and this function
+         renders a member of its own class by calling straight back into
+         itself. Stop at the object the render is already inside, as CRuby's
+         #<struct S a=#<struct S:...>> does. Only a struct with members can be
+         reached from inside itself, so a memberless one keeps its old body. */
+      if (ci->nivars > 0)
+        buf_printf(b, "  if (sp_poly_recur_seen(SP_POLY_RECUR_INSPECT, self, NULL)) return \"#<%s %s:...>\";\n"
+                      "  int _rcm = sp_poly_recur_push(SP_POLY_RECUR_INSPECT, self, NULL);\n",
+                   ci->is_data ? "data" : "struct", ci->is_anon_struct ? "" : rn);
       /* an anonymous struct class has no name to show: #<struct a=1, b=2> */
       if (ci->is_anon_struct)
         /* the space that would precede the first member is CRuby's even when
@@ -5840,7 +5864,9 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
           free(bx.p); free(ivb.p);
         }
       }
-      buf_puts(b, "  sp_String_append(s, \">\");\n  return s->data;\n}\n");
+      buf_puts(b, "  sp_String_append(s, \">\");\n");
+      if (ci->nivars > 0) buf_puts(b, "  sp_poly_recur_pop(_rcm);\n");
+      buf_puts(b, "  return s->data;\n}\n");
       }
     }
     if (comp_method_in_chain(c, cid, "to_s", NULL) < 0) {
@@ -6666,8 +6692,25 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
     }
     buf_printf(b, "    case %d: {\n", i);
     buf_printf(b, "      sp_%s *o = (sp_%s *)p; (void)o;\n", ci->c_name, ci->c_name);
+    /* An ivar can point back at the object (a tree node's @parent), and the
+       walk below renders each ivar through the inspects that come back here.
+       CRuby shows the repeated object as #<N:0x... ...>; an object with no
+       ivars cannot be reached from inside itself and keeps its old body. */
+    if (ci->nivars > 0)
+      buf_printf(b, "      if (sp_poly_recur_seen(SP_POLY_RECUR_INSPECT, p, NULL))\n"
+                    "        return sp_sprintf(\"#<%s:0x%%016llx ...>\", (unsigned long long)(uintptr_t)p);\n"
+                    "      int _rcm = sp_poly_recur_push(SP_POLY_RECUR_INSPECT, p, NULL);\n",
+                 class_ruby_name(c, i) ? class_ruby_name(c, i) : ci->name);
     buf_printf(b, "      sp_String *_s = sp_String_new(sp_sprintf(\"#<%s:0x%%016llx\", (unsigned long long)(uintptr_t)p));\n",
                class_ruby_name(c, i) ? class_ruby_name(c, i) : ci->name);
+    /* The builder is live across every allocation the ivar walk below makes --
+       each element's own inspect, and the sp_sprintf that renders an ivar
+       pointing back at this object. Unrooted, a collection mid-walk swept it
+       and the appends wrote into a freed buffer (the Struct/Data inspect above
+       has always rooted its builder for the same reason). A class with no
+       ivars has no such walk: it appends one byte, which reallocs off the GC
+       heap and cannot collect, so its arm is left as it was. */
+    if (ci->nivars > 0) buf_puts(b, "      SP_GC_ROOT(_s);\n");
     for (int j = 0; j < ci->nivars; j++) {
       char expr[160]; snprintf(expr, sizeof expr, "o->iv_%s", ci->ivars[j] + 1);
       buf_printf(b, "      sp_String_append(_s, \"%s%s=\"); sp_String_append(_s, ",
@@ -6698,6 +6741,7 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
       buf_puts(b, ");\n");
     }
     buf_puts(b, "      sp_String_append(_s, \">\");\n");
+    if (ci->nivars > 0) buf_puts(b, "      sp_poly_recur_pop(_rcm);\n");
     buf_puts(b, "      return _s->data;\n    }\n");
   }
   buf_puts(b, "    default: return \"#<Object>\";\n  }\n}\n");
@@ -7529,15 +7573,21 @@ static void emit_obj_hashkey_dispatch(Compiler *c, Buf *b) {
   for (int k = 0; k < c->nclasses; k++) {
     if (!class_is_valuekey(c, k)) continue;
     ClassInfo *ci = &c->classes[k];
-    buf_printf(b, "    case %d: { sp_%s *o = (sp_%s *)p; sp_int _h = %d;\n",
+    /* Unsigned accumulator, like the runtime's array and hash ones and the
+       inline Struct#hash at a call site: the rolling h*31+x is meant to wrap,
+       and on a signed type that is undefined behavior rather than wraparound.
+       A member that holds the struct itself now contributes a large fixed
+       constant, so a two-member struct whose self-reference is not last
+       overflows on the very next multiply (UBSan caught it). */
+    buf_printf(b, "    case %d: { sp_%s *o = (sp_%s *)p; uint64_t _h = %d;\n",
                comp_class_index(c, ci->name), ci->c_name, ci->c_name, ci->nivars + 1);
     for (int i = 0; i < ci->nivars; i++) {
       char fe[128]; snprintf(fe, sizeof fe, "o->iv_%s", iv_c(ci->ivars[i] + 1));
       Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, ci->ivar_types[i], fe, &bx);
-      buf_printf(b, "      _h = _h * 31 + sp_rbval_hash_key(%s);\n", bx.p ? bx.p : fe);
+      buf_printf(b, "      _h = _h * 31 + (uint64_t)sp_rbval_hash_key(%s);\n", bx.p ? bx.p : fe);
       free(bx.p);
     }
-    buf_puts(b, "      return _h; }\n");
+    buf_puts(b, "      return (sp_int)_h; }\n");
   }
   buf_puts(b, "    default: break;\n  }\n  return (sp_int)(uintptr_t)p;\n}\n");
 

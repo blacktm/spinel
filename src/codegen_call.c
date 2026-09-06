@@ -8439,6 +8439,48 @@ static int hoist_boxed_rooted(Compiler *c, int node) {
   return t;
 }
 
+/* Root a g_pre temp on a line of its own, when its type has anything to
+   root: a heap pointer or a box that may carry one. */
+static void emit_pre_root(Compiler *c, TyKind t, int tmp) {
+  if (!needs_root(t) || comp_ty_value_obj(c, t)) return;
+  emit_indent(g_pre, g_indent);
+  emit_gc_root_tmp(c, t, tmp, g_pre);
+  buf_puts(g_pre, "\n");
+}
+
+/* The text an object comparison passes as `self` to the user method it
+   dispatches to (the caller frees it). A local, an instance variable or self
+   is read in place; any other receiver is evaluated once into a g_pre temp,
+   and that temp is rooted. The operand is evaluated after the receiver and
+   commonly allocates -- `Set[1] == Set[2]` builds the right Set after the
+   left one is bound -- and a fresh receiver held only by the temp was
+   collected under that allocation, its pool slot handed to the operand, so
+   the comparison read the operand against itself: `==` answered true, `<`
+   false. The general operand-order pass declines a call whose arm hoists
+   into g_pre, which is what these emitters do, so they bound theirs bare --
+   and into fixed buffers that cut a long in-place name short. */
+static Buf emit_cmp_self(Compiler *c, int recv, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  const char *rty = nt_type(nt, recv);
+  if (rty && (sp_streq(rty, "LocalVariableReadNode") ||
+              sp_streq(rty, "InstanceVariableReadNode") ||
+              sp_streq(rty, "SelfNode"))) {
+    Buf rb = expr_buf(c, recv);
+    if (!rb.p) buf_puts(&rb, "");
+    return rb;
+  }
+  int t = ++g_tmp;
+  Buf rb = expr_buf(c, recv);
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, rt, g_pre);
+  buf_printf(g_pre, " _t%d = %s;\n", t, rb.p ? rb.p : "");
+  free(rb.p);
+  emit_pre_root(c, rt, t);
+  Buf out; memset(&out, 0, sizeof out);
+  buf_printf(&out, "_t%d", t);
+  return out;
+}
+
 static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -8799,25 +8841,9 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
       int ecid = ty_object_class(rt);
       int emi = comp_method_in_chain(c, ecid, name, NULL);
       if (emi >= 0) {
-        char selfptr[320];
-        const char *rty2 = nt_type(nt, recv);
-        if (rty2 && (sp_streq(rty2, "LocalVariableReadNode") ||
-                     sp_streq(rty2, "InstanceVariableReadNode") ||
-                     sp_streq(rty2, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t2 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t2, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfptr, sizeof selfptr, "_t%d", t2);
-        }
-        emit_dispatch(c, ecid, name, selfptr, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
+        Buf selfb = emit_cmp_self(c, recv, rt);
+        emit_dispatch(c, ecid, name, selfb.p, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
+        free(selfb.p);
         return 1;
       }
       /* no direct == : use <=> == 0 when the class supports Comparable */
@@ -8833,54 +8859,22 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "(%ssp_poly_cmp_eq(_t%d, _t%d))", eq ? "" : "!", ta, tb2);
           return 1;
         }
-        char selfptr[320];
-        const char *rty2 = nt_type(nt, recv);
-        if (rty2 && (sp_streq(rty2, "LocalVariableReadNode") ||
-                     sp_streq(rty2, "InstanceVariableReadNode") ||
-                     sp_streq(rty2, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t3 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t3, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfptr, sizeof selfptr, "_t%d", t3);
-        }
+        Buf selfb = emit_cmp_self(c, recv, rt);
         buf_puts(b, "(");
-        emit_dispatch(c, ecid, "<=>", selfptr, nt_ref(nt, id, "arguments"), -1, b);
+        emit_dispatch(c, ecid, "<=>", selfb.p, nt_ref(nt, id, "arguments"), -1, b);
         buf_printf(b, " %s 0)", eq ? "==" : "!=");
+        free(selfb.p);
         return 1;
       }
       /* obj.!= synthesized from obj.== when != is not explicitly defined */
       if (!eq) {
         int eqm2 = comp_method_in_chain(c, ecid, "==", NULL);
         if (eqm2 >= 0) {
-          char selfptr2[64];
-          const char *rty3 = nt_type(nt, recv);
-          if (rty3 && (sp_streq(rty3, "LocalVariableReadNode") ||
-                       sp_streq(rty3, "InstanceVariableReadNode") ||
-                       sp_streq(rty3, "SelfNode"))) {
-            Buf rb = expr_buf(c, recv);
-            snprintf(selfptr2, sizeof selfptr2, "%s", rb.p ? rb.p : "");
-            free(rb.p);
-          }
-          else {
-            int t4 = ++g_tmp;
-            Buf rb = expr_buf(c, recv);
-            emit_indent(g_pre, g_indent);
-            emit_ctype(c, rt, g_pre);
-            buf_printf(g_pre, " _t%d = %s;\n", t4, rb.p ? rb.p : "");
-            free(rb.p);
-            snprintf(selfptr2, sizeof selfptr2, "_t%d", t4);
-          }
+          Buf selfb = emit_cmp_self(c, recv, rt);
           buf_puts(b, "(!");
-          emit_dispatch(c, ecid, "==", selfptr2, nt_ref(nt, id, "arguments"), -1, b);
+          emit_dispatch(c, ecid, "==", selfb.p, nt_ref(nt, id, "arguments"), -1, b);
           buf_puts(b, ")");
+          free(selfb.p);
           return 1;
         }
       }
@@ -18162,7 +18156,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int tdh = ++g_tmp, tdn = ++g_tmp;
       int skip_dots = sp_streq(name, "each_child");
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_Dir *_t%d = %s; const char *_t%d; ", tdh, dr, tdn);
+      /* rooted for the block's duration: a temporary receiver (Dir.open(d).each)
+         has no other reference, and a body that allocates would let the
+         collector close it mid-loop (the File loops below root theirs too) */
+      buf_printf(b, "sp_Dir *_t%d = %s; SP_GC_ROOT(_t%d); const char *_t%d; ", tdh, dr, tdh, tdn);
       buf_printf(b, "while ((_t%d = sp_Dir_read(_t%d)) != NULL) {", tdn, tdh);
       if (skip_dots)
         buf_printf(b, " if (sp_str_eq(_t%d, (&(\"\\xff\" \".\")[1])) ||"
@@ -18536,7 +18533,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          has to drive #autoclose? (#3131) */
       if (sp_streq(name, "close_on_exec="))
         buf_printf(b, "sp_File_set_close_on_exec(%s, _t%d); ", r, tv);
-      else buf_printf(b, "(%s)->no_autoclose = !_t%d; ", r, tv);
+      else buf_printf(b, "sp_File_set_autoclose(%s, _t%d); ", r, tv);
       buf_printf(b, "_t%d; })", tv);
       free(rb.p); return;
     }
@@ -18675,7 +18672,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_File_fsync(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "autoclose?") && argc == 0) {
-      buf_printf(b, "(!(%s)->no_autoclose)", r); free(rb.p); return;
+      buf_printf(b, "sp_File_autoclose_p(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "pid") && argc == 0) {
       buf_printf(b, "({ (void)%s; sp_box_nil(); })", r); free(rb.p); return;
@@ -18684,10 +18681,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_File_fileno(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "lineno") && argc == 0) {
-      buf_printf(b, "((%s)->lineno)", r); free(rb.p); return;
+      buf_printf(b, "sp_File_lineno(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "lineno=") && argc == 1) {
-      buf_printf(b, "((%s)->lineno = ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+      buf_printf(b, "sp_File_set_lineno(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
       free(rb.p); return;
     }
     if (sp_streq(name, "pos=") && argc == 1) {
@@ -18740,7 +18737,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int is_cp = sp_streq(name, "each_codepoint");
       int rf2 = ++g_tmp, lt2 = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_File *_t%d = %s; ", rf2, r);
+      buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf2, r, rf2);
       if (is_byte)
         buf_printf(b, "sp_int _t%d; while ((_t%d = sp_File_getbyte(_t%d)) != SP_INT_NIL) {", lt2, lt2, rf2);
       else if (is_cp)
@@ -18939,7 +18936,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sync = true -- and spinel's socket writes really do bypass stdio, so
          reporting false contradicted the implementation. Per-handle sync state
          is still not modelled beyond that (#2792). */
-      buf_printf(b, "((%s)->is_sock || (%s)->sync_on ? (sp_bool)1 : (sp_bool)0)", r, r);
+      buf_printf(b, "sp_File_sync_p(%s)", r);
       free(rb.p); return;
     }
     if (sp_streq(name, "sync=") && argc >= 1) {
@@ -18947,8 +18944,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_bool _t%d = (", ts2);
       if (comp_ntype(c, argv[0]) == TY_BOOL) emit_expr(c, argv[0], b);
       else { buf_puts(b, "sp_poly_truthy("); emit_boxed(c, argv[0], b); buf_puts(b, ")"); }
-      buf_printf(b, "); %s->sync_on = _t%d ? 1 : 0; if (_t%d) sp_File_flush(%s); _t%d; })",
-                 r, ts2, ts2, r, ts2);
+      buf_printf(b, "); sp_File_set_sync(%s, _t%d); })", r, ts2);
       free(rb.p); return;
     }
     if (sp_streq(name, "flush") || sp_streq(name, "binmode")) {
@@ -18971,7 +18967,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int esep = (argc >= 1 && comp_ntype(c, argv[0]) == TY_STRING) ? argv[0] : -1;
       int lt = ++g_tmp, rf = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_File *_t%d = %s; ", rf, r);
+      /* rooted as the File.open block form roots its handle (below): a
+         temporary receiver -- File.open(p).each_line -- is otherwise swept by
+         a GC inside the body and the loop ends early */
+      buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf, r, rf);
       free(rb.p); r = NULL;
       /* Each iteration yields a FRESH heap line string, matching CRuby --
          a stored reference must keep its own line, not a mutated shared
@@ -19069,15 +19068,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sync reads the handle kind, sync= flushes on a truthy value and
          answers it (#4229) */
       else if (sp_streq(name, "sync") && argc == 0)
-        buf_printf(b, "(_t%d && (_t%d->is_sock || _t%d->sync_on) ? (sp_bool)1 : (sp_bool)0); })",
-                   tio2, tio2, tio2);
+        buf_printf(b, "sp_File_sync_p(_t%d); })", tio2);
       else if (sp_streq(name, "sync=") && argc >= 1) {
         int ts3 = ++g_tmp;
         buf_printf(b, "sp_bool _t%d = sp_poly_truthy(", ts3);
         emit_boxed(c, argv[0], b);
-        buf_printf(b, "); if (_t%d) _t%d->sync_on = 1; else _t%d->sync_on = 0;"
-                      " if (_t%d) sp_File_flush(_t%d); _t%d; })",
-                   ts3, tio2, tio2, ts3, tio2, ts3);
+        buf_printf(b, "); sp_File_set_sync(_t%d, _t%d); })", tio2, ts3);
       }
       /* read_nonblock / write_nonblock, the same answers the typed-receiver
          arms give: `exception: false` answers the wait symbol (read) or nil
@@ -23978,10 +23974,22 @@ else {
       buf_printf(b, "; !sp_file_directory(_t%d) && sp_file_exist(_t%d); })", tfp, tfp); return;
     }
     if ((sp_streq(name, "delete") || sp_streq(name, "unlink")) && argc >= 1) {
+      if (argc == 1) {
+        buf_puts(b, "({ sp_file_delete("); emit_path_expr(c, argv[0], b);
+        buf_puts(b, "); (sp_int)1; })"); return;
+      }
+      /* several paths: every one is evaluated, rooted and checked for nil
+         before the first unlink, as CRuby converts them all first -- now
+         that a failing path raises, it must not skip a later argument's
+         effects, and a nil among them must not cost the earlier files */
+      int td = ++g_tmp;
       buf_puts(b, "({ ");
       for (int k = 0; k < argc; k++) {
-        buf_puts(b, "sp_file_delete("); emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
+        buf_printf(b, "const char *_del_%d_%d = ", td, k); emit_path_expr(c, argv[k], b);
+        buf_printf(b, "; SP_GC_ROOT_STR(_del_%d_%d); ", td, k);
       }
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_path_check(_del_%d_%d); ", td, k);
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_delete(_del_%d_%d); ", td, k);
       buf_printf(b, "(sp_int)%d; })", argc); return;
     }
     if (sp_streq(name, "rename") && argc == 2) {
@@ -24255,7 +24263,12 @@ else {
         buf_printf(b, "); sp_dir_mkdir(_t%d); })", tp);
         return;
       }
-      buf_printf(b, "sp_dir_%s(", name); emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return;
+      /* the block form's switch and restore, spliced in by desugar_dir_surface,
+         carry CRuby's label for that form (dir_chdir0, not chdir_path) */
+      if (sp_streq(name, "chdir") && nt_str(c->nt, id, "chdir_label"))
+        buf_puts(b, "sp_dir_chdir0(");
+      else buf_printf(b, "sp_dir_%s(", name);
+      emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return;
     }
   }
 
@@ -25197,11 +25210,17 @@ else {
     buf_printf(b, "), %d)", sp_streq(name, "!=") ? 1 : 0);
     return;
   }
-  /* IO handles compare by pointer identity (f.flush.equal?(f), #2799) --
-     except two File::Stat handles, which compare by modification time as
-     Comparable gives them; Object's protocol arm knows both */
-  if (recv >= 0 && comp_ntype(c, recv) == TY_IO && argc == 1 &&
-      (sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")) &&
+  /* The IO family's share of Object's protocol, ahead of the generic
+     spaceship and to_s fallbacks below: IO handles compare by pointer identity
+     (f.flush.equal?(f), #2799) except two File::Stat handles, which compare by
+     modification time as Comparable gives them, and a File/IO or Dir handle
+     answers Object's to_s and <=>. Exactly these names: `!=` and `==` against
+     nil keep their own arm (a NULL handle IS nil), which claiming every
+     protocol name here shadowed. */
+  if (recv >= 0 && (comp_ntype(c, recv) == TY_IO || comp_ntype(c, recv) == TY_DIR) &&
+      ((argc == 0 && sp_streq(name, "to_s")) || (argc == 1 && sp_streq(name, "<=>")) ||
+       (comp_ntype(c, recv) == TY_IO && argc == 1 &&
+        (sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")))) &&
       emit_native_object_protocol(c, id, b)) return;
   if (recv >= 0 && comp_ntype(c, recv) == TY_REGEX && argc == 0) {
     /* a Regexp is frozen; freeze/itself/dup evaluate to the pattern itself. */
@@ -27147,25 +27166,9 @@ else {
     if (ty_is_object(rt)) {
       int cid5 = ty_object_class(rt);
       if (comp_method_in_chain(c, cid5, name, NULL) >= 0) {
-        char selfp5[64];
-        const char *rty5 = nt_type(nt, recv);
-        if (rty5 && (sp_streq(rty5, "LocalVariableReadNode") ||
-                     sp_streq(rty5, "InstanceVariableReadNode") ||
-                     sp_streq(rty5, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfp5, sizeof selfp5, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t5 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t5, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfp5, sizeof selfp5, "_t%d", t5);
-        }
-        emit_dispatch(c, cid5, name, selfp5, nt_ref(nt, id, "arguments"), -1, b);
+        Buf selfb = emit_cmp_self(c, recv, rt);
+        emit_dispatch(c, cid5, name, selfb.p, nt_ref(nt, id, "arguments"), -1, b);
+        free(selfb.p);
         return;
       }
     }
@@ -27183,27 +27186,11 @@ else {
           buf_printf(b, "(sp_poly_cmp_ck(_t%d, _t%d) %s 0)", ta, tb2, name);
           return;
         }
-        char selfptr[320];
-        const char *rtyp = nt_type(nt, recv);
-        if (rtyp && (sp_streq(rtyp, "LocalVariableReadNode") ||
-                     sp_streq(rtyp, "InstanceVariableReadNode") ||
-                     sp_streq(rtyp, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t4 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t4, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfptr, sizeof selfptr, "_t%d", t4);
-        }
+        Buf selfb = emit_cmp_self(c, recv, rt);
         buf_puts(b, "(");
-        emit_dispatch(c, cid4, "<=>", selfptr, nt_ref(nt, id, "arguments"), -1, b);
+        emit_dispatch(c, cid4, "<=>", selfb.p, nt_ref(nt, id, "arguments"), -1, b);
         buf_printf(b, " %s 0)", name);
+        free(selfb.p);
         return;
       }
     }
@@ -27659,23 +27646,29 @@ else {
         /* Compute each RHS into a local buffer first: emit_expr may itself
            hoist temps into g_pre (e.g. an arg `Temp.new(5)` roots its boxed
            int there). Doing that before writing our own `T _tN = ` prefix
-           keeps the nested hoist from splitting our declaration line. */
+           keeps the nested hoist from splitting our declaration line.
+           Each temp is rooted as it is bound: the bounds are evaluated after
+           the receiver and the second after the first, and any of the three
+           may be a fresh object whose only reference is its temp. */
         Buf rb = expr_buf(c, recv);
         emit_indent(g_pre, g_indent);
         emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", ts);
         buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+        emit_pre_root(c, rt, ts);
         Buf lb; memset(&lb, 0, sizeof lb);
         if (arg_poly) emit_boxed(c, argv[0], &lb); else { Buf t = expr_buf(c, argv[0]); lb = t; }
         emit_indent(g_pre, g_indent);
         if (arg_poly) buf_puts(g_pre, "sp_RbVal"); else emit_ctype(c, rt, g_pre);
         buf_printf(g_pre, " _t%d = ", tlo);
         buf_puts(g_pre, lb.p ? lb.p : ""); buf_puts(g_pre, ";\n"); free(lb.p);
+        emit_pre_root(c, arg_poly ? TY_POLY : rt, tlo);
         Buf hb; memset(&hb, 0, sizeof hb);
         if (arg_poly) emit_boxed(c, argv[1], &hb); else { Buf t = expr_buf(c, argv[1]); hb = t; }
         emit_indent(g_pre, g_indent);
         if (arg_poly) buf_puts(g_pre, "sp_RbVal"); else emit_ctype(c, rt, g_pre);
         buf_printf(g_pre, " _t%d = ", thi);
         buf_puts(g_pre, hb.p ? hb.p : ""); buf_puts(g_pre, ";\n"); free(hb.p);
+        emit_pre_root(c, arg_poly ? TY_POLY : rt, thi);
         buf_printf(b, "(sp_%s_%s((sp_%s *)_t%d, _t%d) >= 0 && sp_%s_%s((sp_%s *)_t%d, _t%d) <= 0)",
                    cname, mc("<=>"), cname, ts, tlo,
                    cname, mc("<=>"), cname, ts, thi);

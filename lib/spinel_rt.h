@@ -1100,11 +1100,10 @@ const char *sp_File_readpartial(sp_File *f, sp_int n);
 /* IO#pread(len, offset): read without moving the file position. Inline
    because it allocates from this TU's string heap (#3038). */
 static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
-  int fd = (f && f->fp) ? fileno(f->fp) : -1;
-  if (fd < 0) sp_raise_cls("IOError", "closed stream");
+  SP_IO_OPEN(f);
   if (len < 0) len = 0;
   char *buf = (char *)sp_str_alloc((size_t)len);
-  ssize_t got = pread(fd, buf, (size_t)len, (off_t)off);
+  ssize_t got = pread(fileno(f->fp), buf, (size_t)len, (off_t)off);
   if (got < 0) sp_raise_cls("IOError", "pread failed");
   if (got == 0 && len > 0) sp_raise_cls("EOFError", "end of file reached");
   buf[got] = '\0';
@@ -1648,9 +1647,14 @@ static inline void sp_poly_puts(sp_RbVal v) {
         case SP_BUILTIN_BIG_RATIONAL: puts(sp_brat_to_s((sp_BigRational *)v.v.p)); break;
         case SP_BUILTIN_REGEX: puts(sp_re_to_s_str(v.v.p)); break;
         case SP_BUILTIN_POLY_ARRAY: {
-          /* puts flattens arrays recursively, one element per line */
+          /* puts flattens arrays recursively, one element per line -- and one
+             that holds itself gets CRuby's single `[...]` line instead of an
+             endless flattening. */
           sp_PolyArray *_a = (sp_PolyArray *)v.v.p;
+          if (sp_poly_recur_seen(SP_POLY_RECUR_PUTS, _a, NULL)) { puts("[...]"); break; }
+          int _pm = sp_poly_recur_push(SP_POLY_RECUR_PUTS, _a, NULL);
           for (sp_int _i = 0; _i < _a->len; _i++) sp_poly_puts(_a->data[_i]);
+          sp_poly_recur_pop(_pm);
           break;
         }
         /* A user object (or any non-array OBJ) prints via to_s: delegate to
@@ -1811,6 +1815,10 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
         /* MatchData#to_s is the whole match (#3641) */
         case SP_BUILTIN_MATCHDATA: { const char *_m0 = sp_MatchData_aref((sp_MatchData *)v.v.p, 0); return _m0 ? _m0 : sp_str_empty; }
         case SP_BUILTIN_EXCEPTION: return sp_exc_message((volatile struct sp_Exception_s *)v.v.p);
+        /* Object#to_s on a boxed handle of the IO family, as the typed arm
+           renders it: a boxed one fell through to "" (`puts [f, d]`) */
+        case SP_BUILTIN_IO: return sp_io_to_s((sp_File *)v.v.p);
+        case SP_BUILTIN_DIR: return sp_Dir_to_s((sp_Dir *)v.v.p);
         default:
           if ((v.cls_id >= 0 || v.cls_id == SP_BUILTIN_OBJECT) && v.v.p) {
             /* a class with a user #to_s renders through the generated
@@ -2038,10 +2046,11 @@ static sp_PolyArray *sp_sock_addr(sp_File *f, int peer) {
   if (!f || !f->is_sock)
     sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for an instance of %s",
                                              peer ? "peeraddr" : "addr", sp_io_kind_name(f)));
+  SP_IO_OPEN(f);
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   char ip[64];
-  int port = (f && f->fp) ? sp_net_sock_ip(fileno(f->fp), peer, ip, (int)sizeof ip) : -1;
+  int port = sp_net_sock_ip(fileno(f->fp), peer, ip, (int)sizeof ip);
   if (port < 0) { ip[0] = '\0'; port = 0; }
   const char *fam = strchr(ip, ':') ? "AF_INET6" : "AF_INET";
   sp_PolyArray_push(a, sp_box_str(sp_sprintf("%s", fam)));
@@ -3023,6 +3032,8 @@ static sp_bool sp_poly_hash_eq_cross(sp_RbVal a, sp_RbVal b);
    for two same-class user objects that no builtin arm handles. */
 typedef sp_bool (*sp_obj_eq_fn)(sp_RbVal a, sp_RbVal b);
 static sp_obj_eq_fn sp_obj_eq_hook = NULL;
+/* The == arms that can walk back into the pair they started from (below). */
+static sp_bool sp_poly_eq_deep(sp_RbVal a, sp_RbVal b);
 static sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b) {
   /* a user class's own == answers before any builtin reading, the way its
      other operators now do; the field-wise hook below stays the default for
@@ -3036,9 +3047,48 @@ static sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b) {
       if (!_sa) { if (a.tag != SP_TAG_STR) return FALSE; _sa = a.v.s; }
       if (!_sb) { if (b.tag != SP_TAG_STR) return FALSE; _sb = b.v.s; }
       return sp_str_eq(_sa, _sb);
-    } } if (sp_poly_is_brat(a) || sp_poly_is_brat(b)) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_poly_to_f(a) == sp_poly_to_f(b); int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; return (_oka && _okb) ? (sp_brat_cmp_poly(a, b) == 0) : FALSE; } /* A boxed Rational against a number: sp_poly_numeric_p covers only int/float/bigint, so without this a Rational operand fell through to the tag-equality test below and `Rational(1,1) == 1` answered false (#3382). The BigRational clause above already covers the mixed big cases. */ if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) { int _qa = sp_poly_is_rational(a) || sp_poly_numeric_p(a); int _qb = sp_poly_is_rational(b) || sp_poly_numeric_p(b); if (!(_qa && _qb)) return FALSE; if (sp_poly_is_rational(a) && sp_poly_is_rational(b) && a.v.p && b.v.p) return sp_rational_eq(*(sp_Rational *)a.v.p, *(sp_Rational *)b.v.p); return sp_poly_to_f(a) == sp_poly_to_f(b); } if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) return sp_bigint_cmp(ba, bb) == 0; if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) return sp_poly_to_f(a) == sp_poly_to_f(b); return FALSE; } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) return sp_poly_to_f(a) == sp_poly_to_f(b); if (a.tag != b.tag) return FALSE; switch (a.tag) { case SP_TAG_INT: return a.v.i == b.v.i; case SP_TAG_STR: return (a.v.s == NULL || b.v.s == NULL) ? (a.v.s == b.v.s) : (sp_str_cmp_bytes(a.v.s, b.v.s) == 0); case SP_TAG_FLT: return a.v.f == b.v.f; case SP_TAG_BOOL: return a.v.b == b.v.b; case SP_TAG_NIL: return TRUE; case SP_TAG_SYM: return a.v.i == b.v.i; case SP_TAG_ENCODING: return (a.v.s == NULL || b.v.s == NULL) ? (a.v.s == b.v.s) : (strcmp(a.v.s, b.v.s) == 0); case SP_TAG_OBJ: /* Arrays compare by VALUE across storage kinds: [1,2] boxed as an IntArray equals the same numbers rebuilt as a PolyArray (a splat-rest, a mapped run). Ruby has one Array; the kinds are a storage optimization and must not leak into ==. */ if (sp_poly_is_array_kind(a.cls_id) && sp_poly_is_array_kind(b.cls_id)) { if (a.cls_id == b.cls_id && a.v.p == b.v.p) return TRUE; { sp_int __n = sp_poly_length(a); if (__n != sp_poly_length(b)) return FALSE; for (sp_int __i = 0; __i < __n; __i++) if (!sp_poly_eq(sp_poly_arr_get(a, __i), sp_poly_arr_get(b, __i))) return FALSE; return TRUE; } } if (sp_poly_is_hash_kind(a.cls_id) && sp_poly_is_hash_kind(b.cls_id) && a.cls_id != b.cls_id) return sp_poly_hash_eq_cross(a, b); if (a.cls_id != b.cls_id) return FALSE; if (a.v.p == b.v.p) return TRUE; switch (a.cls_id) { case SP_BUILTIN_INT_ARRAY: return sp_IntArray_eq((sp_IntArray*)a.v.p,(sp_IntArray*)b.v.p); case SP_BUILTIN_STR_ARRAY: return sp_StrArray_eq((sp_StrArray*)a.v.p,(sp_StrArray*)b.v.p); case SP_BUILTIN_FLT_ARRAY: return sp_FloatArray_eq((sp_FloatArray*)a.v.p,(sp_FloatArray*)b.v.p); case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_eq((sp_PolyArray*)a.v.p,(sp_PolyArray*)b.v.p); case SP_BUILTIN_TIME: { sp_Time *ta = (sp_Time*)a.v.p, *tb = (sp_Time*)b.v.p; /* two Times read out of containers compare by instant, not by box (#3699) */ return (ta && tb) ? (ta->tv_sec == tb->tv_sec && ta->tv_nsec == tb->tv_nsec) : (ta == tb); } case SP_BUILTIN_RATIONAL: { sp_Rational *ra = (sp_Rational*)a.v.p, *rb = (sp_Rational*)b.v.p; return (ra && rb) ? sp_rational_eq(*ra, *rb) : (ra == rb); } case SP_BUILTIN_TMS: { sp_Tms *ta = (sp_Tms*)a.v.p, *tb = (sp_Tms*)b.v.p; /* Process::Tms is a Struct: field-wise, like its other by-value siblings here */ return (ta && tb) ? (ta->utime == tb->utime && ta->stime == tb->stime && ta->cutime == tb->cutime && ta->cstime == tb->cstime) : (ta == tb); } /* the structural heap handles (Object's identity arm routes a poly operand here: emit_native_object_protocol) */ case SP_BUILTIN_OPENSTRUCT: return sp_OpenStruct_eq((sp_OpenStruct*)a.v.p, (sp_OpenStruct*)b.v.p); case SP_BUILTIN_EXCEPTION: return sp_exc_eq((sp_Exception*)a.v.p, (sp_Exception*)b.v.p); case SP_BUILTIN_IO: return sp_io_eq((sp_File*)a.v.p, (sp_File*)b.v.p); case SP_BUILTIN_COMPLEX: { sp_Complex *ca = (sp_Complex*)a.v.p, *cb = (sp_Complex*)b.v.p; return (ca && cb) ? (ca->re == cb->re && ca->im == cb->im) : (ca == cb); } case SP_BUILTIN_BIG_RATIONAL: { sp_BigRational *ra = (sp_BigRational*)a.v.p, *rb = (sp_BigRational*)b.v.p; return (ra && rb) ? (sp_bigint_cmp(ra->num, rb->num) == 0 && sp_bigint_cmp(ra->den, rb->den) == 0) : (ra == rb); } /* boxed hashes of the same variant compare by value like every other
+    } } if (sp_poly_is_brat(a) || sp_poly_is_brat(b)) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_poly_to_f(a) == sp_poly_to_f(b); int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; return (_oka && _okb) ? (sp_brat_cmp_poly(a, b) == 0) : FALSE; } /* A boxed Rational against a number: sp_poly_numeric_p covers only int/float/bigint, so without this a Rational operand fell through to the tag-equality test below and `Rational(1,1) == 1` answered false (#3382). The BigRational clause above already covers the mixed big cases. */ if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) { int _qa = sp_poly_is_rational(a) || sp_poly_numeric_p(a); int _qb = sp_poly_is_rational(b) || sp_poly_numeric_p(b); if (!(_qa && _qb)) return FALSE; if (sp_poly_is_rational(a) && sp_poly_is_rational(b) && a.v.p && b.v.p) return sp_rational_eq(*(sp_Rational *)a.v.p, *(sp_Rational *)b.v.p); return sp_poly_to_f(a) == sp_poly_to_f(b); } if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) return sp_bigint_cmp(ba, bb) == 0; if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) return sp_poly_to_f(a) == sp_poly_to_f(b); return FALSE; } /* Two integers compare AS INTEGERS. The numeric fallback below converts both to double, which above 2^53 is lossy: -3145750702635002333 and -3145750702635002395 land on the same double and compared equal, so a poly-slotted Integer `==` answered true for two different numbers. The fallback is for the MIXED int/float case and keeps it. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i == b.v.i; if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) return sp_poly_to_f(a) == sp_poly_to_f(b); if (a.tag != b.tag) return FALSE; switch (a.tag) { case SP_TAG_INT: return a.v.i == b.v.i; case SP_TAG_STR: return (a.v.s == NULL || b.v.s == NULL) ? (a.v.s == b.v.s) : (sp_str_cmp_bytes(a.v.s, b.v.s) == 0); case SP_TAG_FLT: return a.v.f == b.v.f; case SP_TAG_BOOL: return a.v.b == b.v.b; case SP_TAG_NIL: return TRUE; case SP_TAG_SYM: return a.v.i == b.v.i; case SP_TAG_ENCODING: return (a.v.s == NULL || b.v.s == NULL) ? (a.v.s == b.v.s) : (strcmp(a.v.s, b.v.s) == 0); case SP_TAG_OBJ: /* Arrays compare by VALUE across storage kinds: [1,2] boxed as an IntArray equals the same numbers rebuilt as a PolyArray (a splat-rest, a mapped run). Ruby has one Array; the kinds are a storage optimization and must not leak into ==. */ if (sp_poly_is_array_kind(a.cls_id) && sp_poly_is_array_kind(b.cls_id)) { if (a.cls_id == b.cls_id && a.v.p == b.v.p) return TRUE; return sp_poly_eq_deep(a, b); } if (sp_poly_is_hash_kind(a.cls_id) && sp_poly_is_hash_kind(b.cls_id) && a.cls_id != b.cls_id) return sp_poly_eq_deep(a, b); if (a.cls_id != b.cls_id) return FALSE; if (a.v.p == b.v.p) return TRUE; switch (a.cls_id) { case SP_BUILTIN_INT_ARRAY: return sp_IntArray_eq((sp_IntArray*)a.v.p,(sp_IntArray*)b.v.p); case SP_BUILTIN_STR_ARRAY: return sp_StrArray_eq((sp_StrArray*)a.v.p,(sp_StrArray*)b.v.p); case SP_BUILTIN_FLT_ARRAY: return sp_FloatArray_eq((sp_FloatArray*)a.v.p,(sp_FloatArray*)b.v.p); case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_eq((sp_PolyArray*)a.v.p,(sp_PolyArray*)b.v.p); case SP_BUILTIN_TIME: { sp_Time *ta = (sp_Time*)a.v.p, *tb = (sp_Time*)b.v.p; /* two Times read out of containers compare by instant, not by box (#3699) */ return (ta && tb) ? (ta->tv_sec == tb->tv_sec && ta->tv_nsec == tb->tv_nsec) : (ta == tb); } case SP_BUILTIN_RATIONAL: { sp_Rational *ra = (sp_Rational*)a.v.p, *rb = (sp_Rational*)b.v.p; return (ra && rb) ? sp_rational_eq(*ra, *rb) : (ra == rb); } case SP_BUILTIN_TMS: { sp_Tms *ta = (sp_Tms*)a.v.p, *tb = (sp_Tms*)b.v.p; /* Process::Tms is a Struct: field-wise, like its other by-value siblings here */ return (ta && tb) ? (ta->utime == tb->utime && ta->stime == tb->stime && ta->cutime == tb->cutime && ta->cstime == tb->cstime) : (ta == tb); } /* the structural heap handles (Object's identity arm routes a poly operand here: emit_native_object_protocol) */ case SP_BUILTIN_OPENSTRUCT: return sp_OpenStruct_eq((sp_OpenStruct*)a.v.p, (sp_OpenStruct*)b.v.p); case SP_BUILTIN_EXCEPTION: return sp_exc_eq((sp_Exception*)a.v.p, (sp_Exception*)b.v.p); case SP_BUILTIN_IO: return sp_io_eq((sp_File*)a.v.p, (sp_File*)b.v.p); case SP_BUILTIN_COMPLEX: { sp_Complex *ca = (sp_Complex*)a.v.p, *cb = (sp_Complex*)b.v.p; return (ca && cb) ? (ca->re == cb->re && ca->im == cb->im) : (ca == cb); } case SP_BUILTIN_BIG_RATIONAL: { sp_BigRational *ra = (sp_BigRational*)a.v.p, *rb = (sp_BigRational*)b.v.p; return (ra && rb) ? (sp_bigint_cmp(ra->num, rb->num) == 0 && sp_bigint_cmp(ra->den, rb->den) == 0) : (ra == rb); } /* boxed hashes of the same variant compare by value like every other
      container -- the arm was simply missing, so [h] == [h-literal] was
-     pointer identity and always false. */ case SP_BUILTIN_STR_INT_HASH: return sp_StrIntHash_eq((sp_StrIntHash*)a.v.p,(sp_StrIntHash*)b.v.p); case SP_BUILTIN_STR_STR_HASH: return sp_StrStrHash_eq((sp_StrStrHash*)a.v.p,(sp_StrStrHash*)b.v.p); case SP_BUILTIN_INT_STR_HASH: return sp_IntStrHash_eq((sp_IntStrHash*)a.v.p,(sp_IntStrHash*)b.v.p); case SP_BUILTIN_INT_INT_HASH: return sp_IntIntHash_eq((sp_IntIntHash*)a.v.p,(sp_IntIntHash*)b.v.p); case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_eq((sp_StrPolyHash*)a.v.p,(sp_StrPolyHash*)b.v.p); case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_eq((sp_SymPolyHash*)a.v.p,(sp_SymPolyHash*)b.v.p); case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_eq((sp_PolyPolyHash*)a.v.p,(sp_PolyPolyHash*)b.v.p); case SP_BUILTIN_RANGE: return sp_range_eq(*(sp_Range*)a.v.p,*(sp_Range*)b.v.p); case SP_BUILTIN_FLOAT_RANGE: { sp_FloatRange *fa=(sp_FloatRange*)a.v.p,*fb=(sp_FloatRange*)b.v.p; return (fa&&fb)?(fa->first==fb->first&&fa->last==fb->last&&fa->excl==fb->excl):(fa==fb); } case SP_BUILTIN_STR_RANGE: { sp_StrRange *sa=(sp_StrRange*)a.v.p,*sb=(sp_StrRange*)b.v.p; if(!sa||!sb)return sa==sb; return sa->excl==sb->excl&&sp_str_eq(sa->first,sb->first)&&sp_str_eq(sa->last,sb->last); } default: return sp_obj_eq_hook ? sp_obj_eq_hook(a, b) : FALSE; } case SP_TAG_CLASS: { const char *an = sp_class_val_name(a), *bn = sp_class_val_name(b); return (an && bn) ? strcmp(an, bn) == 0 : an == bn; } default: return FALSE; } }
+     pointer identity and always false. */ case SP_BUILTIN_STR_INT_HASH: return sp_StrIntHash_eq((sp_StrIntHash*)a.v.p,(sp_StrIntHash*)b.v.p); case SP_BUILTIN_STR_STR_HASH: return sp_StrStrHash_eq((sp_StrStrHash*)a.v.p,(sp_StrStrHash*)b.v.p); case SP_BUILTIN_INT_STR_HASH: return sp_IntStrHash_eq((sp_IntStrHash*)a.v.p,(sp_IntStrHash*)b.v.p); case SP_BUILTIN_INT_INT_HASH: return sp_IntIntHash_eq((sp_IntIntHash*)a.v.p,(sp_IntIntHash*)b.v.p); case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_SYM_POLY_HASH: case SP_BUILTIN_POLY_POLY_HASH: return sp_poly_eq_deep(a, b); case SP_BUILTIN_RANGE: return sp_range_eq(*(sp_Range*)a.v.p,*(sp_Range*)b.v.p); case SP_BUILTIN_FLOAT_RANGE: { sp_FloatRange *fa=(sp_FloatRange*)a.v.p,*fb=(sp_FloatRange*)b.v.p; return (fa&&fb)?(fa->first==fb->first&&fa->last==fb->last&&fa->excl==fb->excl):(fa==fb); } case SP_BUILTIN_STR_RANGE: { sp_StrRange *sa=(sp_StrRange*)a.v.p,*sb=(sp_StrRange*)b.v.p; if(!sa||!sb)return sa==sb; return sa->excl==sb->excl&&sp_str_eq(sa->first,sb->first)&&sp_str_eq(sa->last,sb->last); } default: return sp_obj_eq_hook ? sp_poly_eq_deep(a, b) : FALSE; } case SP_TAG_CLASS: { const char *an = sp_class_val_name(a), *bn = sp_class_val_name(b); return (an && bn) ? strcmp(an, bn) == 0 : an == bn; } default: return FALSE; } }
+/* The == arms that can walk back into the pair they started from: two arrays
+   of any storage kinds, two hashes with poly values, and two user objects
+   compared field-wise through the generated hook. A pair the comparison is
+   already inside answers "equal", which is what lets `a << a; b << b; a == b`
+   finish and is the answer CRuby's rb_exec_recursive_paired gives.
+
+   Split out rather than guarded at the top of sp_poly_eq so the value types --
+   Time, Rational, Range, Complex, IO, the primitive-keyed hashes -- never push
+   a frame: none of them can contain a Ruby object, so none of them can meet
+   itself, and sp_poly_eq is hot enough that an unconditional push would be
+   felt by every comparison in a program that has no cycles at all. */
+static sp_bool sp_poly_eq_deep(sp_RbVal a, sp_RbVal b) {
+  if (sp_poly_recur_seen(SP_POLY_RECUR_EQ, a.v.p, b.v.p)) return TRUE;
+  int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a.v.p, b.v.p);
+  sp_bool r;
+  if (sp_poly_is_array_kind(a.cls_id)) {
+    sp_int n = sp_poly_length(a);
+    r = (n == sp_poly_length(b));
+    for (sp_int i = 0; r && i < n; i++)
+      r = sp_poly_eq(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i));
+  }
+  else if (sp_poly_is_hash_kind(a.cls_id)) {
+    /* The same dispatch the caller had, only guarded. Two hashes of DIFFERENT
+       variants are compared by the generic cross-variant walk whatever their
+       key types are; two of the same variant only reach here when that variant
+       has poly values, since the primitive-keyed ones keep their own cases in
+       sp_poly_eq and cannot hold a container at all. Each variant is named;
+       one added later and not listed here takes the cross-variant walk, which
+       is right for any two variants, only slower. */
+    if (a.cls_id != b.cls_id)                      r = sp_poly_hash_eq_cross(a, b);
+    else if (a.cls_id == SP_BUILTIN_STR_POLY_HASH) r = sp_StrPolyHash_eq((sp_StrPolyHash *)a.v.p, (sp_StrPolyHash *)b.v.p);
+    else if (a.cls_id == SP_BUILTIN_SYM_POLY_HASH) r = sp_SymPolyHash_eq((sp_SymPolyHash *)a.v.p, (sp_SymPolyHash *)b.v.p);
+    else if (a.cls_id == SP_BUILTIN_POLY_POLY_HASH) r = sp_PolyPolyHash_eq((sp_PolyPolyHash *)a.v.p, (sp_PolyPolyHash *)b.v.p);
+    else                                           r = sp_poly_hash_eq_cross(a, b);
+  }
+  else r = sp_obj_eq_hook(a, b);   /* non-NULL: sp_poly_eq's object arm checks it first */
+  sp_poly_recur_pop(mark);
+  return r;
+}
 /* sp_sym_name_fn is now an extern hook (sp_gc.h / sp_gc.c) so cold lib readers
    like sp_json.c can resolve symbol names too; the generated TU still sets it. */
 static sp_int sp_poly_arr_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable);
@@ -3067,7 +3117,7 @@ static int sp_poly_cmp_to_str(sp_RbVal a, sp_RbVal b, sp_int *out) {
   *out = sp_str_cmp_bytes(a.v.s, s);
   return 1;
 }
-static sp_int sp_poly_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) { /* same reasoning as the arithmetic fast paths: two plain numbers match no branch below until the numeric one, eight tests later */ if ((a.tag == SP_TAG_FLT || a.tag == SP_TAG_INT) && (b.tag == SP_TAG_FLT || b.tag == SP_TAG_INT)) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { *comparable = TRUE; return (a.v.i > b.v.i) - (a.v.i < b.v.i); } sp_float _fa = a.tag == SP_TAG_FLT ? a.v.f : (sp_float)a.v.i; sp_float _fb = b.tag == SP_TAG_FLT ? b.v.f : (sp_float)b.v.i; *comparable = TRUE; return (_fa > _fb) - (_fa < _fb); } /* A user class's own `<=>` comes first, exactly as its own &/|/^ does (#3501): the Rational arm below answers for the RECEIVER's sake and a user object is not one of its operands, so `Fixed.new(1) < Rational(1,2)` reported the comparison as failed even though the class compares them perfectly well (#4038). */ if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); if (sp_poly_is_brat(a) || sp_poly_is_brat(b) || sp_poly_is_rational(a) || sp_poly_is_rational(b)) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) { sp_float _af = sp_poly_to_f(a), _bf = sp_poly_to_f(b); *comparable = TRUE; return (_af > _bf) - (_af < _bf); } int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; if (_oka && _okb) { *comparable = TRUE; return sp_brat_cmp_poly(a, b); } *comparable = FALSE; return 0; } if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(a.cls_id) && SP_IS_BUILTIN_ARRAY(b.cls_id)) return sp_poly_arr_cmp(a, b, comparable); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) { *comparable = TRUE; return sp_bigint_cmp(ba, bb); } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } *comparable = FALSE; return 0; } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) { if (a.v.s == NULL || b.v.s == NULL) { *comparable = (a.v.s == b.v.s); return 0; } *comparable = TRUE; return sp_str_cmp_bytes(a.v.s, b.v.s); } { sp_int _sc; if (sp_poly_cmp_to_str(a, b, &_sc)) { *comparable = TRUE; return _sc; } } if (a.tag == SP_TAG_SYM && b.tag == SP_TAG_SYM) { *comparable = TRUE; if (sp_sym_name_fn) { /* byte-exact: a name may hold a NUL, and strcmp would call `:"a\0b"` equal to `:a` and order them arbitrarily (#nul symbols) */ const char *_na = sp_sym_name_fn((sp_sym)a.v.i), *_nb = sp_sym_name_fn((sp_sym)b.v.i); int _r = strcmp(_na, _nb); /* strcmp decides whenever the names differ before any NUL, and agrees with a byte-exact compare when it does. Only a TIE can hide a difference past an embedded NUL -- `:"a\0b"` against `:a` -- so the byte-exact compare runs just there (#nul symbols), keeping the ordinary comparison one pass. */ if (_r == 0) _r = sp_str_cmp_bytes(_na, _nb); return _r; } return (a.v.i > b.v.i) - (a.v.i < b.v.i); } if (sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b)) return sp_poly_cmp(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b), comparable); if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && a.v.p && b.v.p) { *comparable = TRUE; return sp_time_cmp(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p); } if (a.tag == SP_TAG_OBJ && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); *comparable = FALSE; return 0; }
+static sp_int sp_poly_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) { /* same reasoning as the arithmetic fast paths: two plain numbers match no branch below until the numeric one, eight tests later */ if ((a.tag == SP_TAG_FLT || a.tag == SP_TAG_INT) && (b.tag == SP_TAG_FLT || b.tag == SP_TAG_INT)) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { *comparable = TRUE; return (a.v.i > b.v.i) - (a.v.i < b.v.i); } sp_float _fa = a.tag == SP_TAG_FLT ? a.v.f : (sp_float)a.v.i; sp_float _fb = b.tag == SP_TAG_FLT ? b.v.f : (sp_float)b.v.i; *comparable = TRUE; return (_fa > _fb) - (_fa < _fb); } /* A user class's own `<=>` comes first, exactly as its own &/|/^ does (#3501): the Rational arm below answers for the RECEIVER's sake and a user object is not one of its operands, so `Fixed.new(1) < Rational(1,2)` reported the comparison as failed even though the class compares them perfectly well (#4038). */ if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); if (sp_poly_is_brat(a) || sp_poly_is_brat(b) || sp_poly_is_rational(a) || sp_poly_is_rational(b)) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) { sp_float _af = sp_poly_to_f(a), _bf = sp_poly_to_f(b); *comparable = TRUE; return (_af > _bf) - (_af < _bf); } int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; if (_oka && _okb) { *comparable = TRUE; return sp_brat_cmp_poly(a, b); } *comparable = FALSE; return 0; } if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(a.cls_id) && SP_IS_BUILTIN_ARRAY(b.cls_id)) return sp_poly_arr_cmp(a, b, comparable); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) { *comparable = TRUE; return sp_bigint_cmp(ba, bb); } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } *comparable = FALSE; return 0; } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) { if (a.v.s == NULL || b.v.s == NULL) { *comparable = (a.v.s == b.v.s); return 0; } *comparable = TRUE; return sp_str_cmp_bytes(a.v.s, b.v.s); } { sp_int _sc; if (sp_poly_cmp_to_str(a, b, &_sc)) { *comparable = TRUE; return _sc; } } if (a.tag == SP_TAG_SYM && b.tag == SP_TAG_SYM) { *comparable = TRUE; if (sp_sym_name_fn) { /* byte-exact: a name may hold a NUL, and strcmp would call `:"a\0b"` equal to `:a` and order them arbitrarily (#nul symbols) */ const char *_na = sp_sym_name_fn((sp_sym)a.v.i), *_nb = sp_sym_name_fn((sp_sym)b.v.i); int _r = strcmp(_na, _nb); /* strcmp decides whenever the names differ before any NUL, and agrees with a byte-exact compare when it does. Only a TIE can hide a difference past an embedded NUL -- `:"a\0b"` against `:a` -- so the byte-exact compare runs just there (#nul symbols), keeping the ordinary comparison one pass. */ if (_r == 0) _r = sp_str_cmp_bytes(_na, _nb); return _r; } return (a.v.i > b.v.i) - (a.v.i < b.v.i); } if (sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b)) return sp_poly_cmp(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b), comparable); if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && a.v.p && b.v.p) { *comparable = TRUE; return sp_time_cmp(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p); } /* a boxed handle of the IO family answers as its typed <=> does: identity, or the mtime order of two stats (#sort over stats) */ if (a.tag == SP_TAG_OBJ && (a.cls_id == SP_BUILTIN_IO || a.cls_id == SP_BUILTIN_DIR)) { sp_RbVal _r = a.cls_id == SP_BUILTIN_IO ? sp_io_cmp((sp_File *)a.v.p, b) : sp_Dir_cmp((sp_Dir *)a.v.p, b); *comparable = _r.tag == SP_TAG_INT; return *comparable ? _r.v.i : 0; } if (a.tag == SP_TAG_OBJ && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); *comparable = FALSE; return 0; }
 /* Lexicographic <=> between two boxed int arrays (Array#<=> over int elems),
    so Array#max/min/sort work on an array of int pairs ([delta, idx] tuples). */
 /* sp_poly_cmp_int_arrays: moved to lib/sp_cold.c */
@@ -4108,10 +4158,18 @@ static sp_int sp_poly_arr_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) {
   if (a.v.p == b.v.p) { *comparable = TRUE; return 0; }
   sp_int la = sp_poly_arr_len(a), lb = sp_poly_arr_len(b);
   sp_int n = la < lb ? la : lb;
-  for (sp_int i = 0; i < n; i++) {
-    sp_bool ec; sp_int r = sp_poly_cmp(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i), &ec);
-    if (!ec) { *comparable = FALSE; return 0; }
-    if (r != 0) { *comparable = TRUE; return r < 0 ? -1 : 1; }
+  /* Two DISTINCT arrays that each contain themselves meet the same pair again
+     one level down. CRuby counts a repeated pair as equal and lets the lengths
+     decide -- `a <=> [a, 1]` is -1 -- so skipping the element loop is exactly
+     that answer, not a shortcut around it. */
+  if (!sp_poly_recur_seen(SP_POLY_RECUR_EQ, a.v.p, b.v.p)) {
+    int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a.v.p, b.v.p);
+    for (sp_int i = 0; i < n; i++) {
+      sp_bool ec; sp_int r = sp_poly_cmp(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i), &ec);
+      if (!ec) { sp_poly_recur_pop(mark); *comparable = FALSE; return 0; }
+      if (r != 0) { sp_poly_recur_pop(mark); *comparable = TRUE; return r < 0 ? -1 : 1; }
+    }
+    sp_poly_recur_pop(mark);
   }
   *comparable = TRUE;
   return (la > lb) - (la < lb);
@@ -4466,6 +4524,14 @@ static sp_PolyArray *sp_PolyArray_difference(sp_PolyArray *a, sp_PolyArray *b) {
 /* Array#compact for poly_array: keep elements whose tag is not SP_TAG_NIL. */
 static sp_PolyArray *sp_PolyArray_compact(sp_PolyArray *a) { SP_GC_ROOT(a); sp_PolyArray *b = sp_PolyArray_new(); SP_GC_ROOT(b); if (!a) return b; for (sp_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) sp_PolyArray_push(b, a->data[i]); } return b; }
 static sp_PolyArray *sp_PolyArray_compact_bang(sp_PolyArray *a) {sp_gc_wb((void*)a);  if (!a) return a; sp_int w = 0; for (sp_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) a->data[w++] = a->data[i]; } a->len = w; return a; }
+/* An unlimited flatten (or a join) that meets an array it is already inside
+   has no answer to give: the flat run would be infinite, so CRuby raises. The
+   walk's own frames go first (sp_poly_recur_drop_kind). Off the hot path by
+   construction -- they never return. */
+SP_NORETURN SP_COLD static __attribute__((noinline)) void sp_poly_recur_raise(int kind, const char *msg) {
+  sp_poly_recur_drop_kind(kind);
+  sp_raise_cls("ArgumentError", msg);
+}
 /* Array#flatten -- walk into nested array values recursively. Each
    array-tagged element (IntArray / StrArray / SymArray / FloatArray /
    PolyArray) is expanded inline; scalars are appended as-is. Issue
@@ -4476,21 +4542,47 @@ static void sp_PolyArray_flatten_into(sp_PolyArray *dst, sp_RbVal v) {
   if (v.cls_id == SP_BUILTIN_STR_ARRAY) { sp_StrArray *sa = (sp_StrArray *)v.v.p; for (sp_int i = 0; i < sa->len; i++) sp_PolyArray_push(dst, sp_box_str(sa->data[i])); return; }
   if (v.cls_id == SP_BUILTIN_SYM_ARRAY) { sp_IntArray *ya = (sp_IntArray *)v.v.p; for (sp_int i = 0; i < ya->len; i++) sp_PolyArray_push(dst, sp_box_sym((sp_sym)ya->data[ya->start + i])); return; }
   if (v.cls_id == SP_BUILTIN_FLT_ARRAY) { sp_FloatArray *fa = (sp_FloatArray *)v.v.p; for (sp_int i = 0; i < fa->len; i++) sp_PolyArray_push(dst, sp_box_float(fa->data[i])); return; }
-  if (v.cls_id == SP_BUILTIN_POLY_ARRAY) { sp_PolyArray *pa = (sp_PolyArray *)v.v.p; for (sp_int i = 0; i < pa->len; i++) sp_PolyArray_flatten_into(dst, pa->data[i]); return; }
+  if (v.cls_id == SP_BUILTIN_POLY_ARRAY) {
+    sp_PolyArray *pa = (sp_PolyArray *)v.v.p;
+    if (sp_poly_recur_seen(SP_POLY_RECUR_FLATTEN, pa, NULL))
+      sp_poly_recur_raise(SP_POLY_RECUR_FLATTEN, "tried to flatten recursive array");
+    int mark = sp_poly_recur_push(SP_POLY_RECUR_FLATTEN, pa, NULL);
+    for (sp_int i = 0; i < pa->len; i++) sp_PolyArray_flatten_into(dst, pa->data[i]);
+    sp_poly_recur_pop(mark);
+    return;
+  }
   /* Other array variants fall through as opaque elements; rare for
      deep-flatten use cases. */
   sp_PolyArray_push(dst, v);
 }
 static sp_PolyArray *sp_PolyArray_flatten_bang(sp_PolyArray *a);  /* below */
-static sp_PolyArray *sp_PolyArray_flatten(sp_PolyArray *a) { SP_GC_ROOT(a); sp_PolyArray *b = sp_PolyArray_new(); SP_GC_ROOT(b); if (!a) return b; for (sp_int i = 0; i < a->len; i++) sp_PolyArray_flatten_into(b, a->data[i]); return b; }
+static sp_PolyArray *sp_PolyArray_flatten(sp_PolyArray *a) {
+  SP_GC_ROOT(a);
+  sp_PolyArray *b = sp_PolyArray_new(); SP_GC_ROOT(b);
+  if (!a) return b;
+  /* the receiver is on the path as much as any nested array is: `a << a;
+     a.flatten` has to raise, and only this frame can catch that */
+  int mark = sp_poly_recur_push(SP_POLY_RECUR_FLATTEN, a, NULL);
+  for (sp_int i = 0; i < a->len; i++) sp_PolyArray_flatten_into(b, a->data[i]);
+  sp_poly_recur_pop(mark);
+  return b;
+}
 /* depth-limited flatten: depth counts how many nesting levels unwrap
    (CRuby's flatten(1)); a negative depth flattens fully. */
 static void sp_PolyArray_flatten_into_d(sp_PolyArray *out, sp_RbVal v, sp_int depth);
 static void sp_PolyArray_flatten_into_d(sp_PolyArray *out, sp_RbVal v, sp_int depth) {
   if (depth != 0 && v.tag == SP_TAG_OBJ && sp_poly_is_array_kind(v.cls_id)) {
+    /* Only the unlimited walk (a negative depth) can be trapped by a cycle. A
+       counted one ends by counting down, and CRuby prints [[[...]]] for it
+       rather than raising, so it carries no path. */
+    if (depth < 0 && sp_poly_recur_seen(SP_POLY_RECUR_FLATTEN, v.v.p, NULL))
+      sp_poly_recur_raise(SP_POLY_RECUR_FLATTEN, "tried to flatten recursive array");
     sp_PolyArray *in = sp_poly_to_poly_array(v); SP_GC_ROOT(in);
+    int mark = depth < 0 ? sp_poly_recur_push(SP_POLY_RECUR_FLATTEN, v.v.p, NULL)
+                         : sp_poly_recur_save();
     for (sp_int i = 0; i < in->len; i++)
       sp_PolyArray_flatten_into_d(out, in->data[i], depth - 1);
+    sp_poly_recur_pop(mark);
     return;
   }
   sp_PolyArray_push(out, v);
@@ -4499,7 +4591,9 @@ static sp_PolyArray *sp_PolyArray_flatten_depth(sp_PolyArray *a, sp_int d) {
   SP_GC_ROOT(a);
   sp_PolyArray *b = sp_PolyArray_new(); SP_GC_ROOT(b);
   if (!a) return b;
+  int mark = d < 0 ? sp_poly_recur_push(SP_POLY_RECUR_FLATTEN, a, NULL) : sp_poly_recur_save();
   for (sp_int i = 0; i < a->len; i++) sp_PolyArray_flatten_into_d(b, a->data[i], d);
+  sp_poly_recur_pop(mark);
   return b;
 }
 /* Array#flatten!: replace the receiver's contents with the flattened run
@@ -4539,6 +4633,8 @@ static sp_RbVal sp_fmt_named_ref(sp_PolyArray *a, const char *nm, char nclose, c
 /* puts over an argument list: arrays flatten, an empty one writes nothing */
 static void sp_puts_elems(sp_RbVal a) {
   sp_int n = sp_poly_arr_len(a);
+  if (sp_poly_recur_seen(SP_POLY_RECUR_PUTS, a.v.p, NULL)) { puts("[...]"); return; }
+  int pmark = sp_poly_recur_push(SP_POLY_RECUR_PUTS, a.v.p, NULL);
   for (sp_int i = 0; i < n; i++) {
     sp_RbVal e = sp_poly_arr_get(a, i);
     if (e.tag == SP_TAG_OBJ && sp_poly_is_array_kind(e.cls_id)) { sp_puts_elems(e); continue; }
@@ -4546,6 +4642,7 @@ static void sp_puts_elems(sp_RbVal a) {
     if (s) fputs(s, stdout);
     if (!s || !*s || s[strlen(s) - 1] != 10) putchar(10);
   }
+  sp_poly_recur_pop(pmark);
 }
 /* `puts *arr`: an empty array is a bare `puts` */
 static void sp_splat_puts(sp_RbVal a) {
@@ -4878,7 +4975,22 @@ static void sp_PolyArray_flatten_into_n(sp_PolyArray *dst, sp_RbVal v, sp_int de
   if (v.cls_id == SP_BUILTIN_STR_ARRAY) { sp_StrArray *sa = (sp_StrArray *)v.v.p; for (sp_int i = 0; i < sa->len; i++) sp_PolyArray_push(dst, sp_box_str(sa->data[i])); return; }
   if (v.cls_id == SP_BUILTIN_SYM_ARRAY) { sp_IntArray *ya = (sp_IntArray *)v.v.p; for (sp_int i = 0; i < ya->len; i++) sp_PolyArray_push(dst, sp_box_sym((sp_sym)ya->data[ya->start + i])); return; }
   if (v.cls_id == SP_BUILTIN_FLT_ARRAY) { sp_FloatArray *fa = (sp_FloatArray *)v.v.p; for (sp_int i = 0; i < fa->len; i++) sp_PolyArray_push(dst, sp_box_float(fa->data[i])); return; }
-  if (v.cls_id == SP_BUILTIN_POLY_ARRAY) { sp_PolyArray *pa = (sp_PolyArray *)v.v.p; for (sp_int i = 0; i < pa->len; i++) sp_PolyArray_flatten_into_n(dst, pa->data[i], depth - 1); return; }
+  if (v.cls_id == SP_BUILTIN_POLY_ARRAY) {
+    sp_PolyArray *pa = (sp_PolyArray *)v.v.p;
+    /* A negative depth is the "no limit" form, and the only one a cycle can
+       trap; it stays negative rather than counting down from INT64_MAX, so the
+       walk that carries the path is the one the code says it is. */
+    if (depth < 0) {
+      if (sp_poly_recur_seen(SP_POLY_RECUR_FLATTEN, pa, NULL))
+        sp_poly_recur_raise(SP_POLY_RECUR_FLATTEN, "tried to flatten recursive array");
+      int mark = sp_poly_recur_push(SP_POLY_RECUR_FLATTEN, pa, NULL);
+      for (sp_int i = 0; i < pa->len; i++) sp_PolyArray_flatten_into_n(dst, pa->data[i], depth);
+      sp_poly_recur_pop(mark);
+      return;
+    }
+    for (sp_int i = 0; i < pa->len; i++) sp_PolyArray_flatten_into_n(dst, pa->data[i], depth - 1);
+    return;
+  }
   sp_PolyArray_push(dst, v);
 }
 static sp_PolyArray *sp_PolyArray_flatten_n(sp_PolyArray *a, sp_int depth) {
@@ -4886,8 +4998,9 @@ static sp_PolyArray *sp_PolyArray_flatten_n(sp_PolyArray *a, sp_int depth) {
   sp_PolyArray *b = sp_PolyArray_new();
   SP_GC_ROOT(b);
   if (!a) return b;
-  if (depth < 0) depth = INT64_MAX;
+  int mark = depth < 0 ? sp_poly_recur_push(SP_POLY_RECUR_FLATTEN, a, NULL) : sp_poly_recur_save();
   for (sp_int i = 0; i < a->len; i++) sp_PolyArray_flatten_into_n(b, a->data[i], depth);
+  sp_poly_recur_pop(mark);
   return b;
 }
 /* Transpose a poly-array of typed arrays (each row becomes a column).
@@ -5367,6 +5480,12 @@ static const char *sp_poly_join(sp_RbVal a, const char *sep);  /* mutual recursi
 static const char *sp_PolyArray_join(sp_PolyArray *a, const char *sep) {
   if (!a) return sp_str_empty;
   SP_GC_ROOT(a); SP_GC_ROOT(sep);
+  /* A run that contains itself has no finite text, so CRuby raises here rather
+     than printing an ellipsis the way #inspect does. Nested arrays come back
+     through sp_poly_join into this same function, so one check covers them. */
+  if (sp_poly_recur_seen(SP_POLY_RECUR_JOIN, a, NULL))
+    sp_poly_recur_raise(SP_POLY_RECUR_JOIN, "recursive array join");
+  int rmark = sp_poly_recur_push(SP_POLY_RECUR_JOIN, a, NULL);
   sp_String *s = sp_String_new("");
   SP_GC_ROOT(s);
   for (sp_int i = 0; i < a->len; i++) {
@@ -5384,6 +5503,7 @@ static const char *sp_PolyArray_join(sp_PolyArray *a, const char *sep) {
      dangling pointer. The fd-buffer's 0xfd marker also makes sp_mark_string a
      no-op, so the buffer cannot be kept alive by marking it. Return a standalone
      heap string instead (#3151). */
+  sp_poly_recur_pop(rmark);
   return sp_str_from_bytes(s->data, (size_t)s->len);
 }
 /* join on a boxed array (poly value holding any array kind) */
@@ -5412,11 +5532,19 @@ static const char *sp_poly_join(sp_RbVal a, const char *sep) {
 }
 static sp_bool sp_PolyArray_eq(sp_PolyArray *a, sp_PolyArray *b) {
   if (!a || !b) return a == b;
+  /* An array is == to itself in O(1), which also ends `x == x` for one that
+     holds itself -- CRuby's rb_ary_equal starts the same way. */
+  if (a == b) return TRUE;
   if (a->len != b->len) return FALSE;
-  for (sp_int i = 0; i < a->len; i++) {
-    if (!sp_poly_eq(a->data[i], b->data[i])) return FALSE;
-  }
-  return TRUE;
+  /* Reached directly from generated code as well as through sp_poly_eq, so it
+     carries the pair guard itself: two distinct self-containing arrays walk
+     into the same pair one level down, and a repeated pair is equal. */
+  if (sp_poly_recur_seen(SP_POLY_RECUR_EQ, a, b)) return TRUE;
+  int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a, b);
+  sp_bool r = TRUE;
+  for (sp_int i = 0; r && i < a->len; i++) r = sp_poly_eq(a->data[i], b->data[i]);
+  sp_poly_recur_pop(mark);
+  return r;
 }
 /* Box a typed (int/str/float) array into a fresh poly array element-wise.
    `kind` is the typed array's SP_BUILTIN_* tag. */
@@ -5754,10 +5882,6 @@ typedef sp_int  (*sp_obj_hash_fn)(int cls_id, void *p);
 typedef sp_bool (*sp_obj_eql_fn)(int cls_id, void *a, void *b);
 static sp_obj_hash_fn sp_obj_hash_hook = NULL;
 static sp_obj_eql_fn  sp_obj_eql_hook  = NULL;
-/* Depth guard for the container branches below: `h[:a] = h` and `a << a` are
-   legal, and hashing them by content would otherwise not terminate. CRuby
-   answers a fixed value for the recursive reference; so does this, once the
-   walk is deeper than any real key nesting. */
 /* The bucket index takes the LOW bits of a key's hash, and several key kinds
    leave their information out of those: a Float's mantissa bits are zero for
    every whole number, an array of small coordinates folds to h*31+x, a Struct
@@ -5765,6 +5889,12 @@ static sp_obj_eql_fn  sp_obj_eql_hook  = NULL;
    large the table grows and the probe sequences collapse into linear scans (a
    40k-bucket group_by ran for minutes, #3984). Mixing at the INDEX, not in the
    key hash, keeps every #hash value as it was. */
+/* CRuby's rb_hash_start mixes a per-TYPE seed into every container hash, which
+   is what keeps `{}.hash` away from `[].hash` -- both are empty and both would
+   otherwise fold to their length, 0. Odd, so a container never folds a member's
+   hash back onto the seed itself. */
+#define SP_HASH_SEED_ARRAY ((uint64_t)0x5d2a3f1b9c4e7a61ULL)
+#define SP_HASH_SEED_HASH  ((uint64_t)0x2c1b8f3d6e5a9047ULL)
 static sp_int sp_hash_slot(sp_int hk) {
   uint64_t h = (uint64_t)hk;
   h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
@@ -5772,8 +5902,6 @@ static sp_int sp_hash_slot(sp_int hk) {
   h ^= h >> 33;
   return (sp_int)h;
 }
-static int sp_rbval_hash_depth = 0;
-#define SP_RBVAL_HASH_MAX_DEPTH 24
 static sp_int sp_rbval_hash_key(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT: case SP_TAG_BOOL: case SP_TAG_NIL: case SP_TAG_SYM:
@@ -5806,9 +5934,6 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
          PolyArray [0, 0] (e.g. one built by Array#product) are `==` and must
          hash alike to collide in a Hash, so hash each element through
          sp_rbval_hash_key rather than the raw IntArray words (#2911). */
-      if (sp_poly_is_array_kind(v.cls_id) || sp_poly_is_hash_kind(v.cls_id)) {
-        if (sp_rbval_hash_depth >= SP_RBVAL_HASH_MAX_DEPTH) return 0;
-      }
       if (sp_poly_is_array_kind(v.cls_id)) {
         /* unsigned accumulator: the rolling h*31+x is meant to wrap, but on a
            signed type that is UB rather than wraparound -- and this is a
@@ -5816,11 +5941,23 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
            two copies compiled under different flags could disagree and a Hash
            lookup would silently miss. Same rule as the Rational key below. */
         sp_int n = sp_poly_length(v);
-        uint64_t h = 0;
-        sp_rbval_hash_depth++;
+        /* A container reached from inside itself contributes a fixed value and
+           stops, the way CRuby's rb_exec_recursive_outer answers. It replaces a
+           depth counter that gave up on the WHOLE walk once it was 24 deep, so
+           `a << a` hashed like [] at every level. */
+        if (sp_poly_recur_seen(SP_POLY_RECUR_HASH, v.v.p, NULL)) return SP_POLY_RECUR_HASH_VALUE;
+        /* Seeded with the length (CRuby's rb_hash_start(len)) rather than 0:
+           from 0 the rolling h*31+x gave [], [0] and [nil] one hash, and it is
+           the length that keeps `a << a` apart from []. The salt is CRuby's
+           per-type seed: without one an empty Array and an empty Hash both
+           start (and end) at 0 and hash alike. Both array kinds take the SAME
+           salt, so an IntArray [0, 0] still collides with the PolyArray the
+           same numbers were rebuilt as. */
+        uint64_t h = (uint64_t)n ^ SP_HASH_SEED_ARRAY;
+        int mark = sp_poly_recur_push(SP_POLY_RECUR_HASH, v.v.p, NULL);
         for (sp_int i = 0; i < n; i++)
           h = (h * 31) + (uint64_t)sp_rbval_hash_key(sp_poly_arr_get(v, i));
-        sp_rbval_hash_depth--;
+        sp_poly_recur_pop(mark);
         return (sp_int)h;
       }
       if (sp_poly_is_hash_kind(v.cls_id)) {
@@ -5829,8 +5966,9 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
            operation: two `==` hashes must agree, whatever order they were
            built in. Unsigned for the same reason the array accumulator is. */
         sp_int n = sp_poly_length(v);
-        uint64_t h = 0;
-        sp_rbval_hash_depth++;
+        if (sp_poly_recur_seen(SP_POLY_RECUR_HASH, v.v.p, NULL)) return SP_POLY_RECUR_HASH_VALUE;
+        uint64_t h = (uint64_t)n ^ SP_HASH_SEED_HASH;  /* length + salt, as the array above */
+        int mark = sp_poly_recur_push(SP_POLY_RECUR_HASH, v.v.p, NULL);
         for (sp_int i = 0; i < n; i++) {
           sp_RbVal k, val;
           sp_poly_hash_pair(v, i, &k, &val);
@@ -5842,7 +5980,7 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
           t ^= t >> 33; t *= 0xff51afd7ed558ccdULL; t ^= t >> 33;
           h += t;
         }
-        sp_rbval_hash_depth--;
+        sp_poly_recur_pop(mark);
         return (sp_int)h;
       }
       /* two patterns with the same source are one Hash key, whichever way each
@@ -5906,7 +6044,15 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
         memcpy(&bi, &cx->im, sizeof bi);
         return (sp_int)((uintptr_t)(br * 31u) ^ (uintptr_t)bi);
       }
-      if (sp_obj_hash_hook) return sp_obj_hash_hook(v.cls_id, v.v.p);
+      if (sp_obj_hash_hook) {
+        /* A Struct that holds itself hashes its own members through here; the
+           generated hook has no path of its own, so this is where it stops. */
+        if (sp_poly_recur_seen(SP_POLY_RECUR_HASH, v.v.p, NULL)) return SP_POLY_RECUR_HASH_VALUE;
+        int mark = sp_poly_recur_push(SP_POLY_RECUR_HASH, v.v.p, NULL);
+        sp_int oh = sp_obj_hash_hook(v.cls_id, v.v.p);
+        sp_poly_recur_pop(mark);
+        return oh;
+      }
       return (sp_int)((uintptr_t)v.v.p);
   }
   return 0;
@@ -5947,9 +6093,18 @@ static sp_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
         if (a.v.p == b.v.p && a.cls_id == b.cls_id) return TRUE;
         sp_int n = sp_poly_length(a);
         if (n != sp_poly_length(b)) return FALSE;
-        for (sp_int i = 0; i < n; i++)
-          if (!sp_rbval_eql_key(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i))) return FALSE;
-        return TRUE;
+        /* The same pair guard sp_poly_eql carries: this is the eql? a Hash
+           LOOKUP runs, so `h = {a => 1}; h[b]` with two distinct arrays that
+           each hold themselves walks into the same pair for ever without it. */
+        if (sp_poly_recur_seen(SP_POLY_RECUR_EQ, a.v.p, b.v.p)) return TRUE;
+        {
+          int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a.v.p, b.v.p);
+          sp_bool r = TRUE;
+          for (sp_int i = 0; r && i < n; i++)
+            r = sp_rbval_eql_key(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i));
+          sp_poly_recur_pop(mark);
+          return r;
+        }
       }
       if (a.cls_id != b.cls_id) return FALSE;
       if (a.v.p == b.v.p) return TRUE;
@@ -5996,7 +6151,16 @@ static sp_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
         sp_Complex *ca = (sp_Complex *)a.v.p, *cb = (sp_Complex *)b.v.p;
         return (ca && cb) ? (ca->re == cb->re && ca->im == cb->im) : (ca == cb);
       }
-      if (sp_obj_eql_hook) return sp_obj_eql_hook(a.cls_id, a.v.p, b.v.p);
+      if (sp_obj_eql_hook) {
+        /* a Struct key that holds itself reaches its own eql? through the hook */
+        if (sp_poly_recur_seen(SP_POLY_RECUR_EQ, a.v.p, b.v.p)) return TRUE;
+        {
+          int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a.v.p, b.v.p);
+          sp_bool r = sp_obj_eql_hook(a.cls_id, a.v.p, b.v.p);
+          sp_poly_recur_pop(mark);
+          return r;
+        }
+      }
       return FALSE;
   }
   return FALSE;
@@ -7123,9 +7287,15 @@ static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
     if (a.v.p == b.v.p) return TRUE;  /* same object: eql? to itself (O(1)) */
     sp_int n = sp_poly_length(a);
     if (n != sp_poly_length(b)) return FALSE;
-    for (sp_int i = 0; i < n; i++)
-      if (!sp_poly_eql(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i))) return FALSE;
-    return TRUE;
+    /* Same pair guard as ==, and the same kind of frame: both answer TRUE for a
+       pair they are already inside, so a nest that mixes the two still ends. */
+    if (sp_poly_recur_seen(SP_POLY_RECUR_EQ, a.v.p, b.v.p)) return TRUE;
+    int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a.v.p, b.v.p);
+    sp_bool r = TRUE;
+    for (sp_int i = 0; r && i < n; i++)
+      r = sp_poly_eql(sp_poly_arr_get(a, i), sp_poly_arr_get(b, i));
+    sp_poly_recur_pop(mark);
+    return r;
   }
   /* Two user objects of the same class: eql? (used by uniq / Set / Hash keys,
      unlike ==) honors a user-defined eql? via the cls_id hook. Identity is the
@@ -7135,7 +7305,14 @@ static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
   if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && a.cls_id == b.cls_id &&
       a.cls_id >= 0) {
     if (a.v.p == b.v.p) return TRUE;
-    if (sp_obj_eql_hook) return sp_obj_eql_hook(a.cls_id, a.v.p, b.v.p);
+    if (sp_obj_eql_hook) {
+      /* a Struct that holds itself reaches its own eql? through the hook */
+      if (sp_poly_recur_seen(SP_POLY_RECUR_EQ, a.v.p, b.v.p)) return TRUE;
+      int mark = sp_poly_recur_push(SP_POLY_RECUR_EQ, a.v.p, b.v.p);
+      sp_bool r = sp_obj_eql_hook(a.cls_id, a.v.p, b.v.p);
+      sp_poly_recur_pop(mark);
+      return r;
+    }
     /* No eql? hook (so no Struct/Data value key exists to need field-wise eql?):
        a user object's eql? is identity, NOT its `==`. Falling through to
        sp_poly_eq would pick up a class's user-defined `==` (which uniq / Set /
@@ -8420,6 +8597,26 @@ static SP_TLS int sp_rescue_sp = 0;
    exception landing so a rescue body that exits by raising doesn't leak its push
    (a side array beside the handler stack, mirroring sp_exc_rootmark). */
 static SP_TLS int sp_rescue_mark[SP_EXC_STACK_MAX];
+/* The container-walk path's depth (sp_inspect.h) at each handler's arm. Any
+   non-local exit out of a guarded walk -- a raise, a throw, a break out of a
+   block, a proc's non-local return -- longjmps past the sp_poly_recur_pop calls,
+   and the frames left behind would make the NEXT walk over the same objects
+   print "[...]", call two different arrays equal, or raise "recursive array
+   join" for a structure that never repeated. So EVERY stack that can be landed
+   on records the depth where its arm was armed, and every longjmp into one
+   restores it: this array beside sp_exc_stack, sp_catch_recur_mark beside the
+   catch stack, sp_brk_recur_mark beside the break scopes, and a field on the
+   proc-return home node. The exception, catch and break arms are all opened by
+   a runtime call (sp_exc_check_depth, sp_catch_check_depth, sp_brk_push), so
+   only the proc-return home -- a struct the method builds on its own C stack --
+   needs a line in generated code. */
+static SP_TLS int sp_poly_recur_mark[SP_EXC_STACK_MAX];
+/* Called immediately before every longjmp into sp_exc_stack: the landing frame
+   is the one on top, and the walk frames pushed since it armed are about to be
+   jumped over, so give the path back the depth that frame recorded. */
+static inline void sp_poly_recur_unwind(void) {
+  if (sp_exc_top > 0) sp_poly_recur_pop(sp_poly_recur_mark[sp_exc_top - 1]);
+}
 #define sp_cur_handled() (sp_rescue_sp > 0 ? sp_exc_handling[sp_rescue_sp-1] : NULL)
 /* Push a handled exception. sp_rescue_sp grows with recursion *through* rescue
    bodies (the handler stays pushed across the recursive call it makes, unlike a
@@ -8453,6 +8650,7 @@ SP_NORETURN SP_COLD static void sp_stack_too_deep(void) {
    (sp_exc_arm below), so 63 of the body's own is the last that fits. */
 static inline void sp_exc_check_depth(void) {
   if (SP_UNLIKELY(sp_exc_top >= SP_EXC_STACK_MAX)) sp_stack_too_deep();
+  sp_poly_recur_mark[sp_exc_top] = sp_poly_recur_top;
 }
 /* ---- Native backtrace formatting (spinel --debug) ---------------------- */
 /* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
@@ -8622,7 +8820,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
      live (a --debug build). Without it there is no location to print, and an
      uncaught raise in a multi-file program said only what went wrong, never
      where (#3974). Frames are method-granularity, so there is no `:line:`. */
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); sp_poly_recur_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
   /* Uncaught SystemExit terminates silently with its status (Kernel#exit).
      Read the status BEFORE the hooks run: it lives in the pending exception
      object, which nothing roots once the hooks start allocating. */
@@ -9036,11 +9234,15 @@ static SP_TLS unsigned char sp_catch_tag_kind[SP_CATCH_STACK_MAX];
 static SP_TLS sp_RbVal sp_catch_val[SP_CATCH_STACK_MAX];
 static SP_TLS int sp_catch_exc_top[SP_CATCH_STACK_MAX];  /* exception depth at each catch's entry */
 static SP_TLS int sp_catch_rootmark[SP_CATCH_STACK_MAX]; /* GC-root watermark at entry (see sp_exc_rootmark) */
+static SP_TLS int sp_catch_recur_mark[SP_CATCH_STACK_MAX]; /* walk-path depth at entry (see sp_poly_recur_mark) */
 static SP_TLS volatile int sp_catch_top = 0;
 /* Guard a catch push, like sp_exc_check_depth: the arm's first store is
-   sp_catch_tag[sp_catch_top], so this runs in front of it. */
+   sp_catch_tag[sp_catch_top], so this runs in front of it -- which also makes
+   it the one place every catch arm passes through, so the walk path's depth is
+   recorded here rather than in the emitted arm. */
 static inline void sp_catch_check_depth(void) {
   if (SP_UNLIKELY(sp_catch_top >= SP_CATCH_STACK_MAX)) sp_stack_too_deep();
+  sp_catch_recur_mark[sp_catch_top] = sp_poly_recur_top;
 }
 /* shared counter (not SP_TLS) so `catch { |tag| }` autotags are globally
    unique; see sp_brk_seq for the same shape */
@@ -9053,8 +9255,10 @@ static void sp_throw(const char *tag, int kind, sp_RbVal val) {
       sp_catch_val[i] = val; sp_catch_top = i + 1;
       if (sp_exc_top > sp_catch_exc_top[i]) {       /* run intervening ensures first */
         sp_unwind_kind = SP_UNWIND_THROW; sp_unwind_target = i; sp_unwind_exc_top = sp_catch_exc_top[i];
+        sp_poly_recur_unwind();
         longjmp(sp_exc_stack[sp_exc_top - 1], 1);
       }
+      sp_poly_recur_pop(sp_catch_recur_mark[i]);
       longjmp(sp_catch_stack[i], 1);
     }
     i--;
@@ -9090,6 +9294,7 @@ static SP_TLS jmp_buf *sp_brk_stack;              /* lazily allocated */
 static SP_TLS sp_RbVal *sp_brk_val;
 static SP_TLS sp_int *sp_brk_serial;
 static SP_TLS int *sp_brk_exc_top;                /* sp_exc_top at scope entry */
+static SP_TLS int *sp_brk_recur_mark;            /* walk-path depth at scope entry (see sp_poly_recur_mark) */
 static SP_TLS volatile int sp_brk_top = 0;
 /* shared counter (not SP_TLS) so serials are globally unique; see
    sp_proc_home_seq for the same shape */
@@ -9104,7 +9309,9 @@ static sp_int sp_brk_push(void) {
     sp_brk_val = (sp_RbVal *)malloc(sizeof(sp_RbVal) * SP_BRK_STACK_MAX);
     sp_brk_serial = (sp_int *)malloc(sizeof(sp_int) * SP_BRK_STACK_MAX);
     sp_brk_exc_top = (int *)malloc(sizeof(int) * SP_BRK_STACK_MAX);
-    if (!sp_brk_stack || !sp_brk_val || !sp_brk_serial || !sp_brk_exc_top)
+    sp_brk_recur_mark = (int *)malloc(sizeof(int) * SP_BRK_STACK_MAX);
+    if (!sp_brk_stack || !sp_brk_val || !sp_brk_serial || !sp_brk_exc_top ||
+        !sp_brk_recur_mark)
       sp_oom_die();
   }
 #ifdef SP_THREADS
@@ -9114,6 +9321,7 @@ static sp_int sp_brk_push(void) {
 #endif
   sp_brk_serial[sp_brk_top] = s;
   sp_brk_exc_top[sp_brk_top] = sp_exc_top;
+  sp_brk_recur_mark[sp_brk_top] = sp_poly_recur_top;
   sp_brk_val[sp_brk_top] = sp_box_nil();
   sp_brk_top++;
   return s;
@@ -9126,8 +9334,10 @@ static void __attribute__((noreturn)) sp_brk_throw(sp_int serial, sp_RbVal v) {
     if (sp_exc_top > sp_brk_exc_top[i]) {  /* run intervening ensures first */
       sp_unwind_kind = SP_UNWIND_BREAK; sp_unwind_target = i;
       sp_unwind_exc_top = sp_brk_exc_top[i];
+      sp_poly_recur_unwind();
       longjmp(sp_exc_stack[sp_exc_top - 1], 1);
     }
+    sp_poly_recur_pop(sp_brk_recur_mark[i]);
     longjmp(sp_brk_stack[i], 1);
   }
   /* no live scope carries the serial: an escaped/foreign proc's break. An
@@ -9180,6 +9390,7 @@ typedef struct sp_proc_home {
   sp_RbVal val;               /* the in-flight return value (nil until delivered) */
   int exc_top;                /* sp_exc_top at the method's entry */
   int catch_top;              /* sp_catch_top at the method's entry */
+  int recur_mark;             /* walk-path depth at the method's entry (see sp_poly_recur_mark) */
   sp_int id;                 /* fresh id captured by the home's returning procs */
   struct sp_proc_home *prev;  /* enclosing home, forming the per-fiber chain */
 } sp_proc_home;
@@ -9203,8 +9414,10 @@ static void sp_proc_return(sp_int id, sp_RbVal v) {
       h->val = v;
       if (sp_exc_top > h->exc_top) {   /* run intervening ensures first */
         sp_unwind_kind = SP_UNWIND_PROCRET; sp_unwind_home = h; sp_unwind_exc_top = h->exc_top;
+        sp_poly_recur_unwind();
         longjmp(sp_exc_stack[sp_exc_top - 1], 1);
       }
+      sp_poly_recur_pop(h->recur_mark);
       longjmp(h->jb, 1);
     }
   }
@@ -9291,11 +9504,21 @@ __attribute__((constructor)) static void sp_install_safepoint_publish(void) {
    handlers lie between here and the target, longjmp to the next; otherwise
    deliver to the target (the proc-return home node, or the matched catch slot). */
 static void sp_unwind_resume(void) {
-  if (sp_exc_top > sp_unwind_exc_top) longjmp(sp_exc_stack[sp_exc_top - 1], 1);
+  if (sp_exc_top > sp_unwind_exc_top) { sp_poly_recur_unwind(); longjmp(sp_exc_stack[sp_exc_top - 1], 1); }
   int kind = sp_unwind_kind;
   sp_unwind_kind = SP_UNWIND_NONE;
-  if (kind == SP_UNWIND_PROCRET) longjmp(sp_unwind_home->jb, 1);
-  if (kind == SP_UNWIND_BREAK) longjmp(sp_brk_stack[sp_unwind_target], 1);
+  /* the ensures are done; deliver, giving the walk path back the depth the
+     target arm recorded (the intervening exception frames restored their own on
+     the way here) */
+  if (kind == SP_UNWIND_PROCRET) {
+    sp_poly_recur_pop(sp_unwind_home->recur_mark);
+    longjmp(sp_unwind_home->jb, 1);
+  }
+  if (kind == SP_UNWIND_BREAK) {
+    sp_poly_recur_pop(sp_brk_recur_mark[sp_unwind_target]);
+    longjmp(sp_brk_stack[sp_unwind_target], 1);
+  }
+  sp_poly_recur_pop(sp_catch_recur_mark[sp_unwind_target]);
   longjmp(sp_catch_stack[sp_unwind_target], 1);
 }
 
@@ -9316,6 +9539,8 @@ typedef struct {
   int uk, ut, ue; sp_proc_home *uh;  /* transient unwind state (in flight only while running ensures) */
   void **shand; int rn, rcap;        /* sp_exc_handling prefix [0..sp_rescue_sp) */
   void *pcause;                      /* sp_pending_cause */
+  sp_poly_recur_frame *rrf; int rrn, rrcap;  /* sp_poly_recur_stack prefix [0..sp_poly_recur_top) */
+  int *rrem, *rrcm, *rrbm;           /* the walk-path marks of the exception, catch and break arms */
 } sp_exc_ctx_t;
 
 #ifdef SPINEL_EXT_HOST
@@ -9331,7 +9556,8 @@ void sp_exc_ctx_free(void *p) {
   if (!x) return;
   free(x->es); free(x->em); free(x->ec); free(x->eo);
   free(x->cs); free(x->ct); free(x->ctk); free(x->cv); free(x->cet);
-  free(x->bs); free(x->bv); free(x->bser); free(x->bet); free(x->shand); free(x);
+  free(x->bs); free(x->bv); free(x->bser); free(x->bet); free(x->shand);
+  free(x->rrf); free(x->rrem); free(x->rrcm); free(x->rrbm); free(x);
 }
 #endif
 #ifdef SPINEL_EXT_HOST
@@ -9344,9 +9570,15 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->es = (jmp_buf *)realloc(x->es, sizeof(jmp_buf) * n);
     x->em = (const char **)realloc(x->em, sizeof(char *) * n);
     x->ec = (const char **)realloc(x->ec, sizeof(char *) * n);
-    x->eo = (void **)realloc(x->eo, sizeof(void *) * n); }
+    x->eo = (void **)realloc(x->eo, sizeof(void *) * n);
+    x->rrem = (int *)realloc(x->rrem, sizeof(int) * n); }
   for (int i = 0; i < n; i++) { memcpy(x->es[i], sp_exc_stack[i], sizeof(jmp_buf));
-    x->em[i] = sp_exc_msg[i]; x->ec[i] = sp_exc_cls[i]; x->eo[i] = sp_exc_obj[i]; }
+    x->em[i] = sp_exc_msg[i]; x->ec[i] = sp_exc_cls[i]; x->eo[i] = sp_exc_obj[i];
+    /* the arm's walk-path depth travels with the arm: two green threads whose
+       handlers sit at the same index would otherwise share one slot, and a
+       raise in one would restore the other's depth -- a HIGHER one resurrects
+       frames that belong to the other context (see sp_poly_recur_mark) */
+    x->rrem[i] = sp_poly_recur_mark[i]; }
   x->en = n;
   int m = sp_catch_top;
   if (m > x->ccap) { x->ccap = m;
@@ -9354,10 +9586,12 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->ct = (const char **)realloc(x->ct, sizeof(char *) * m);
     x->ctk = (unsigned char *)realloc(x->ctk, sizeof(unsigned char) * m);
     x->cv = (sp_RbVal *)realloc(x->cv, sizeof(sp_RbVal) * m);
-    x->cet = (int *)realloc(x->cet, sizeof(int) * m); }
+    x->cet = (int *)realloc(x->cet, sizeof(int) * m);
+    x->rrcm = (int *)realloc(x->rrcm, sizeof(int) * m); }
   for (int i = 0; i < m; i++) { memcpy(x->cs[i], sp_catch_stack[i], sizeof(jmp_buf));
     x->ct[i] = sp_catch_tag[i]; x->ctk[i] = sp_catch_tag_kind[i];
-    x->cv[i] = sp_catch_val[i]; x->cet[i] = sp_catch_exc_top[i]; }
+    x->cv[i] = sp_catch_val[i]; x->cet[i] = sp_catch_exc_top[i];
+    x->rrcm[i] = sp_catch_recur_mark[i]; }
   x->cn = m;
   int bn = sp_brk_top;
   if (bn > x->bcap) { x->bcap = bn;
@@ -9365,9 +9599,11 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->bv = (sp_RbVal *)realloc(x->bv, sizeof(sp_RbVal) * bn);
     x->bser = (sp_int *)realloc(x->bser, sizeof(sp_int) * bn);
     x->bet = (int *)realloc(x->bet, sizeof(int) * bn);
-    if (!x->bs || !x->bv || !x->bser || !x->bet) sp_oom_die(); }
+    x->rrbm = (int *)realloc(x->rrbm, sizeof(int) * bn);
+    if (!x->bs || !x->bv || !x->bser || !x->bet || !x->rrbm) sp_oom_die(); }
   for (int i = 0; i < bn; i++) { memcpy(x->bs[i], sp_brk_stack[i], sizeof(jmp_buf));
-    x->bv[i] = sp_brk_val[i]; x->bser[i] = sp_brk_serial[i]; x->bet[i] = sp_brk_exc_top[i]; }
+    x->bv[i] = sp_brk_val[i]; x->bser[i] = sp_brk_serial[i]; x->bet[i] = sp_brk_exc_top[i];
+    x->rrbm[i] = sp_brk_recur_mark[i]; }
   x->bn = bn;
   x->prhead = sp_proc_ret_head;
   x->uk = sp_unwind_kind; x->ut = sp_unwind_target; x->ue = sp_unwind_exc_top; x->uh = sp_unwind_home;
@@ -9377,6 +9613,17 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     if (!x->shand) sp_oom_die(); }
   for (int i = 0; i < rn; i++) x->shand[i] = sp_exc_handling[i];
   x->rn = rn; x->pcause = sp_pending_cause;
+  /* The container-walk path travels with the green thread, like the handler
+     stack above it: a fiber suspended in the middle of an #inspect resumes
+     still knowing what it was inside, and the fiber that runs meanwhile starts
+     from an empty path rather than reading this one's frames. Almost always
+     nothing to copy -- a yield lands between walks, not inside one. */
+  int rrn = sp_poly_recur_top;
+  if (rrn > x->rrcap) { x->rrcap = rrn;
+    x->rrf = (sp_poly_recur_frame *)realloc(x->rrf, sizeof(sp_poly_recur_frame) * rrn);
+    if (!x->rrf) sp_oom_die(); }
+  for (int i = 0; i < rrn; i++) x->rrf[i] = sp_poly_recur_stack[i];
+  x->rrn = rrn;
 }
 #endif
 #ifdef SPINEL_EXT_HOST
@@ -9385,22 +9632,29 @@ void sp_exc_ctx_load(void *p);
 void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
   sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
   for (int i = 0; i < x->en; i++) { memcpy(sp_exc_stack[i], x->es[i], sizeof(jmp_buf));
-    sp_exc_msg[i] = x->em[i]; sp_exc_cls[i] = x->ec[i]; sp_exc_obj[i] = x->eo[i]; }
+    sp_exc_msg[i] = x->em[i]; sp_exc_cls[i] = x->ec[i]; sp_exc_obj[i] = x->eo[i];
+    sp_poly_recur_mark[i] = x->rrem[i]; }
   sp_exc_top = x->en;
   /* the marker covers one slot past top (handler consumption window); zero
      it so a stale entry from another fiber's context is never chased */
   if (x->en < SP_EXC_STACK_MAX) { sp_exc_msg[x->en] = 0; sp_exc_obj[x->en] = 0; }
   for (int i = 0; i < x->cn; i++) { memcpy(sp_catch_stack[i], x->cs[i], sizeof(jmp_buf));
     sp_catch_tag[i] = x->ct[i]; sp_catch_tag_kind[i] = x->ctk[i];
-    sp_catch_val[i] = x->cv[i]; sp_catch_exc_top[i] = x->cet[i]; }
+    sp_catch_val[i] = x->cv[i]; sp_catch_exc_top[i] = x->cet[i];
+    sp_catch_recur_mark[i] = x->rrcm[i]; }
   sp_catch_top = x->cn;
   for (int i = 0; i < x->bn; i++) { memcpy(sp_brk_stack[i], x->bs[i], sizeof(jmp_buf));
-    sp_brk_val[i] = x->bv[i]; sp_brk_serial[i] = x->bser[i]; sp_brk_exc_top[i] = x->bet[i]; }
+    sp_brk_val[i] = x->bv[i]; sp_brk_serial[i] = x->bser[i]; sp_brk_exc_top[i] = x->bet[i];
+    sp_brk_recur_mark[i] = x->rrbm[i]; }
   sp_brk_top = x->bn;
   sp_proc_ret_head = x->prhead;
   sp_unwind_kind = x->uk; sp_unwind_target = x->ut; sp_unwind_exc_top = x->ue; sp_unwind_home = x->uh;
   for (int i = 0; i < x->rn; i++) sp_exc_handling[i] = x->shand[i];
   sp_rescue_sp = x->rn; sp_pending_cause = x->pcause;
+  if (x->rrn > sp_poly_recur_cap) sp_poly_recur_grow(x->rrn);
+  for (int i = 0; i < x->rrn; i++) sp_poly_recur_stack[i] = x->rrf[i];
+  sp_poly_recur_top = x->rrn;
+  sp_poly_recur_ixtop = 0;   /* the index described the other context's frames */
 }
 #endif
 #ifdef SPINEL_EXT_HOST
@@ -9602,6 +9856,7 @@ const char *sp_dir_pwd(void);
 sp_int sp_dir_mkdir(const char *path);
 sp_int sp_dir_rmdir(const char *path);
 sp_int sp_dir_chdir(const char *path);
+sp_int sp_dir_chdir0(const char *path);  /* the block form's label */
 const char *sp_dir_home(void);
 /* Wildcard match for a single path component: `*` (any run, no `/`),
    `?` (one char). Recursive over `*`; adequate for the common
@@ -10654,6 +10909,11 @@ sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args) { if (!p || !p->fn) r
    the table is the collector's only handle on it, and the pop takes that handle
    away. */
 static int sp_at_exit_run(int status) {
+  /* The hooks run at top level. A raise that reached here unhandled, or an exit
+     from inside a walk, abandoned whatever walk it was inside; drop the frames
+     it left, or the first hook to inspect or compare that same object is told
+     it is already inside it. */
+  sp_poly_recur_pop(0);
   /* The hooks run at termination, where the path that got here has left its own
      raise in the pending slots. Clear them, or the first `raise` inside a hook
      binds the TERMINATING exception instead of its own: sp_raise_cls' recovery
