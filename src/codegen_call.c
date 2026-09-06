@@ -14374,6 +14374,30 @@ static int emit_numeric_coerce_call(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+
+/* The Kernel#Integer call the runtime completes: the value boxed, the base
+   (the two-argument form; 0 otherwise), and whether a failure raises or
+   answers nil. The entry point matches the kind the analysis gave the call
+   (kconv_integer_kind): an Integer slot, the Bignum slot of a strict call
+   whose object may answer one, or the boxed slot of the `exception: false`
+   form of such a call. A temporary object is rooted across the base's
+   evaluation. */
+static void emit_kconv_call(Compiler *c, int id, const int *av, int ac, int raise, Buf *b) {
+  TyKind kt = comp_ntype(c, id);
+  const char *fn = kt == TY_BIGINT ? "sp_poly_Integer_big"
+                 : kt == TY_POLY   ? "sp_kernel_Integer_val" : "sp_poly_Integer_ex";
+  if (ac < 2) {
+    buf_printf(b, "%s(", fn); emit_boxed(c, av[0], b);
+    buf_printf(b, ", 0, %d)", raise);
+    return;
+  }
+  int tv = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _kv%d = ", tv); emit_boxed(c, av[0], b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_kv%d); %s(_kv%d, ", tv, fn, tv);
+  emit_int_expr(c, av[1], b);
+  buf_printf(b, ", %d); })", raise);
+}
+
 static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* deep-return pickup (#3227 P6): a marked receiverless call to a method
      whose every return path yields a shared handle -- reset the side
@@ -19374,8 +19398,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_puts(b, ")");
         return;
       }
-      if (at0 == TY_INT) { emit_expr(c, av[0], b); return; }
-      if (at0 == TY_FLOAT) { buf_puts(b, "((sp_int)("); emit_expr(c, av[0], b); buf_puts(b, "))"); return; }
+      /* with a base only a String converts, so a number is nil here */
+      if (at0 == TY_INT && ac == 1) { emit_expr(c, av[0], b); return; }
+      /* a user object, a boxed value that may hold one, or a Float (NaN and
+         Infinity are nil, CRuby's FloatDomainError swallowed) converts
+         through the runtime's Kernel#Integer path, nil for every failure */
+      if (ty_is_object(at0) || at0 == TY_POLY || (at0 == TY_FLOAT && ac == 1)) {
+        emit_kconv_call(c, id, av, ac, 0, b);
+        return;
+      }
       buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), SP_INT_NIL)");
       return;
     }
@@ -19384,6 +19415,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       if (at0 == TY_STRING) { buf_puts(b, "sp_str_to_f_lenient("); emit_expr(c, av[0], b); buf_puts(b, ")"); return; }
       if (at0 == TY_INT) { buf_puts(b, "((sp_float)("); emit_expr(c, av[0], b); buf_puts(b, "))"); return; }
       if (at0 == TY_FLOAT) { emit_expr(c, av[0], b); return; }
+      if (ty_is_object(at0) || at0 == TY_POLY) {
+        buf_puts(b, "sp_poly_Float_ex("); emit_boxed(c, av[0], b); buf_puts(b, ", 0)");
+        return;
+      }
       buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_float_nil())");
       return;
     }
@@ -19396,7 +19431,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         if (at == TY_UNKNOWN && (ek == NK_HashNode || ek == NK_KeywordHashNode || ek == NK_ArrayNode))
           at = TY_POLY_ARRAY; }
       if (at == TY_STRING) { buf_puts(b, "sp_str_to_i_strict("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
-      else if (at == TY_FLOAT) { buf_puts(b, "((sp_int)("); emit_expr(c, av[0], b); buf_puts(b, "))"); }
+      /* a Float truncates, and NaN or an infinity is CRuby's FloatDomainError
+         rather than the C cast's undefined value */
+      else if (at == TY_FLOAT) {
+        int tf = ++g_tmp;
+        buf_printf(b, "({ sp_float _t%d = ", tf); emit_expr(c, av[0], b);
+        buf_printf(b, "; sp_poly_flo_domain_ck(_t%d); (sp_int)_t%d; })", tf, tf);
+      }
       else if (at == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_raise_cls(\"TypeError\", \"can't convert nil into Integer\"), (sp_int)0)"); }  /* #2514 */
       else if (at == TY_POLY) { buf_puts(b, "sp_poly_Integer("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
       else if (at == TY_INT || at == TY_UNKNOWN) { buf_puts(b, "("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
@@ -19411,16 +19452,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, "; if (_t%d.im != 0) sp_raise_cls(\"RangeError\", "
                       "\"can't convert into Integer\"); (sp_int)_t%d.re; })", tc, tc);
       }
-      else if (ty_is_object(at) &&
-               comp_method_in_chain(c, ty_object_class(at), "to_int", NULL) >= 0) {
-        int dcls = ty_object_class(at);
-        comp_method_in_chain(c, dcls, "to_int", &dcls);
-        buf_printf(b, "sp_%s_to_int((sp_%s *)", c->classes[dcls].c_name, c->classes[dcls].c_name);
-        emit_expr(c, av[0], b); buf_puts(b, ")");
+      /* a user object converts through its own #to_int, #to_str and #to_i,
+         each answer judged by the runtime as CRuby judges it; a class whose
+         #to_int or #to_i answers a Bignum types the call as one */
+      else if (ty_is_object(at)) {
+        emit_kconv_call(c, id, av, ac, 1, b);
       }
       else {
-        /* an Array, Hash, Range, Symbol or object has no to_int: CRuby's
-           TypeError, not the value reinterpreted as an integer (#3717) */
+        /* an Array, Hash, Range or Symbol has no to_int: CRuby's TypeError,
+           not the value reinterpreted as an integer (#3717) */
         buf_puts(b, "((void)("); emit_expr(c, av[0], b);
         buf_puts(b, "), sp_raise_cls(\"TypeError\", sp_sprintf(\"can't convert %s into Integer\", sp_poly_class_name(");
         emit_boxed(c, av[0], b);
@@ -19435,23 +19475,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         /* Integer("5", nil) is CRuby's TypeError, not base 0 */
         buf_puts(b, ", "); emit_int_expr(c, av[1], b); buf_puts(b, ")");
       }
-      else if (at == TY_POLY || at == TY_UNKNOWN) {
-        /* a poly value is only known at runtime: a string (plain or shared
-           handle) parses with the base; nil and non-strings raise as CRuby */
-        int tv = ++g_tmp;
-        buf_printf(b, "({ sp_RbVal _kv%d = ", tv); emit_boxed(c, av[0], b);
-        buf_printf(b, "; const char *_ks%d = _kv%d.tag == SP_TAG_STR ? (_kv%d.v.s ? _kv%d.v.s : \"\") : "
-                      "(_kv%d.tag == SP_TAG_OBJ && _kv%d.cls_id == SP_BUILTIN_STRBUF && _kv%d.v.p) ? "
-                      "sp_String_cstr((sp_String *)_kv%d.v.p) : NULL; ",
-                   tv, tv, tv, tv, tv, tv, tv, tv);
-        buf_printf(b, "_ks%d ? sp_str_to_i_strict_base(_ks%d, ", tv, tv);
-        emit_int_expr(c, av[1], b);
-        buf_printf(b, ") : (sp_raise_cls(\"ArgumentError\", "
-                      "\"base specified for non string value\"), (sp_int)0); })");
-        (void)tv;
-      }
-      /* a base with a non-String value raises ArgumentError, as CRuby (#2515) */
-      else { buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), (void)("); emit_expr(c, av[1], b); buf_puts(b, "), sp_raise_cls(\"ArgumentError\", \"base specified for non string value\"), (sp_int)0)"); }
+      /* only a String converts with a base, and whether a boxed value or a
+         user object is one -- a plain String, a shared handle, an object's
+         #to_str -- the runtime decides, raising CRuby's ArgumentError for
+         anything else (#2515) */
+      else emit_kconv_call(c, id, av, ac, 1, b);
       return;
     }
     if (sp_streq(name, "Float") && ac == 1) {
@@ -19475,16 +19503,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, "; if (_t%d.im != 0) sp_raise_cls(\"RangeError\", "
                       "\"can't convert into Float\"); _t%d.re; })", tc, tc);
       }
-      else if (ty_is_object(at) &&
-               comp_method_in_chain(c, ty_object_class(at), "to_f", NULL) >= 0) {
-        int dcls = ty_object_class(at);
-        comp_method_in_chain(c, dcls, "to_f", &dcls);
-        buf_printf(b, "((sp_float)(sp_%s_to_f((sp_%s *)", c->classes[dcls].c_name, c->classes[dcls].c_name);
-        emit_expr(c, av[0], b); buf_puts(b, ")))");
+      /* a user object converts through its own #to_f, the answer judged by
+         the runtime as CRuby judges it */
+      else if (ty_is_object(at)) {
+        buf_puts(b, "sp_poly_Float_ex("); emit_boxed(c, av[0], b); buf_puts(b, ", 1)");
       }
       else {
-        /* a Boolean, Symbol, Array, Hash or object with no #to_f is CRuby's
-           TypeError, not the value reinterpreted as a double (#3888) */
+        /* a Boolean, Symbol, Array or Hash has no #to_f: CRuby's TypeError,
+           not the value reinterpreted as a double (#3888) */
         buf_puts(b, "((void)("); emit_expr(c, av[0], b);
         buf_puts(b, "), sp_raise_cls(\"TypeError\", sp_sprintf(\"can't convert %s into Float\", sp_poly_class_name(");
         emit_boxed(c, av[0], b);
