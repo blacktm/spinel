@@ -2142,7 +2142,10 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
           int trecv = ++g_tmp, ti = ++g_tmp;
           Buf rb = expr_buf(c, recv);
           emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+          buf_printf(g_pre, " _t%d = %s; ", trecv, rb.p ? rb.p : ""); free(rb.p);
+          /* rooted, as the poly each_index above already roots its own hoist:
+             the length is the loop bound and the block can allocate */
+          emit_gc_root_tmp(c, rt, trecv, g_pre); buf_puts(g_pre, "\n");
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
                      ti, ti, ek, trecv, ti);

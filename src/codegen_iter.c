@@ -2613,12 +2613,16 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
        loop bound and every key/val access. When the receiver is an inlined
        block-method statement-expression (e.g. a Ruby-defined `group_by` that
        lowers to `({ ...produce hash... })`), re-emitting it per access both
-       truncates into invalid C and re-runs its side effects. */
+       truncates into invalid C and re-runs its side effects. The temp is a
+       root, as each_key's and each_value's hoist below already is: the loop
+       reads its `len` as the bound on every turn and its `order` on every
+       yield, and a receiver that is itself a temporary -- the hash a method
+       call returned -- has no other holder while the block allocates. */
     int th = ++g_tmp;
     emit_indent(b, indent);
     buf_printf(b, "sp_%sHash *_t%d = ", hn, th);
     emit_expr(c, recv, b);
-    buf_puts(b, ";\n");
+    buf_printf(b, "; SP_GC_ROOT(_t%d);\n", th);
     Buf rb; memset(&rb, 0, sizeof rb);
     buf_printf(&rb, "_t%d", th);
     /* Mutating the key set during #each: CRuby refuses a new key outright, and
@@ -3415,7 +3419,9 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
 
   /* array.each_cons(n) { |a, b, ...| } -- sliding window of n consecutive
      elements; a single param binds the n-element sub-array, multiple params
-     destructure the window */
+     destructure the window. The hoisted receiver is rooted for the same
+     reason Hash#each's above is: its length is the loop bound, re-read every
+     turn, and a receiver the program does not name has no other holder. */
   if (sp_streq(name, "each_cons") && ty_is_array(rt)) {
     int args = nt_ref(nt, id, "arguments");
     int ec = 0; const int *eav = args >= 0 ? nt_arr(nt, args, "arguments", &ec) : NULL;
@@ -3425,7 +3431,8 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     int np = 0; while (block_param_name(c, block, np)) np++;
     int ta = ++g_tmp, tnn = ++g_tmp, ti = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
-    emit_indent(b, indent); emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_indent(b, indent); emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s; ", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, "\n");
     emit_indent(b, indent); buf_printf(b, "sp_int _t%d = ", tnn); emit_int_expr(c, eav[0], b); buf_puts(b, ";\n");
     emit_indent(b, indent);
     buf_printf(b, "for (sp_int _t%d = 0; _t%d + _t%d - 1 < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, tnn, k, ta, ti);
@@ -3691,7 +3698,8 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   }
 
   /* array.cycle(n) { |p| body } -- repeat n times over the array; the
-     argless form cycles forever (a block `break` is the only exit) */
+     argless form cycles forever (a block `break` is the only exit). Rooted
+     hoist, as each_cons above. */
   if (sp_streq(name, "cycle") && ty_is_array(rt)) {
     int args = nt_ref(nt, id, "arguments");
     int cyc_argc = 0; const int *cyc_argv = args >= 0 ? nt_arr(nt, args, "arguments", &cyc_argc) : NULL;
@@ -3706,7 +3714,8 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     int ta = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(b, indent); emit_ctype(c, rt, b);
-    buf_printf(b, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    buf_printf(b, " _t%d = %s; ", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, "\n");
     emit_indent(b, indent);
     if (cyc_argc == 1) {
       buf_printf(b, "sp_int _t%d = ", tn);
@@ -3743,7 +3752,8 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
 
-  /* array.each_slice(n) { |p| body } -- yield subarrays of size n */
+  /* array.each_slice(n) { |p| body } -- yield subarrays of size n. Rooted
+     hoist, as each_cons above. */
   if (sp_streq(name, "each_slice") && ty_is_array(rt)) {
     int args = nt_ref(nt, id, "arguments");
     int es_argc = 0; const int *es_argv = args >= 0 ? nt_arr(nt, args, "arguments", &es_argc) : NULL;
@@ -3758,7 +3768,8 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     int ta = ++g_tmp, ts = ++g_tmp, ti = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(b, indent); emit_ctype(c, rt, b);
-    buf_printf(b, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    buf_printf(b, " _t%d = %s; ", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, "\n");
     emit_indent(b, indent); buf_printf(b, "sp_int _t%d = ", ts);
     emit_int_expr(c, es_argv[0], b); buf_puts(b, ";\n");
     emit_indent(b, indent);
