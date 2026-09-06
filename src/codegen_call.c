@@ -28389,7 +28389,12 @@ else {
     Scope *cs_ech = p0 ? comp_scope_of(c, id) : NULL;
     LocalVar *clv_ech = (p0 && cs_ech) ? scope_local(cs_ech, p0) : NULL;
     int p0_box_poly_ech = clv_ech && clv_ech->type == TY_POLY;
-    buf_printf(b, "({ const char *_t%d = %s; ", ts, rb.p ? rb.p : ""); free(rb.p);
+    /* The loop below reads the receiver on every turn -- as its bound, and as
+       the string it takes the next character or byte out of -- and the block
+       between two turns may allocate. A temporary receiver (`array.join.
+       each_char { }`) has no other holder at that point, so the temp is a
+       root, the way the array iterators root their hoisted receiver. */
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d); ", ts, rb.p ? rb.p : "", ts); free(rb.p);
     /* Save outer variable before loop to restore it afterward */
     int tsv_ech = 0;
     if (p0 && clv_ech) {
@@ -28416,6 +28421,12 @@ else {
       else
         buf_printf(b, "sp_StrArray *_t%d = %s(_t%d); ",
                    tl, eline_chomp ? "sp_str_lines_chomp" : "sp_str_lines", ts);
+      /* The array of lines is this loop's own value -- nothing in the Ruby
+         program names it -- and its length is the loop bound, re-read every
+         turn. Unrooted, a block that allocated collected it, and the loop
+         then ended early rather than yielding a wrong line: the symptom is a
+         short answer, not a bad one. */
+      buf_printf(b, "SP_GC_ROOT(_t%d); ", tl);
       buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) { ",
                  ti, ti, tl, ti);
       if (p0) {
