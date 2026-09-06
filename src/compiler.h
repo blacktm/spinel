@@ -561,6 +561,10 @@ typedef struct {
      sp_obj_to_hash when the program defines Structs. No feature is named in the
      compiler -- the package's require is the declaration. */
   int native_obj_reflect;
+  /* the program calls Kernel#Integer / Kernel#Float somewhere: codegen emits
+     and installs the conversion bridge (sp_obj_conv_sw) only then, so a
+     program that never converts an object carries no extra dispatch. */
+  int uses_kconv;
   /* body-node id -> enclosing BlockNode id (lazy; emit_stmts block-local
      resets). Sized nt->count; -1 = not a block body. */
   int *blk_body_map;

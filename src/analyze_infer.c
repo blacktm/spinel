@@ -1025,6 +1025,48 @@ TyKind infer_call(Compiler *c, int id) {
   return t;
 }
 
+/* The call's trailing keyword hash says `exception: false` (the literal:
+   the form that asks for nil instead of a raise). */
+static int kconv_noraise_kw(Compiler *c, int argc, const int *argv) {
+  if (argc < 1) return 0;
+  int kw = argv[argc - 1];
+  const char *kt = nt_type(c->nt, kw);
+  if (!kt || !sp_streq(kt, "KeywordHashNode")) return 0;
+  int en = 0; const int *el = nt_arr(c->nt, kw, "elements", &en);
+  for (int e = 0; e < en; e++) {
+    int k = nt_ref(c->nt, el[e], "key"), v = nt_ref(c->nt, el[e], "value");
+    const char *kn = (k >= 0 && nt_type(c->nt, k) && sp_streq(nt_type(c->nt, k), "SymbolNode"))
+                     ? nt_str(c->nt, k, "value") : NULL;
+    const char *vt = v >= 0 ? nt_type(c->nt, v) : NULL;
+    if (kn && sp_streq(kn, "exception") && vt && sp_streq(vt, "FalseNode")) return 1;
+  }
+  return 0;
+}
+/* Kernel#Integer's static kind. Integer, unless the argument is a user
+   object whose #to_int or #to_i is typed as answering a Bignum: then the
+   answer is carried, not truncated, in a Bignum slot for the strict form
+   (which never answers nil; a Bignum slot holds the small values too) and
+   in a boxed slot for the `exception: false` form, whose nil a Bignum slot
+   cannot hold. A method whose answer the analysis cannot pin keeps the
+   Integer slot in the strict form, where a Bignum answer is a loud
+   RangeError at run time: typing it as a Bignum would refuse to build every
+   site that needs an Integer, a Range bound for one. The `exception: false`
+   form of such a call is boxed already, so it carries the answer. */
+static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
+  static const char *const names[] = { "to_int", "to_i" };
+  TyKind at = infer_type(c, arg);
+  if (!ty_is_object(at)) return TY_INT;
+  for (int k = 0; k < 2; k++) {
+    int mi = comp_method_in_chain(c, ty_object_class(at), names[k], NULL);
+    /* the same admission as conv_bridge_callee's: a method with parameters
+       or one that yields has no bridge row, so it must not type the slot */
+    if (mi < 0 || c->scopes[mi].nparams != 0 || c->scopes[mi].yields) continue;
+    if (c->scopes[mi].ret == TY_BIGINT) return noraise ? TY_POLY : TY_BIGINT;
+    if (c->scopes[mi].ret == TY_POLY && noraise) return TY_POLY;
+  }
+  return TY_INT;
+}
+
 static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* a yielder push (`y << v` inside an Enumerator.new generator) lowers to a
@@ -3718,7 +3760,8 @@ else {
                 ((krt == TY_NIL || krt == TY_POLY || krt == TY_UNKNOWN) &&
                  comp_method_index(c, name) < 0);
     if (kdisp) {
-      if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) return TY_INT;
+      if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2))
+        return kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv));
       if (kw_argc == 1) {
         if (sp_streq(name, "Float"))    return TY_FLOAT;
         if (sp_streq(name, "String"))   return TY_STRING;
@@ -3747,7 +3790,8 @@ else {
     if (mi < 0) mi = comp_included_method_index(c, name);
     if (mi >= 0) return method_call_ret(c, mi, id);
     /* Kernel conversions */
-    if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) return TY_INT;
+    if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2))
+        return kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv));
     if (sp_streq(name, "Float") && kw_argc == 1) return TY_FLOAT;
     if (sp_streq(name, "String") && argc == 1) return TY_STRING;
     if (sp_streq(name, "Array") && argc == 1) {
