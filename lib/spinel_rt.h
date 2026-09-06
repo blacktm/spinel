@@ -9843,6 +9843,7 @@ const char *sp_dir_pwd(void);
 sp_int sp_dir_mkdir(const char *path);
 sp_int sp_dir_rmdir(const char *path);
 sp_int sp_dir_chdir(const char *path);
+sp_int sp_dir_chdir0(const char *path);  /* the block form's label */
 const char *sp_dir_home(void);
 /* Wildcard match for a single path component: `*` (any run, no `/`),
    `?` (one char). Recursive over `*`; adequate for the common

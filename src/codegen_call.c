@@ -8439,6 +8439,48 @@ static int hoist_boxed_rooted(Compiler *c, int node) {
   return t;
 }
 
+/* Root a g_pre temp on a line of its own, when its type has anything to
+   root: a heap pointer or a box that may carry one. */
+static void emit_pre_root(Compiler *c, TyKind t, int tmp) {
+  if (!needs_root(t) || comp_ty_value_obj(c, t)) return;
+  emit_indent(g_pre, g_indent);
+  emit_gc_root_tmp(c, t, tmp, g_pre);
+  buf_puts(g_pre, "\n");
+}
+
+/* The text an object comparison passes as `self` to the user method it
+   dispatches to (the caller frees it). A local, an instance variable or self
+   is read in place; any other receiver is evaluated once into a g_pre temp,
+   and that temp is rooted. The operand is evaluated after the receiver and
+   commonly allocates -- `Set[1] == Set[2]` builds the right Set after the
+   left one is bound -- and a fresh receiver held only by the temp was
+   collected under that allocation, its pool slot handed to the operand, so
+   the comparison read the operand against itself: `==` answered true, `<`
+   false. The general operand-order pass declines a call whose arm hoists
+   into g_pre, which is what these emitters do, so they bound theirs bare --
+   and into fixed buffers that cut a long in-place name short. */
+static Buf emit_cmp_self(Compiler *c, int recv, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  const char *rty = nt_type(nt, recv);
+  if (rty && (sp_streq(rty, "LocalVariableReadNode") ||
+              sp_streq(rty, "InstanceVariableReadNode") ||
+              sp_streq(rty, "SelfNode"))) {
+    Buf rb = expr_buf(c, recv);
+    if (!rb.p) buf_puts(&rb, "");
+    return rb;
+  }
+  int t = ++g_tmp;
+  Buf rb = expr_buf(c, recv);
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, rt, g_pre);
+  buf_printf(g_pre, " _t%d = %s;\n", t, rb.p ? rb.p : "");
+  free(rb.p);
+  emit_pre_root(c, rt, t);
+  Buf out; memset(&out, 0, sizeof out);
+  buf_printf(&out, "_t%d", t);
+  return out;
+}
+
 static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -8799,25 +8841,9 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
       int ecid = ty_object_class(rt);
       int emi = comp_method_in_chain(c, ecid, name, NULL);
       if (emi >= 0) {
-        char selfptr[320];
-        const char *rty2 = nt_type(nt, recv);
-        if (rty2 && (sp_streq(rty2, "LocalVariableReadNode") ||
-                     sp_streq(rty2, "InstanceVariableReadNode") ||
-                     sp_streq(rty2, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t2 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t2, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfptr, sizeof selfptr, "_t%d", t2);
-        }
-        emit_dispatch(c, ecid, name, selfptr, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
+        Buf selfb = emit_cmp_self(c, recv, rt);
+        emit_dispatch(c, ecid, name, selfb.p, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);
+        free(selfb.p);
         return 1;
       }
       /* no direct == : use <=> == 0 when the class supports Comparable */
@@ -8833,54 +8859,22 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "(%ssp_poly_cmp_eq(_t%d, _t%d))", eq ? "" : "!", ta, tb2);
           return 1;
         }
-        char selfptr[320];
-        const char *rty2 = nt_type(nt, recv);
-        if (rty2 && (sp_streq(rty2, "LocalVariableReadNode") ||
-                     sp_streq(rty2, "InstanceVariableReadNode") ||
-                     sp_streq(rty2, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t3 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t3, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfptr, sizeof selfptr, "_t%d", t3);
-        }
+        Buf selfb = emit_cmp_self(c, recv, rt);
         buf_puts(b, "(");
-        emit_dispatch(c, ecid, "<=>", selfptr, nt_ref(nt, id, "arguments"), -1, b);
+        emit_dispatch(c, ecid, "<=>", selfb.p, nt_ref(nt, id, "arguments"), -1, b);
         buf_printf(b, " %s 0)", eq ? "==" : "!=");
+        free(selfb.p);
         return 1;
       }
       /* obj.!= synthesized from obj.== when != is not explicitly defined */
       if (!eq) {
         int eqm2 = comp_method_in_chain(c, ecid, "==", NULL);
         if (eqm2 >= 0) {
-          char selfptr2[64];
-          const char *rty3 = nt_type(nt, recv);
-          if (rty3 && (sp_streq(rty3, "LocalVariableReadNode") ||
-                       sp_streq(rty3, "InstanceVariableReadNode") ||
-                       sp_streq(rty3, "SelfNode"))) {
-            Buf rb = expr_buf(c, recv);
-            snprintf(selfptr2, sizeof selfptr2, "%s", rb.p ? rb.p : "");
-            free(rb.p);
-          }
-          else {
-            int t4 = ++g_tmp;
-            Buf rb = expr_buf(c, recv);
-            emit_indent(g_pre, g_indent);
-            emit_ctype(c, rt, g_pre);
-            buf_printf(g_pre, " _t%d = %s;\n", t4, rb.p ? rb.p : "");
-            free(rb.p);
-            snprintf(selfptr2, sizeof selfptr2, "_t%d", t4);
-          }
+          Buf selfb = emit_cmp_self(c, recv, rt);
           buf_puts(b, "(!");
-          emit_dispatch(c, ecid, "==", selfptr2, nt_ref(nt, id, "arguments"), -1, b);
+          emit_dispatch(c, ecid, "==", selfb.p, nt_ref(nt, id, "arguments"), -1, b);
           buf_puts(b, ")");
+          free(selfb.p);
           return 1;
         }
       }
@@ -23954,10 +23948,22 @@ else {
       buf_printf(b, "; !sp_file_directory(_t%d) && sp_file_exist(_t%d); })", tfp, tfp); return;
     }
     if ((sp_streq(name, "delete") || sp_streq(name, "unlink")) && argc >= 1) {
+      if (argc == 1) {
+        buf_puts(b, "({ sp_file_delete("); emit_path_expr(c, argv[0], b);
+        buf_puts(b, "); (sp_int)1; })"); return;
+      }
+      /* several paths: every one is evaluated, rooted and checked for nil
+         before the first unlink, as CRuby converts them all first -- now
+         that a failing path raises, it must not skip a later argument's
+         effects, and a nil among them must not cost the earlier files */
+      int td = ++g_tmp;
       buf_puts(b, "({ ");
       for (int k = 0; k < argc; k++) {
-        buf_puts(b, "sp_file_delete("); emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
+        buf_printf(b, "const char *_del_%d_%d = ", td, k); emit_path_expr(c, argv[k], b);
+        buf_printf(b, "; SP_GC_ROOT_STR(_del_%d_%d); ", td, k);
       }
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_path_check(_del_%d_%d); ", td, k);
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_delete(_del_%d_%d); ", td, k);
       buf_printf(b, "(sp_int)%d; })", argc); return;
     }
     if (sp_streq(name, "rename") && argc == 2) {
@@ -24231,7 +24237,12 @@ else {
         buf_printf(b, "); sp_dir_mkdir(_t%d); })", tp);
         return;
       }
-      buf_printf(b, "sp_dir_%s(", name); emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return;
+      /* the block form's switch and restore, spliced in by desugar_dir_surface,
+         carry CRuby's label for that form (dir_chdir0, not chdir_path) */
+      if (sp_streq(name, "chdir") && nt_str(c->nt, id, "chdir_label"))
+        buf_puts(b, "sp_dir_chdir0(");
+      else buf_printf(b, "sp_dir_%s(", name);
+      emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return;
     }
   }
 
@@ -27129,25 +27140,9 @@ else {
     if (ty_is_object(rt)) {
       int cid5 = ty_object_class(rt);
       if (comp_method_in_chain(c, cid5, name, NULL) >= 0) {
-        char selfp5[64];
-        const char *rty5 = nt_type(nt, recv);
-        if (rty5 && (sp_streq(rty5, "LocalVariableReadNode") ||
-                     sp_streq(rty5, "InstanceVariableReadNode") ||
-                     sp_streq(rty5, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfp5, sizeof selfp5, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t5 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t5, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfp5, sizeof selfp5, "_t%d", t5);
-        }
-        emit_dispatch(c, cid5, name, selfp5, nt_ref(nt, id, "arguments"), -1, b);
+        Buf selfb = emit_cmp_self(c, recv, rt);
+        emit_dispatch(c, cid5, name, selfb.p, nt_ref(nt, id, "arguments"), -1, b);
+        free(selfb.p);
         return;
       }
     }
@@ -27165,27 +27160,11 @@ else {
           buf_printf(b, "(sp_poly_cmp_ck(_t%d, _t%d) %s 0)", ta, tb2, name);
           return;
         }
-        char selfptr[320];
-        const char *rtyp = nt_type(nt, recv);
-        if (rtyp && (sp_streq(rtyp, "LocalVariableReadNode") ||
-                     sp_streq(rtyp, "InstanceVariableReadNode") ||
-                     sp_streq(rtyp, "SelfNode"))) {
-          Buf rb = expr_buf(c, recv);
-          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
-          free(rb.p);
-        }
-        else {
-          int t4 = ++g_tmp;
-          Buf rb = expr_buf(c, recv);
-          emit_indent(g_pre, g_indent);
-          emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = %s;\n", t4, rb.p ? rb.p : "");
-          free(rb.p);
-          snprintf(selfptr, sizeof selfptr, "_t%d", t4);
-        }
+        Buf selfb = emit_cmp_self(c, recv, rt);
         buf_puts(b, "(");
-        emit_dispatch(c, cid4, "<=>", selfptr, nt_ref(nt, id, "arguments"), -1, b);
+        emit_dispatch(c, cid4, "<=>", selfb.p, nt_ref(nt, id, "arguments"), -1, b);
         buf_printf(b, " %s 0)", name);
+        free(selfb.p);
         return;
       }
     }
@@ -27641,23 +27620,29 @@ else {
         /* Compute each RHS into a local buffer first: emit_expr may itself
            hoist temps into g_pre (e.g. an arg `Temp.new(5)` roots its boxed
            int there). Doing that before writing our own `T _tN = ` prefix
-           keeps the nested hoist from splitting our declaration line. */
+           keeps the nested hoist from splitting our declaration line.
+           Each temp is rooted as it is bound: the bounds are evaluated after
+           the receiver and the second after the first, and any of the three
+           may be a fresh object whose only reference is its temp. */
         Buf rb = expr_buf(c, recv);
         emit_indent(g_pre, g_indent);
         emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", ts);
         buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+        emit_pre_root(c, rt, ts);
         Buf lb; memset(&lb, 0, sizeof lb);
         if (arg_poly) emit_boxed(c, argv[0], &lb); else { Buf t = expr_buf(c, argv[0]); lb = t; }
         emit_indent(g_pre, g_indent);
         if (arg_poly) buf_puts(g_pre, "sp_RbVal"); else emit_ctype(c, rt, g_pre);
         buf_printf(g_pre, " _t%d = ", tlo);
         buf_puts(g_pre, lb.p ? lb.p : ""); buf_puts(g_pre, ";\n"); free(lb.p);
+        emit_pre_root(c, arg_poly ? TY_POLY : rt, tlo);
         Buf hb; memset(&hb, 0, sizeof hb);
         if (arg_poly) emit_boxed(c, argv[1], &hb); else { Buf t = expr_buf(c, argv[1]); hb = t; }
         emit_indent(g_pre, g_indent);
         if (arg_poly) buf_puts(g_pre, "sp_RbVal"); else emit_ctype(c, rt, g_pre);
         buf_printf(g_pre, " _t%d = ", thi);
         buf_puts(g_pre, hb.p ? hb.p : ""); buf_puts(g_pre, ";\n"); free(hb.p);
+        emit_pre_root(c, arg_poly ? TY_POLY : rt, thi);
         buf_printf(b, "(sp_%s_%s((sp_%s *)_t%d, _t%d) >= 0 && sp_%s_%s((sp_%s *)_t%d, _t%d) <= 0)",
                    cname, mc("<=>"), cname, ts, tlo,
                    cname, mc("<=>"), cname, ts, thi);
