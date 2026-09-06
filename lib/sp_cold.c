@@ -1901,6 +1901,7 @@ sp_File *sp_file_stat_handle(const char *path) {SP_GC_ROOT_STR(path);
     sp_raise_cls("Errno::ENOENT",
                  sp_sprintf("No such file or directory @ rb_file_s_stat - %s", path ? path : ""));
   sp_File *f = (sp_File *)sp_gc_alloc(sizeof(sp_File), NULL, sp_file_stat_scan);
+  SP_GC_ROOT(f);   /* the sprintf below allocates, and nothing else holds the fresh handle */
   f->fp = NULL;
   f->path = sp_sprintf("%s", path ? path : "");
   f->mode = (&("\xff" "stat")[1]);
@@ -1916,6 +1917,7 @@ sp_File *sp_file_lstat_handle(const char *path) {SP_GC_ROOT_STR(path);
     sp_raise_cls("Errno::ENOENT",
                  sp_sprintf("No such file or directory @ rb_file_s_lstat - %s", path ? path : ""));
   sp_File *f = (sp_File *)sp_gc_alloc(sizeof(sp_File), NULL, sp_file_stat_scan);
+  SP_GC_ROOT(f);
   f->fp = NULL;
   f->path = sp_sprintf("%s", path ? path : "");
   f->mode = (&("\xff" "lstat")[1]);
