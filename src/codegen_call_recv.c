@@ -13442,6 +13442,15 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
       else buf_printf(&test, "_u%d.v.p == (void *)_t%d)", t, t);
     }
   }
+  else if (at == TY_NIL && kind == 1) {
+    /* A pointer-backed handle IS nil when it is NULL in this backend: that is
+       what `nil?` and the dedicated `handle != nil` arm both answer. `== nil`
+       reached the other-kind arm below and folded to false, so a slot holding
+       nil answered false to `== nil` and false to `!= nil` at the same time
+       (an empty pipe's `wait_readable(0)`). */
+    buf_printf(b, "(void)(%s); ", a);
+    buf_printf(&test, "(_t%d == NULL)", t);
+  }
   else {
     /* a value of another static kind is never the same object, nor equal */
     buf_printf(b, "(void)(%s); ", a);
