@@ -380,19 +380,55 @@ class Pathname
     self
   end
 
-  # rm -r. Files and symlinks are unlinked; directories are emptied first.
+  # rm -rf, as CRuby's FileUtils.rm_rf: files and symlinks are unlinked,
+  # directories are emptied first, and a path that is not there or an entry
+  # that cannot be removed is skipped -- the answer is self either way. Like
+  # find, this walks against an explicit stack rather than recursing, so a
+  # deep tree costs one rescue frame at a time, not one per level; the
+  # entries are listed parent-first and removed in reverse, which puts every
+  # child before its directory.
   def rmtree
-    if directory? && !symlink?
-      children.each { |child| child.rmtree }
-      Dir.rmdir(@path)
-    else
-      File.delete(@path)
+    stack = [self]
+    order = []
+    until stack.empty?
+      cur = stack.pop
+      order.push(cur)
+      next unless cur.directory? && !cur.symlink?
+
+      begin
+        cur.children.each { |k| stack.push(k) }
+      rescue SystemCallError
+        # a directory that cannot be listed is left as it is, like rm -rf
+      end
+    end
+    i = order.length - 1
+    while i >= 0
+      order[i].rmtree_entry
+      i -= 1
     end
     self
   end
 
+  # One entry of rmtree: a directory is emptied by then, so rmdir; anything
+  # else, a symlink to a directory included, is unlinked. A failure is
+  # skipped, as rm -rf skips it; the answer is not used. Protected, so the
+  # public surface stays CRuby's.
+  protected def rmtree_entry
+    if directory? && !symlink?
+      Dir.rmdir(@path)
+    else
+      File.delete(@path)
+    end
+  rescue SystemCallError
+    nil
+  end
+
+  # CRuby's order: the directory unlink first, the file unlink on ENOTDIR, so
+  # a missing path reports dir_s_rmdir there and here alike.
   def delete
-    directory? ? Dir.rmdir(@path) : File.delete(@path)
+    Dir.unlink(@path)
+  rescue Errno::ENOTDIR
+    File.unlink(@path)
   end
 
   def unlink

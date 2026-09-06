@@ -23948,10 +23948,22 @@ else {
       buf_printf(b, "; !sp_file_directory(_t%d) && sp_file_exist(_t%d); })", tfp, tfp); return;
     }
     if ((sp_streq(name, "delete") || sp_streq(name, "unlink")) && argc >= 1) {
+      if (argc == 1) {
+        buf_puts(b, "({ sp_file_delete("); emit_path_expr(c, argv[0], b);
+        buf_puts(b, "); (sp_int)1; })"); return;
+      }
+      /* several paths: every one is evaluated, rooted and checked for nil
+         before the first unlink, as CRuby converts them all first -- now
+         that a failing path raises, it must not skip a later argument's
+         effects, and a nil among them must not cost the earlier files */
+      int td = ++g_tmp;
       buf_puts(b, "({ ");
       for (int k = 0; k < argc; k++) {
-        buf_puts(b, "sp_file_delete("); emit_path_expr(c, argv[k], b); buf_puts(b, "); ");
+        buf_printf(b, "const char *_del_%d_%d = ", td, k); emit_path_expr(c, argv[k], b);
+        buf_printf(b, "; SP_GC_ROOT_STR(_del_%d_%d); ", td, k);
       }
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_path_check(_del_%d_%d); ", td, k);
+      for (int k = 0; k < argc; k++) buf_printf(b, "sp_file_delete(_del_%d_%d); ", td, k);
       buf_printf(b, "(sp_int)%d; })", argc); return;
     }
     if (sp_streq(name, "rename") && argc == 2) {
@@ -24225,7 +24237,12 @@ else {
         buf_printf(b, "); sp_dir_mkdir(_t%d); })", tp);
         return;
       }
-      buf_printf(b, "sp_dir_%s(", name); emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return;
+      /* the block form's switch and restore, spliced in by desugar_dir_surface,
+         carry CRuby's label for that form (dir_chdir0, not chdir_path) */
+      if (sp_streq(name, "chdir") && nt_str(c->nt, id, "chdir_label"))
+        buf_puts(b, "sp_dir_chdir0(");
+      else buf_printf(b, "sp_dir_%s(", name);
+      emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return;
     }
   }
 

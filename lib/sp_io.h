@@ -188,6 +188,17 @@ sp_int sp_file_utime(double atime, double mtime, const char *path);
 const char *sp_file_readlink(const char *path);  /* defined in sp_cold.c */
 void sp_file_delete(const char *path);
 void sp_file_rename(const char *from, const char *to);
+/* A filesystem call that failed raises the Errno:: class CRuby raises for the
+   errno, with CRuby's message shape "<strerror> @ <op> - <path>". op is the
+   label after the @: for the File and Dir class methods it is CRuby's own
+   entry-point name (dir_s_mkdir, apply2files, rb_file_s_rename ...), so a
+   program matching on the text reads the same words; the socket calls and
+   the older File sites (readlink, symlink, mkfifo ...) pass the syscall's
+   name. An errno with no class here raises SystemCallError. */
+SP_NORETURN void sp_file_raise_errno(const char *op, const char *path);
+/* A nil path (a NULL string at run time) is CRuby's TypeError, raised before
+   any syscall sees it; the multi-path File.delete checks every path first. */
+void sp_file_path_check(const char *path);
 
 #include <dirent.h>
 /* Dir handle (Dir.open / Dir.each_child ...): ops live in lib/sp_cold.c. */
