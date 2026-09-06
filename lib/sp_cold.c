@@ -960,8 +960,21 @@ const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *v
     return s;
   }
   if (from + n > len) n = len - from;
-  return sp_str_concat(sp_str_concat(sp_str_sub_range(s, 0, from), val),
-                       sp_str_sub_range(s, from + n, len - from - n));
+  /* Root each piece as soon as it exists. As one nested expression, whichever
+     argument C evaluates first sits in an unrooted temporary while the other
+     one allocates -- sp_str_sub_range and sp_str_concat both do -- since
+     sp_str_concat roots its parameters only once entered, and by then both are
+     already computed. A collection in that window frees the piece still in
+     flight, and the splice reads it back: the result takes its length from
+     recycled memory, or faults where the allocator had already returned the
+     span to the OS. */
+  const char *head = sp_str_sub_range(s, 0, from);
+  SP_GC_ROOT_STR(head);
+  const char *tail = sp_str_sub_range(s, from + n, len - from - n);
+  SP_GC_ROOT_STR(tail);
+  const char *pre = sp_str_concat(head, val);
+  SP_GC_ROOT_STR(pre);
+  return sp_str_concat(pre, tail);
 }
 
 sp_FloatArray *sp_frange_step(sp_FloatRange r, sp_float st) {
