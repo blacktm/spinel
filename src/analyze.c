@@ -10419,6 +10419,94 @@ static int promote_shared_stored_strings(Compiler *c) {
   return changed;
 }
 
+/* A parameter RETAINED in a shared-handle ivar (`def initialize(b) @bt = b end`,
+   then `@bt << "x"` somewhere) has to arrive as the handle. The byref machinery
+   above only covers a callee that mutates the parameter ITSELF; a callee that
+   merely stores it and mutates it later, through the ivar, kept the caller's
+   string as a value and the two holders drifted apart -- which
+   docs/limitations.md promises they do not (#4363). Marking the parameter is
+   all this rule does; convert_byref_handle_params then pulls every call site's
+   argument into the shared set, exactly as it does for a byref parameter that
+   has just become a handle. */
+static int promote_params_stored_in_shared_ivars(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int w = 0; w < nt->count; w++) {
+    if (nt_kind(nt, w) != NK_InstanceVariableWriteNode) continue;
+    int wv = nt_ref(nt, w, "value");
+    if (wv < 0 || nt_kind(nt, wv) != NK_LocalVariableReadNode) continue;
+    const char *ivname = nt_str(nt, w, "name");
+    const char *lname = nt_str(nt, wv, "name");
+    if (!ivname || !lname) continue;
+    Scope *ms = comp_scope_of(c, wv);
+    if (!ms) continue;
+    LocalVar *pp = scope_local(ms, lname);
+    /* a parameter only: a plain local written from an ivar is the alias rule
+       above, and a block parameter binds per iteration rather than per call */
+    if (!pp || !pp->is_param || pp->is_block_param) continue;
+    if (an_param_idx(ms, lname) < 0) continue;
+    int icid = an_ivar_owner(c, w);
+    if (icid < 0) continue;
+    /* the slot has to be one that is mutated in place; without that there is
+       no aliasing to preserve and the value representation stays cheaper. */
+    /* the slot's evidence has to be an UNAMBIGUOUS in-place mutator. Kind -1
+       is `[]=`, `insert`, `slice!`, `setbyte` and the bang forms, which name
+       Array's and Hash's methods as much as String's; those slots stay on the
+       value representation here because the handle's index-assign codegen is
+       not written yet (#4363 keeps that half). */
+    if (strbuf_ivar_mut_kind(c, icid, ivname) != 1) continue;
+    if (pp->type != TY_UNKNOWN && pp->type != TY_STRING &&
+        pp->type != TY_STRBUF && pp->type != TY_POLY) continue;
+    if (strbuf_promote_ivar(c, icid, ivname)) changed = 1;
+    { ClassInfo *ci2 = &c->classes[icid];
+      int iv2 = comp_ivar_index(ci2, ivname);
+      if (iv2 < 0 || !ci2->ivar_str_shared[iv2]) continue; }
+    if (pp->type != TY_POLY && (pp->type != TY_STRBUF || !pp->str_shared))
+      {  pp->type = TY_STRBUF; pp->str_shared = 1; pp->byref_out = 0; changed = 1;  }
+  }
+  return changed;
+}
+
+/* Does CallNode `u` statically call scope `mi2`? The byref machinery resolves
+   a callee by program-unique name, which is exactly what a constructor is not:
+   every class has an `initialize`, so the reported shape -- a string handed to
+   `K.new` and retained in an ivar -- had no call site the propagation could
+   find (#4363). `K.new(...)` resolves through the constant receiver instead.
+   Guarded on the whole program rather than per class: if any `new` in the
+   program goes through a receiver that is not a constant, some class is
+   instantiated by a class object we cannot pin, and a parameter whose C type
+   we are about to change could be reached through it. */
+static int an_new_recv_all_constant(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  static int cached = -1, cached_count = -1;
+  if (cached >= 0 && cached_count == nt->count) return cached;
+  int ok = 1;
+  for (int u = 0; u < nt->count && ok; u++) {
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    const char *un = nt_str(nt, u, "name");
+    if (!un || !sp_streq(un, "new")) continue;
+    int rc = nt_ref(nt, u, "receiver");
+    if (rc < 0 || nt_kind(nt, rc) != NK_ConstantReadNode) ok = 0;
+  }
+  cached = ok; cached_count = nt->count;
+  return ok;
+}
+static int an_call_targets_scope(Compiler *c, int u, int mi2, Scope *m2) {
+  const NodeTable *nt = c->nt;
+  const char *un = nt_str(nt, u, "name");
+  if (!un) return 0;
+  if (sp_streq(un, m2->name) && an_unique_scope_by_name(c, un) == mi2) return 1;
+  if (!sp_streq(un, "new") || !sp_streq(m2->name, "initialize")) return 0;
+  if (m2->class_id < 0 || m2->is_cmethod) return 0;
+  if (!an_new_recv_all_constant(c)) return 0;
+  int rc = nt_ref(nt, u, "receiver");
+  if (rc < 0 || nt_kind(nt, rc) != NK_ConstantReadNode) return 0;
+  const char *cn = nt_str(nt, rc, "name");
+  int cid = cn ? comp_class_index(c, cn) : -1;
+  if (cid < 0) return 0;
+  return comp_method_in_class(c, cid, "initialize") == mi2;
+}
+
 static int convert_byref_handle_params(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -10442,9 +10530,7 @@ static int convert_byref_handle_params(Compiler *c) {
       int saw_handle = is_handle;
       for (int u = 0; u < nt->count; u++) {
         if (nt_kind(nt, u) != NK_CallNode) continue;
-        const char *un = nt_str(nt, u, "name");
-        if (!un || !sp_streq(un, m2->name)) continue;
-        if (an_unique_scope_by_name(c, un) != mi2) continue;
+        if (!an_call_targets_scope(c, u, mi2, m2)) continue;
         int argsN = nt_ref(nt, u, "arguments");
         int uargc = 0;
         const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
@@ -10477,9 +10563,7 @@ static int convert_byref_handle_params(Compiler *c) {
       /* pull the remaining plain-local args into the shared set */
       for (int u = 0; u < nt->count; u++) {
         if (nt_kind(nt, u) != NK_CallNode) continue;
-        const char *un = nt_str(nt, u, "name");
-        if (!un || !sp_streq(un, m2->name)) continue;
-        if (an_unique_scope_by_name(c, un) != mi2) continue;
+        if (!an_call_targets_scope(c, u, mi2, m2)) continue;
         int argsN = nt_ref(nt, u, "arguments");
         int uargc = 0;
         const int *uargv = argsN >= 0 ? nt_arr(nt, argsN, "arguments", &uargc) : NULL;
@@ -14197,8 +14281,15 @@ void analyze_program(Compiler *c) {
      (a STRBUF local is an sp_String*, not the const char* slot byref needs). */
   compute_byref_out_params(c);
   /* handle args cannot ride byref's const char** slot: convert such params
-     to the handle representation, cascading through transitive passes */
-  while (convert_byref_handle_params(c)) {}
+     to the handle representation, cascading through transitive passes. A
+     parameter RETAINED in a shared-handle ivar demands the handle for the
+     same reason and feeds the same propagation, so the two run to a joint
+     fixpoint rather than one after the other (#4363). */
+  for (;;) {
+    int ch = promote_params_stored_in_shared_ivars(c);
+    if (convert_byref_handle_params(c)) ch = 1;
+    if (!ch) break;
+  }
 
   /* Promote `<<`-appended string locals to mutable strings (TY_STRBUF) so the
      append is amortized O(1) instead of an O(n) copy-concat (which makes a
