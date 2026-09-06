@@ -7974,15 +7974,26 @@ else {
     /* `$g = Hash.new` (no args/block): an empty hash whose typed slot needs a
        fresh `sp_XHash_new()`, not the boxed sp_RbVal emit_expr would produce for
        the untyped Hash.new call (#3205). */
+    int v_hash_dflt = -1;   /* `$g = Hash.new(default)`: the default's node */
     if (vty && sp_streq(vty, "CallNode") && ty_is_hash(lv->type) &&
         nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "new") &&
         nt_ref(nt, v, "block") < 0) {
       int hr = nt_ref(nt, v, "receiver");
       const char *hrn = hr >= 0 && nt_type(nt, hr) && sp_streq(nt_type(nt, hr), "ConstantReadNode")
                         ? nt_str(nt, hr, "name") : NULL;
-      int ha = nt_ref(nt, v, "arguments"); int han = 0;
-      if (ha >= 0) nt_arr(nt, v, "arguments", &han);
-      if (hrn && sp_streq(hrn, "Hash") && han == 0) v_empty_hash = 1;
+      if (hrn && sp_streq(hrn, "Hash")) {
+        /* the count lives on the ArgumentsNode; asking the CallNode for it
+           answered 0 for every form, which is why `$g = Hash.new(5)` on a
+           typed slot silently emitted the default-less constructor */
+        int ha = nt_ref(nt, v, "arguments"); int han = 0;
+        if (ha >= 0) nt_arr(nt, ha, "arguments", &han);
+        if (han == 0) v_empty_hash = 1;
+        /* `Hash.new(default)` on a typed slot: the same fresh variant, carrying
+           the default, as the local write emits (emit_assign). Before, only the
+           argument-less form took this arm and the default form fell to the
+           boxed poly emit, which the typed slot could not hold. */
+        else if (hash_new_default_arg(c, v) >= 0) { v_empty_hash = 1; v_hash_dflt = hash_new_default_arg(c, v); }
+      }
     }
     if (vty && sp_streq(vty, "NilNode"))
       /* Every nullable kind has a sentinel that reads back as nil, and this
@@ -8006,7 +8017,13 @@ else {
     }
     else if (v_empty_hash && ty_is_hash(lv->type)) {
       const char *hcn = ty_hash_cname(lv->type);
-      if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
+      if (hcn && v_hash_dflt >= 0) {
+        buf_printf(b, "sp_%sHash_new_with_default(", hcn);
+        if (ty_hash_val(lv->type) == TY_POLY) emit_boxed(c, v_hash_dflt, b);
+        else emit_expr(c, v_hash_dflt, b);
+        buf_puts(b, ")");
+      }
+      else if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
       else emit_expr(c, v, b);
     }
     /* a poly-typed global/const slot boxes a scalar value (`$g = 42` where $g

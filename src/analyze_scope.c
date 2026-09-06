@@ -2956,25 +2956,43 @@ int ffi_find_reader(Compiler *c, const char *mod, const char *name) {
    index-writes, defaulting to the widest hash when they are inconclusive so the
    global is always declarable (#3205). Returns UNKNOWN if the global has no
    `[]=` usage (leave the type alone). */
-static TyKind gvar_hash_variant_from_writes(Compiler *c, const char *gname) {
+/* The hash variant a global's or a constant's own `[]=` writes (and read-
+   modify-write forms) imply for an empty-producer RHS, `rk` being the
+   receiver node kind that names the slot and `sname` its name as the read
+   node spells it (without the `$` for a global). */
+static TyKind slot_hash_variant_from_writes(Compiler *c, NodeKind rk, const char *sname, int dflt) {
   const NodeTable *nt = c->nt;
   TyKind kt = TY_UNKNOWN, vt = TY_UNKNOWN;
   int saw = 0;
   for (int w = 0; w < nt->count; w++) {
-    if (nt_kind(nt, w) != NK_CallNode) continue;
-    const char *wn = nt_str(nt, w, "name");
-    if (!wn || (!sp_streq(wn, "[]=") && !sp_streq(wn, "store"))) continue;
+    NodeKind wk = nt_kind(nt, w);
+    /* `$g[k] += v`, `||=` and `&&=` key the same slot `[]=` does and count for
+       the KEY, as the local scan counts them (#3397). Their value lives in a
+       `value` ref rather than a second argument and is a read-modify-write of
+       what the hash already holds, so it is not taken for the value type. */
+    int is_owr = (wk == NK_IndexOperatorWriteNode || wk == NK_IndexOrWriteNode ||
+                  wk == NK_IndexAndWriteNode);
+    if (wk != NK_CallNode && !is_owr) continue;
+    if (!is_owr) {
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || (!sp_streq(wn, "[]=") && !sp_streq(wn, "store"))) continue;
+    }
     int wr = nt_ref(nt, w, "receiver");
-    if (wr < 0 || nt_kind(nt, wr) != NK_GlobalVariableReadNode) continue;
+    if (wr < 0 || nt_kind(nt, wr) != rk) continue;
     const char *rn = nt_str(nt, wr, "name");
-    if (!rn || !sp_streq(rn + 1, gname)) continue;
+    if (!rn || !sp_streq(rk == NK_GlobalVariableReadNode ? rn + 1 : rn, sname)) continue;
     int wa = nt_ref(nt, w, "arguments");
     int wan = 0; const int *wav = wa >= 0 ? nt_arr(nt, wa, "arguments", &wan) : NULL;
-    if (wan < 2) continue;
+    if (wan < (is_owr ? 1 : 2)) continue;
     kt = ty_unify(kt, infer_type(c, wav[0]));
-    vt = ty_unify(vt, infer_type(c, wav[1]));
+    if (!is_owr) vt = ty_unify(vt, infer_type(c, wav[1]));
     saw = 1;
   }
+  /* The default is a value the hash answers, so it is part of the value type:
+     `Hash.new(0)` filled only by `+=` has no `[]=` to learn Integer from, and a
+     default of another kind than the writes widens the value to poly, where
+     the boxed default is carried, rather than being cast into an Integer slot. */
+  if (dflt >= 0) { vt = ty_unify(vt, infer_type(c, dflt)); saw = 1; }
   if (!saw) return TY_UNKNOWN;
   TyKind want = (kt == TY_SYMBOL) ? TY_SYM_POLY_HASH
               : (kt == TY_UNKNOWN) ? TY_POLY_POLY_HASH : ty_hash_of(kt, vt);
@@ -3000,8 +3018,21 @@ static int node_is_empty_hash_producer(Compiler *c, int node) {
     const char *rn = nt_str(nt, r, "name");
     if (!rn || !sp_streq(rn, "Hash")) return 0;
     int a = nt_ref(nt, node, "arguments");
-    int an = 0; if (a >= 0) nt_arr(nt, a, "arguments", &an);
-    return an == 0 && nt_ref(nt, node, "block") < 0;
+    int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (nt_ref(nt, node, "block") >= 0) return 0;
+    if (an == 0) return 1;
+    /* `Hash.new(default)` starts just as empty as `Hash.new`: the argument is
+       what a miss answers, not a member, so it decides no key type. Requiring
+       no argument left a global assigned one on the poly slot, where every
+       call that read it typed as nil and its VALUE was discarded -- `$g =
+       Hash.new(0); $g["b"] = 1; $g["b"]` printed nil -- and a constant
+       assigned one did not build at all. A keyword-hash argument is not a
+       default (it is `Hash.new(capacity: n)`), as hash_new_default_arg says. */
+    if (an == 1 && av) {
+      const char *aty = nt_type(nt, av[0]);
+      return !(aty && sp_streq(aty, "KeywordHashNode"));
+    }
+    return 0;
   }
   return 0;
 }
@@ -3023,7 +3054,7 @@ int infer_global_const_types(Compiler *c) {
       /* an empty `{}`/`Hash.new` RHS leaves vt UNKNOWN (no element type); adopt
          the variant implied by the global's `[]=` writes so it gets a slot. */
       if (!ty_is_hash(vt) && rn && node_is_empty_hash_producer(c, vnode)) {
-        TyKind hv = gvar_hash_variant_from_writes(c, rn);
+        TyKind hv = slot_hash_variant_from_writes(c, NK_GlobalVariableReadNode, rn, hash_new_default_arg(c, vnode));
         if (ty_is_hash(hv)) vt = hv;
       }
       /* an empty `[]` RHS leaves vt UNKNOWN (no element type); a global still
@@ -3058,7 +3089,15 @@ int infer_global_const_types(Compiler *c) {
     else if (sp_streq(ty, "ConstantWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
       if (nm) lv = comp_const(c, nm);
-      vt = infer_type(c, nt_ref(nt, id, "value"));
+      int vnode = nt_ref(nt, id, "value");
+      vt = infer_type(c, vnode);
+      /* `COUNTS = Hash.new(0)`: the same empty-producer rule the global arm
+         applies. Without it the RHS typed as nothing, the `[]=` writes made
+         the constant an int ARRAY, and the C did not build. */
+      if (!ty_is_hash(vt) && nm && node_is_empty_hash_producer(c, vnode)) {
+        TyKind hv = slot_hash_variant_from_writes(c, NK_ConstantReadNode, nm, hash_new_default_arg(c, vnode));
+        if (ty_is_hash(hv)) vt = hv;
+      }
     }
     else if (sp_streq(ty, "ConstantOrWriteNode") || sp_streq(ty, "ConstantAndWriteNode") ||
              sp_streq(ty, "ConstantOperatorWriteNode")) {
