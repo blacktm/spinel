@@ -303,6 +303,12 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
   { Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = ", trecv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p); }
+  /* The loop below reads this temp's `len` as its bound on every turn and
+     takes the entry out of it on every yield, and the block between two
+     turns allocates. A receiver with no other holder -- the hash a method
+     call returned -- is rooted here, as the Hash sort_by, sum and group_by
+     hoists in this file already were. */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
 
   if (is_sel || is_rej) {
     /* select/reject: produce a same-type hash with matching pairs */
@@ -859,6 +865,9 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
     Buf rb2; memset(&rb2, 0, sizeof rb2); emit_expr(c, recv, &rb2);
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = ", ts2); buf_puts(g_pre, rb2.p ? rb2.p : ""); buf_puts(g_pre, ";\n"); free(rb2.p);
+    /* rooted for the walk: the entry count below is re-read from this temp
+       on every turn and the block can allocate */
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ts2);
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);\n", td2, shn, td2);
     emit_indent(g_pre, g_indent);
@@ -888,6 +897,7 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   int ts = ++g_tmp, td = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp;
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);  /* recv preludes flush to g_pre first */
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", ts); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ts);
   emit_indent(g_pre, g_indent); emit_ctype(c, dt, g_pre); buf_printf(g_pre, " _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);\n", td, dhn, td);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, ts, ti);
   emit_indent(g_pre, g_indent + 1); emit_ctype(c, skt, g_pre);
@@ -1572,6 +1582,10 @@ int emit_minmax_by_expr(Compiler *c, int id, Buf *b) {
         tf = ++g_tmp, ti = ++g_tmp, tcur = ++g_tmp, tout = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", trecv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+    /* the receiver is this walk's bound, re-read every turn, and the block
+       allocates between two turns: root it, as the range the min_by/max_by
+       branch below materializes is rooted */
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
     const char *edflt = et == TY_RANGE ? "(sp_Range){0}" : default_value(et);
     emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tmin, edflt);
     emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tmax, edflt);
@@ -1658,7 +1672,12 @@ int emit_minmax_by_expr(Compiler *c, int id, Buf *b) {
        whose body may allocate and trigger a collection */
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
   }
-  else { emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", trecv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); }
+  else {
+    emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", trecv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n");
+    /* rooted the same way the materialized range above is: an array receiver
+       that is itself a temporary has no other holder while the block runs */
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
+  }
   free(rb.p);
   emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tbest, et == TY_RANGE ? "(sp_Range){0}" : default_value(et));
   emit_indent(g_pre, g_indent); emit_ctype(c, bvt_slot, g_pre); buf_printf(g_pre, " _t%d = %s; int _t%d = 1;\n", tbv, default_value(bvt_slot), tf);
@@ -3405,6 +3424,7 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp;
   buf_puts(b, "({ ");
   emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", ta); emit_expr(c, recv, b); buf_puts(b, "; ");
+
   emit_ctype(c, acc_ty, b); buf_printf(b, " _t%d = ", tacc);
   int start;
   if (init_empty_arr) {
@@ -4412,6 +4432,9 @@ int emit_partition_expr(Compiler *c, int id, Buf *b) {
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
   buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+  /* rooted like the two result arrays below: the length is the loop bound
+     and the block runs between two reads of it */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
 
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, ttrue, k);
@@ -6034,6 +6057,10 @@ int emit_grep_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   emit_ctype(c, rt, g_pre);
   buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+  /* rooted like the result array below it: the length is the loop bound and
+     the block runs between two reads of it */
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", ok, tres, ok);
   emit_indent(g_pre, g_indent);
@@ -8362,6 +8389,8 @@ int emit_group_by_expr(Compiler *c, int id, Buf *b) {
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
   buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+  /* rooted for the walk below, whose bound re-reads it every turn */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
   /* result hash */
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);\n", thash, thash);
@@ -8566,6 +8595,9 @@ int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
     { Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
       emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
       buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p); }
+    /* the entry count is the loop bound, re-read every turn, and the block
+       between two turns allocates: root the hoist */
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
     /* Accumulator: use memo's declared type (may differ from accT if widened) */
     Scope *cs = comp_scope_of(c, id);
     LocalVar *memo_lv = mname_orig && cs ? scope_local(cs, mname_orig) : NULL;
@@ -8704,6 +8736,8 @@ int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
   buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+  /* rooted for the walk, as the hash branch above is */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
 
   /* Accumulator: an empty `[]` seed is built as a fresh typed array of the
      inferred element type, so a string/poly memo isn't materialized as int
