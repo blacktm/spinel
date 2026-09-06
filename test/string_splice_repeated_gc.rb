@@ -11,6 +11,14 @@
 # went wrong within twenty iterations. The invariants are simply that a splice
 # of equal length leaves the length alone and writes what it was given.
 
+# Force the collector to run on nearly every allocation, so the window is
+# exercised wherever this runs rather than only where the allocator happens to
+# put a collection inside it. Read once at the first allocation, which is why
+# setting it here works. Without it this still failed before the fix on a
+# default macOS build -- at iteration 426 rather than 16 -- but that depended on
+# the allocator, and the point of the test is not to depend on it.
+ENV["SPINEL_GC_STRESS"] = "1"
+
 N = 4096
 CHUNK = 64
 
