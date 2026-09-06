@@ -144,7 +144,17 @@ static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
     const char *uj = sp_obj_to_json_fn(v);
     if (uj) { jb_add(b, uj, (size_t)sp_str_byte_len(uj)); return; }
   }
-  if (sp_obj_to_hash_fn) { sp_json_val_b(b, sp_obj_to_hash_fn(v), depth); return; }
+  if (sp_obj_to_hash_fn) {
+    /* The reflected hash is fresh, and the walk below allocates a GC string for
+       every key it reaches and for every numeric, string or symbol scalar (true,
+       false and nil are rodata), so it has to be rooted for the walk: a C
+       argument slot is not a root, and the first collection under it leaves the
+       walk reading freed members. Same reason sp_json_parse roots its input. */
+    sp_RbVal h = sp_obj_to_hash_fn(v);
+    SP_GC_ROOT_RBVAL(h);
+    sp_json_val_b(b, h, depth);
+    return;
+  }
   jb_s(b, "null");
 }
 
@@ -200,9 +210,20 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
        out with the surrounding indentation instead of on one line */
     if (sp_obj_to_json_fn) {
       const char *uj = sp_obj_to_json_fn(v);
-      if (uj) { sp_json_pretty_val(b, sp_json_parse(uj), depth); return; }
+      if (uj) {
+        /* the re-parsed document is this walk's only reference to it */
+        sp_RbVal d = sp_json_parse(uj);
+        SP_GC_ROOT_RBVAL(d);
+        sp_json_pretty_val(b, d, depth);
+        return;
+      }
     }
-    if (sp_obj_to_hash_fn) { sp_json_pretty_val(b, sp_obj_to_hash_fn(v), depth); return; }
+    if (sp_obj_to_hash_fn) {
+      sp_RbVal h = sp_obj_to_hash_fn(v);
+      SP_GC_ROOT_RBVAL(h);
+      sp_json_pretty_val(b, h, depth);
+      return;
+    }
     jb_add(b, "null", 4);
     return;
   }
