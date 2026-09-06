@@ -332,8 +332,22 @@ class Pathname
   end
 
   # Glob rooted at this directory.
+  # CRuby globs relative to the receiver and joins each match back on with
+  # `+`, whose one collapse that matters here is a receiver of "." vanishing:
+  # `Pathname.new(".").glob("a/*.rs")` answers "a/top.rs", not "./a/top.rs".
+  # A trailing separator or "/." on the receiver folds the same way ("a/" and
+  # "a/." both answer "a/top.rs"), and anything else -- "./a" included -- is
+  # kept as written, since `+` keeps it too. Joining the pattern onto the
+  # folded receiver gives exactly those strings without going through `+`.
   def glob(pattern)
-    Dir.glob("#{@path}#{SEPARATOR}#{pattern}").map { |x| Pathname.new(x) }
+    base = @path
+    base = base[0, base.length - 2] while base.length > 2 && base.end_with?("#{SEPARATOR}.")
+    base = base[0, base.length - 1] while base.length > 1 && base.end_with?(SEPARATOR)
+    if base == "." || base == ""
+      Dir.glob(pattern).map { |x| Pathname.new(x) }
+    else
+      Dir.glob("#{base}#{SEPARATOR}#{pattern}").map { |x| Pathname.new(x) }
+    end
   end
 
   # Every path under this one, receiver first, depth first. A symlinked
