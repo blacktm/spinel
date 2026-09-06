@@ -457,9 +457,16 @@ def native_objs_for(name, dir, version)
   objs = []
   cs.split("\n").each do |c|
     rel = c[dir.length + 1..-1].to_s
-    base = rel.gsub("/", "_")[0..-3]
+    # The cache MIRRORS the package tree. Flattening "/" to "_" was not
+    # injective: `a/util.c` and `a_util.c` both named `a_util.o`, the second
+    # compile overwrote the first, and the link asked for a symbol whose
+    # object had been replaced -- with nothing said at any point. A directory
+    # cannot collide with a file of the same name, so mirroring settles it,
+    # and the path stays one a person can look for.
+    base = rel[0..-3]
     [["", ""], ["_mt", " -DSP_THREADS -ftls-model=initial-exec"]].each do |suffix, flags|
       o = File.join(odir, base + suffix + ".o")
+      mkdir_p_path(File.dirname(o)) if rel.include?("/")
       if !File.exist?(o) || File.mtime(o).to_i < hnew || ENV["SPIN_NO_NATIVE_CACHE"].to_s != ""
         cmd = native_cc + " -O2" + flags + " -c '#{c}' -I '#{dir}'"
         cmd += " -I '#{hdr}'" if hdr != ""

@@ -614,6 +614,35 @@ printf '[package]\nname = "excl"\n' > spin.toml
 printf '[package]\nname = "excl"\nexclude = ["standalone.c", "cbits"]\n' > spin.toml
 expect "exclude: named file and directory both pruned" "excluded ok" "$("$SPIN" run 2>&1 | tail -1)"
 
+# --- carried C in a subdirectory must not collide with one at the root --------
+# The cache named each object after the source's relative path with "/" mapped
+# to "_", which is not injective: `a/util.c` and `a_util.c` both asked for
+# `a_util.o`, the second compile overwrote the first, and the link then wanted
+# a symbol whose object had been replaced. Nothing was said at any point. The
+# cache mirrors the tree instead, where a directory cannot collide with a file.
+cd "$WORK"
+mkdir -p spinel-ocol/a ocolapp/bin
+printf '[package]\nname = "ocol"\n' > spinel-ocol/spin.toml
+cat > spinel-ocol/ocol.rb <<'EOF'
+module Ocol
+  native_lib "ocol"
+  native_func :flat, [], :int, "sp_ocol_flat_one"
+  native_func :nested, [], :int, "sp_ocol_nested_two"
+end
+EOF
+cat > spinel-ocol/a_util.c <<'EOF'
+#include "spinel/runtime.h"
+sp_int sp_ocol_flat_one(void) { return 1; }
+EOF
+cat > spinel-ocol/a/util.c <<'EOF'
+#include "spinel/runtime.h"
+sp_int sp_ocol_nested_two(void) { return 2; }
+EOF
+printf '[package]\nname = "ocolapp"\n\n[dependencies]\nocol = { path = "../spinel-ocol" }\n' > ocolapp/spin.toml
+printf 'require "ocol"\nputs Ocol.flat\nputs Ocol.nested\n' > ocolapp/bin/ocolapp.rb
+cd "$WORK/ocolapp"
+expect "object cache: a/util.c and a_util.c both survive" "2" "$(SPIN_NO_NATIVE_CACHE=1 "$SPIN" run 2>&1 | tail -1)"
+
 # --- the runtime headers when spin and the compiler are not co-located (#4115) -
 # `spin install` puts spin in ~/.local/bin with no spinel beside it, and package
 # C includes "spinel/runtime.h". spin gave up locating the headers the moment
