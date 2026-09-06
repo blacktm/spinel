@@ -266,6 +266,31 @@ as on CRuby. In a few cases CRuby's behavior depends on a feature Spinel does
 not implement, and silently returning a wrong value would be worse than a
 visible error. Those deliberate divergences are listed here.
 
+#### Two DISTINCT self-containing Sets compare equal
+
+A container walk that meets an object it is already inside stops there and
+calls the pair equal, which is what makes `a = []; a << a; a == a` terminate
+at all. For Arrays, Hashes, Structs and plain objects that agrees with CRuby.
+For two *distinct* Sets that each contain themselves it does not: Spinel
+answers `true` where CRuby answers `false`, and everything reaching `==` or
+`eql?` follows -- `include?`, `subset?`, `superset?`, `intersect?` answer
+true, `disjoint?` false, `<=>` 0 rather than nil, and a Hash keyed by one
+finds the other, as do `Array#uniq`, `Array#-` and `Array#include?`.
+
+CRuby's Set is a hash table, and an element's hash is stored when it is added
+-- while that Set is still empty -- so its later membership probe misses.
+Spinel's Set is Array-backed with a linear `eql?` scan and has no stored
+per-element hash to miss with. The same Set compared with itself, and every
+non-recursive Set, agree with CRuby.
+
+#### `Set::RecursionGuard`
+
+The Set package reaches the runtime's recursion path through bindings in a
+nested `Set::RecursionGuard` module, so `Set.constants` lists it and
+`Set::RecursionGuard.respond_to?(:enter_eq)` is true where CRuby raises
+NameError. It is not an API and nothing else about Set's surface changes;
+`Set.constants` already differed from CRuby's, which lists `CoreSet`.
+
 #### A `super` chain whose callers pass differently-typed blocks
 
 A method that yields is inlined at every call site, so it is specialized to

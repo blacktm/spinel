@@ -18132,7 +18132,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int tdh = ++g_tmp, tdn = ++g_tmp;
       int skip_dots = sp_streq(name, "each_child");
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_Dir *_t%d = %s; const char *_t%d; ", tdh, dr, tdn);
+      /* rooted for the block's duration: a temporary receiver (Dir.open(d).each)
+         has no other reference, and a body that allocates would let the
+         collector close it mid-loop (the File loops below root theirs too) */
+      buf_printf(b, "sp_Dir *_t%d = %s; SP_GC_ROOT(_t%d); const char *_t%d; ", tdh, dr, tdh, tdn);
       buf_printf(b, "while ((_t%d = sp_Dir_read(_t%d)) != NULL) {", tdn, tdh);
       if (skip_dots)
         buf_printf(b, " if (sp_str_eq(_t%d, (&(\"\\xff\" \".\")[1])) ||"
@@ -18506,7 +18509,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          has to drive #autoclose? (#3131) */
       if (sp_streq(name, "close_on_exec="))
         buf_printf(b, "sp_File_set_close_on_exec(%s, _t%d); ", r, tv);
-      else buf_printf(b, "(%s)->no_autoclose = !_t%d; ", r, tv);
+      else buf_printf(b, "sp_File_set_autoclose(%s, _t%d); ", r, tv);
       buf_printf(b, "_t%d; })", tv);
       free(rb.p); return;
     }
@@ -18645,7 +18648,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_File_fsync(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "autoclose?") && argc == 0) {
-      buf_printf(b, "(!(%s)->no_autoclose)", r); free(rb.p); return;
+      buf_printf(b, "sp_File_autoclose_p(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "pid") && argc == 0) {
       buf_printf(b, "({ (void)%s; sp_box_nil(); })", r); free(rb.p); return;
@@ -18654,10 +18657,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_File_fileno(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "lineno") && argc == 0) {
-      buf_printf(b, "((%s)->lineno)", r); free(rb.p); return;
+      buf_printf(b, "sp_File_lineno(%s)", r); free(rb.p); return;
     }
     if (sp_streq(name, "lineno=") && argc == 1) {
-      buf_printf(b, "((%s)->lineno = ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+      buf_printf(b, "sp_File_set_lineno(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
       free(rb.p); return;
     }
     if (sp_streq(name, "pos=") && argc == 1) {
@@ -18710,7 +18713,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int is_cp = sp_streq(name, "each_codepoint");
       int rf2 = ++g_tmp, lt2 = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_File *_t%d = %s; ", rf2, r);
+      buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf2, r, rf2);
       if (is_byte)
         buf_printf(b, "sp_int _t%d; while ((_t%d = sp_File_getbyte(_t%d)) != SP_INT_NIL) {", lt2, lt2, rf2);
       else if (is_cp)
@@ -18909,7 +18912,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sync = true -- and spinel's socket writes really do bypass stdio, so
          reporting false contradicted the implementation. Per-handle sync state
          is still not modelled beyond that (#2792). */
-      buf_printf(b, "((%s)->is_sock || (%s)->sync_on ? (sp_bool)1 : (sp_bool)0)", r, r);
+      buf_printf(b, "sp_File_sync_p(%s)", r);
       free(rb.p); return;
     }
     if (sp_streq(name, "sync=") && argc >= 1) {
@@ -18917,8 +18920,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_bool _t%d = (", ts2);
       if (comp_ntype(c, argv[0]) == TY_BOOL) emit_expr(c, argv[0], b);
       else { buf_puts(b, "sp_poly_truthy("); emit_boxed(c, argv[0], b); buf_puts(b, ")"); }
-      buf_printf(b, "); %s->sync_on = _t%d ? 1 : 0; if (_t%d) sp_File_flush(%s); _t%d; })",
-                 r, ts2, ts2, r, ts2);
+      buf_printf(b, "); sp_File_set_sync(%s, _t%d); })", r, ts2);
       free(rb.p); return;
     }
     if (sp_streq(name, "flush") || sp_streq(name, "binmode")) {
@@ -18941,7 +18943,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int esep = (argc >= 1 && comp_ntype(c, argv[0]) == TY_STRING) ? argv[0] : -1;
       int lt = ++g_tmp, rf = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "sp_File *_t%d = %s; ", rf, r);
+      /* rooted as the File.open block form roots its handle (below): a
+         temporary receiver -- File.open(p).each_line -- is otherwise swept by
+         a GC inside the body and the loop ends early */
+      buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf, r, rf);
       free(rb.p); r = NULL;
       /* Each iteration yields a FRESH heap line string, matching CRuby --
          a stored reference must keep its own line, not a mutated shared
@@ -19039,15 +19044,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sync reads the handle kind, sync= flushes on a truthy value and
          answers it (#4229) */
       else if (sp_streq(name, "sync") && argc == 0)
-        buf_printf(b, "(_t%d && (_t%d->is_sock || _t%d->sync_on) ? (sp_bool)1 : (sp_bool)0); })",
-                   tio2, tio2, tio2);
+        buf_printf(b, "sp_File_sync_p(_t%d); })", tio2);
       else if (sp_streq(name, "sync=") && argc >= 1) {
         int ts3 = ++g_tmp;
         buf_printf(b, "sp_bool _t%d = sp_poly_truthy(", ts3);
         emit_boxed(c, argv[0], b);
-        buf_printf(b, "); if (_t%d) _t%d->sync_on = 1; else _t%d->sync_on = 0;"
-                      " if (_t%d) sp_File_flush(_t%d); _t%d; })",
-                   ts3, tio2, tio2, ts3, tio2, ts3);
+        buf_printf(b, "); sp_File_set_sync(_t%d, _t%d); })", tio2, ts3);
       }
       /* read_nonblock / write_nonblock, the same answers the typed-receiver
          arms give: `exception: false` answers the wait symbol (read) or nil
