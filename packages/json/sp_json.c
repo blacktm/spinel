@@ -74,15 +74,14 @@ static const char *sp_json_key(sp_RbVal k) {
    identity -- 100 levels of distinct arrays serialize and the 101st raises,
    whether or not anything repeats. */
 #define SP_JSON_MAX_NESTING 100
-SP_COLD static __attribute__((noinline, noreturn)) void sp_json_too_deep(void) {
+SP_COLD static __attribute__((noinline, noreturn)) void sp_json_too_deep(jbuf *b) {
+  free(b->p);  /* this walk's buffer; a walk a user #to_json runs inside it owns its own */
   sp_raise_cls("JSON::NestingError",
                "nesting of 100 is too deep. Did you try to serialize objects with circular references?");
 }
-static const char *sp_json_val_d(sp_RbVal v, int depth);
-const char *sp_json_val(sp_RbVal v) { return sp_json_val_d(v, 0); }
-/* `depth` counts the containers already entered, so a container reached at
-   depth 100 would be the 101st level. */
-static const char *sp_json_val_d(sp_RbVal v, int depth) {
+static void jb_s(jbuf *b, const char *s) { jb_add(b, s, strlen(s)); }
+/* Everything but a container: the leaf arms, answering one GC string. */
+static const char *sp_json_scalar(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT:  return sp_int_to_s(v.v.i);
     case SP_TAG_FLT:  return sp_float_to_s(v.v.f);
@@ -90,48 +89,63 @@ static const char *sp_json_val_d(sp_RbVal v, int depth) {
     case SP_TAG_NIL:  return JSPL("null");
     case SP_TAG_STR:  return sp_json_str(v.v.s);
     case SP_TAG_SYM:  return sp_json_str(sp_sym_name_fn ? sp_sym_name_fn((sp_sym)v.v.i) : "");
-    case SP_TAG_OBJ: {
-      int kind = sp_json_kind_fn ? sp_json_kind_fn(v) : 0;
-      if (kind == 1) {  /* array */
-        if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
-        sp_int n = sp_json_len_fn(v);
-        jbuf b; memset(&b, 0, sizeof b); jb_c(&b, '[');
-        for (sp_int i = 0; i < n; i++) {
-          if (i) jb_c(&b, ',');
-          const char *e = sp_json_val_d(sp_json_aref_fn(v, i), depth + 1);
-          jb_add(&b, e, strlen(e));
-        }
-        jb_c(&b, ']');
-        return jb_finish(&b);
-      }
-      if (kind == 2) {  /* hash */
-        if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
-        sp_int n = sp_json_len_fn(v);
-        jbuf b; memset(&b, 0, sizeof b); jb_c(&b, '{');
-        for (sp_int i = 0; i < n; i++) {
-          if (i) jb_c(&b, ',');
-          sp_RbVal k, val;
-          sp_json_hpair_fn(v, i, &k, &val);
-          const char *ks = sp_json_key(k);
-          jb_add(&b, ks, strlen(ks));
-          jb_c(&b, ':');
-          const char *vs = sp_json_val_d(val, depth + 1);
-          jb_add(&b, vs, strlen(vs));
-        }
-        jb_c(&b, '}');
-        return jb_finish(&b);
-      }
-      /* a plain object (Struct/Data): reflect it into a hash of its members
-         (the generated program installs sp_obj_to_hash when it has Structs)
-         and serialize that -- reusing the hash path above. No object-format
-         knowledge lives here or in the compiler; only the generic reflection. */
-      /* a user class's own #to_json wins, as it does in CRuby's json */
-      if (sp_obj_to_json_fn) { const char *uj = sp_obj_to_json_fn(v); if (uj) return uj; }
-      if (sp_obj_to_hash_fn) return sp_json_val_d(sp_obj_to_hash_fn(v), depth);
-      return JSPL("null");
-    }
     default: return JSPL("null");
   }
+}
+static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth);
+/* A compact document is appended into ONE buffer for the whole walk, as the
+   pretty form below already does, so the nesting error has exactly one
+   allocation to release before it unwinds (sp_json_too_deep frees it). */
+const char *sp_json_val(sp_RbVal v) {
+  if (v.tag != SP_TAG_OBJ) return sp_json_scalar(v);
+  jbuf b; memset(&b, 0, sizeof b);
+  sp_json_val_b(&b, v, 0);
+  return jb_finish(&b);
+}
+/* `depth` counts the containers already entered, so a container reached at
+   depth 100 would be the 101st level. */
+static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
+  if (v.tag != SP_TAG_OBJ) { jb_s(b, sp_json_scalar(v)); return; }
+  int kind = sp_json_kind_fn ? sp_json_kind_fn(v) : 0;
+  if (kind == 1) {  /* array */
+    if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep(b);
+    sp_int n = sp_json_len_fn(v);
+    jb_c(b, '[');
+    for (sp_int i = 0; i < n; i++) {
+      if (i) jb_c(b, ',');
+      sp_json_val_b(b, sp_json_aref_fn(v, i), depth + 1);
+    }
+    jb_c(b, ']');
+    return;
+  }
+  if (kind == 2) {  /* hash */
+    if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep(b);
+    sp_int n = sp_json_len_fn(v);
+    jb_c(b, '{');
+    for (sp_int i = 0; i < n; i++) {
+      if (i) jb_c(b, ',');
+      sp_RbVal k, val;
+      sp_json_hpair_fn(v, i, &k, &val);
+      jb_s(b, sp_json_key(k));
+      jb_c(b, ':');
+      sp_json_val_b(b, val, depth + 1);
+    }
+    jb_c(b, '}');
+    return;
+  }
+  /* a plain object (Struct/Data): reflect it into a hash of its members
+     (the generated program installs sp_obj_to_hash when it has Structs)
+     and serialize that -- reusing the hash path above. No object-format
+     knowledge lives here or in the compiler; only the generic reflection. */
+  /* a user class's own #to_json wins, as it does in CRuby's json */
+  /* the answer is a Ruby String, appended by its own length: a NUL inside it
+     is the user's to keep */
+  if (sp_obj_to_json_fn) {
+    const char *uj = sp_obj_to_json_fn(v);
+    if (uj) { jb_add(b, uj, (size_t)sp_str_byte_len(uj)); return; }
+  }
+  if (sp_obj_to_hash_fn) { sp_json_val_b(b, sp_obj_to_hash_fn(v), depth); return; }
+  jb_s(b, "null");
 }
 
 /* ---------- JSON.pretty_generate ----------
@@ -147,7 +161,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
   if (v.tag == SP_TAG_OBJ) {
     int kind = sp_json_kind_fn ? sp_json_kind_fn(v) : 0;
     if (kind == 1) {  /* array */
-      if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
+      if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep(b);
       sp_int n = sp_json_len_fn(v);
       if (n == 0) { jb_add(b, "[]", 2); return; }
       jb_c(b, '[');
@@ -163,7 +177,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
       return;
     }
     if (kind == 2) {  /* hash */
-      if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
+      if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep(b);
       sp_int n = sp_json_len_fn(v);
       if (n == 0) { jb_add(b, "{}", 2); return; }
       jb_c(b, '{');
@@ -173,8 +187,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
         sp_json_indent(b, depth + 1);
         sp_RbVal k, val;
         sp_json_hpair_fn(v, i, &k, &val);
-        const char *ks = sp_json_key(k);
-        jb_add(b, ks, strlen(ks));
+        jb_s(b, sp_json_key(k));
         jb_add(b, ": ", 2);
         sp_json_pretty_val(b, val, depth + 1);
       }
@@ -193,8 +206,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
     jb_add(b, "null", 4);
     return;
   }
-  const char *s = sp_json_val(v);
-  jb_add(b, s, strlen(s));
+  jb_s(b, sp_json_val(v));
 }
 
 const char *sp_json_pretty(sp_RbVal v) {
