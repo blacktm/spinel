@@ -120,3 +120,48 @@ s = Src.new
 r = Holder.new(s.bytes)
 r.bump
 p [r.bt, s.bytes]
+
+# The chain carries however deep it runs: a parameter passed on through
+# another method before it is stored has to arrive as the handle too, or the
+# name the outermost caller holds goes its own way.
+class Keep
+  attr_reader :s
+  def initialize
+    @s = +""
+  end
+  def hold(x)      # a name of its own: the callee is resolved by unique name,
+    @s = x         # and `take` above already claims that one
+  end
+  def bump
+    @s << "!"
+  end
+end
+
+def hand_on(k, y)
+  k.hold(y)
+end
+
+t = +"ttt"
+kk = Keep.new
+hand_on(kk, t)
+kk.bump
+p [kk.s, t]
+t << "?"
+p [kk.s, t]
+
+# A slot mutated only from OUTSIDE its class records nothing in the mutation
+# census, which keys on calls whose receiver is an ivar read. Being a shared
+# handle already is evidence enough for the parameter written into it.
+class Outside
+  attr_reader :s
+  def initialize(x)
+    @s = x
+  end
+end
+
+o = +"ooo"
+w = Outside.new(o)
+w.s << "!"
+p [w.s, o]
+o << "?"
+p [w.s, o]

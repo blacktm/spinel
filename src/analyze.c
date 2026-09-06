@@ -10457,7 +10457,14 @@ static int promote_params_stored_in_shared_ivars(Compiler *c) {
     { int mk = strbuf_ivar_mut_kind(c, icid, ivname);
       int ivx0 = comp_ivar_index(&c->classes[icid], ivname);
       TyKind ivt0 = ivx0 >= 0 ? c->classes[icid].ivar_types[ivx0] : TY_UNKNOWN;
-      if (mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
+      /* A slot ANOTHER rule already promoted needs no evidence of its own:
+         being a shared handle is the conclusion the evidence was for. The
+         mutation census keys on calls whose receiver is an ivar read, so a
+         slot mutated only from OUTSIDE its class -- `d.s << "x"` through the
+         reader -- records nothing there, and the parameter written into it
+         was left a value while the ivar itself was a handle (#4363). */
+      int already = ivx0 >= 0 && c->classes[icid].ivar_str_shared[ivx0];
+      if (!already && mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
         continue; }
     if (pp->type != TY_UNKNOWN && pp->type != TY_STRING &&
         pp->type != TY_STRBUF && pp->type != TY_POLY) continue;
@@ -10577,6 +10584,23 @@ static int convert_byref_handle_params(Compiler *c) {
           const char *vn2 = nt_str(nt, an2, "name");
           Scope *vs2 = vn2 ? comp_scope_of(c, an2) : NULL;
           LocalVar *alv = vs2 ? scope_local(vs2, vn2) : NULL;
+          /* The argument is this method's OWN parameter, being passed on:
+             `def via(k, y) k.take(y) end`. It has to become a handle for the
+             same reason the callee's did, and then this loop's next round
+             reaches via's own call sites, so the chain carries however deep it
+             runs. strbuf_slot_eligible_shape turns parameters away -- that is
+             what defers them to this pass -- so the shape check does not
+             apply to them here (#4363). */
+          if (alv && alv->is_param && !alv->is_block_param &&
+              an_param_idx(vs2, vn2) >= 0 &&
+              (alv->type == TY_UNKNOWN || alv->type == TY_STRING ||
+               alv->type == TY_STRBUF)) {
+            if (alv->type != TY_STRBUF || !alv->str_shared) {
+              alv->type = TY_STRBUF; alv->str_shared = 1; alv->byref_out = 0;
+              changed = 1;
+            }
+            continue;
+          }
           if (!alv || !strbuf_slot_eligible_shape(c, vn2, vs2, alv)) continue;
           if (alv->type != TY_UNKNOWN && alv->type != TY_STRING &&
               alv->type != TY_STRBUF && alv->type != TY_POLY) continue;
