@@ -55,3 +55,68 @@ h1 = Holder.new(c)
 h2 = Holder.new(c)
 h1.bump
 p [h1.bt, h2.bt, c]
+
+# The mutators whose names are Array's and Hash's as much as String's --
+# `[]=`, `insert`, `slice!`, `setbyte` -- are in-place once the slot's type
+# says String, and the shim emits them on the handle. Statement position and
+# expression position (a method's last expression) go through different
+# emitters, so both are exercised.
+class Edits
+  attr_reader :bt
+  def initialize(bt)
+    @bt = bt
+  end
+  def splice
+    @bt[0, 3] = "XYZ"
+    nil
+  end
+  def ins
+    @bt.insert(1, "-")
+    nil
+  end
+  def sl
+    @bt.slice!(0, 1)
+    nil
+  end
+  def sb
+    @bt.setbyte(0, 90)
+    nil
+  end
+  def splice_tail
+    @bt[0, 1] = "q"
+  end
+  def ins_tail
+    @bt.insert(0, "w")
+  end
+end
+
+d = +"aaaaaa"
+e = Edits.new(d)
+e.splice
+p [e.bt, d]
+e.ins
+p [e.bt, d]
+e.sl
+p [e.bt, d]
+e.sb
+p [e.bt, d]
+e.splice_tail
+p [e.bt, d]
+e.ins_tail
+p [e.bt, d]
+d << "="
+p [e.bt, d]
+
+# a reader in ARGUMENT position hands out the handle, not a safe copy, so the
+# receiving holder and the source object keep one string between them
+class Src
+  attr_reader :bytes
+  def initialize
+    @bytes = +"src"
+  end
+end
+
+s = Src.new
+r = Holder.new(s.bytes)
+r.bump
+p [r.bt, s.bytes]

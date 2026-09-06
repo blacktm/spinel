@@ -909,6 +909,9 @@ int strbuf_boxed_elem_read(Compiler *c, int v) {
   TyKind rt = comp_ntype(c, r);
   return rt == TY_POLY || rt == TY_POLY_ARRAY || ty_is_hash(rt);
 }
+const char *g_sb_iv_name = NULL;
+int         g_sb_iv_cid  = -1;
+char        g_sb_iv_repl[64];
 int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   const char *rn = strbuf_local_name(c, recv);
   if (rn) {

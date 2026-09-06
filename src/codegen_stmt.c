@@ -10591,7 +10591,46 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
      contents in place so every alias observes the mutation. */
   if (rt == TY_STRING &&
       (sp_streq(name, "[]=") || sp_streq(name, "insert") ||
-       sp_streq(name, "clear") || sp_streq(name, "slice!"))) {
+       sp_streq(name, "clear") || sp_streq(name, "slice!") ||
+       sp_streq(name, "setbyte"))) {
+    /* An IVAR receiver has no name the rename table can carry, so the shadow
+       is published to the ivar emitter instead; everything else -- the value
+       arm re-run, the frozen check, the byte swap at the end -- is the same
+       (#4363). Without this the arm ran against `self->iv_x` itself, which is
+       an sp_String * and not the const char * lvalue the arm assigns to:
+       `lvalue required as left operand of assignment`. */
+    if (!strbuf_local_name(c, recv) && nt_kind(nt, recv) == NK_InstanceVariableReadNode) {
+      char srefI[1024];
+      int icid = strbuf_ivar_owner(c, recv);
+      const char *ivn = nt_str(nt, recv, "name");
+      if (ivn && icid >= 0 && !g_sb_iv_name &&
+          strbuf_slot_ref(c, recv, srefI, sizeof srefI)) {
+        int tH = ++g_tmp;
+        Buf armb; memset(&armb, 0, sizeof armb);
+        snprintf(g_sb_iv_repl, sizeof g_sb_iv_repl, "lv__sb%d", tH);
+        g_sb_iv_name = ivn; g_sb_iv_cid = icid;
+        int handled = emit_array_mutate_stmt(c, id, &armb, indent + 1);
+        g_sb_iv_name = NULL; g_sb_iv_cid = -1;
+        if (!handled) free(armb.p);
+        else {
+          emit_indent(b, indent);
+          buf_printf(b, "{ sp_String *_t%d = %s;\n", tH, srefI);
+          emit_indent(b, indent + 1);
+          buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
+          emit_indent(b, indent + 1);
+          buf_printf(b, "const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));\n", tH, tH);
+          emit_indent(b, indent + 1);
+          buf_printf(b, "SP_GC_ROOT(lv__sb%d);\n", tH);
+          buf_puts(b, armb.p ? armb.p : "");
+          free(armb.p);
+          emit_indent(b, indent + 1);
+          buf_printf(b, "sp_String_set_bin(_t%d, lv__sb%d);\n", tH, tH);
+          emit_indent(b, indent);
+          buf_puts(b, "}\n");
+          return 1;
+        }
+      }
+    }
     const char *sbn = strbuf_local_name(c, recv);
     if (sbn && g_nren < MAX_RENAME) {
       Scope *shs = comp_scope_of(c, recv);

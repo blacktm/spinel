@@ -108,6 +108,15 @@ extern char g_ren_from[MAX_RENAME][96];
 extern char g_ren_to[MAX_RENAME][112];
 const char *strbuf_local_name(Compiler *c, int recv);
 int strbuf_ivar_owner(Compiler *c, int node);
+/* The shared-mutable shim (codegen_stmt.c) re-runs a value-semantics mutator
+   arm against a plain shadow copy, then swaps the handle's bytes for it. A
+   LOCAL receiver is redirected into the shadow by the rename table; an ivar
+   has no name to rename, so the shim publishes the slot it is shadowing here
+   and the ivar emitter resolves reads AND the arm's write-back to the shadow
+   -- the same substitution one level down (#4363). */
+extern const char *g_sb_iv_name;   /* "@bt" while a shim is open, else NULL */
+extern int         g_sb_iv_cid;
+extern char        g_sb_iv_repl[64];
 int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap);
 int strbuf_boxed_elem_read(Compiler *c, int v);
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b);

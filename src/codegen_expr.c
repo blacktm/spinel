@@ -1772,6 +1772,13 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   if (sp_streq(ty, "InstanceVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");  /* "@x" */
     Scope *cs = comp_scope_of(c, id);
+    /* inside a shared-mutable shim over THIS slot: both the reads and the
+       arm's own write-back go to the shadow (see codegen_internal.h) */
+    if (g_sb_iv_name && nm && sp_streq(nm, g_sb_iv_name) &&
+        strbuf_ivar_owner(c, id) == g_sb_iv_cid) {
+      buf_printf(b, "%s", g_sb_iv_repl);
+      return;
+    }
     /* a shared-mutable string slot: a marked read yields the live HANDLE, an
        ordinary read a GC copy of the current contents (NULL stays nil) (#3227) */
     { char srefI[1024];

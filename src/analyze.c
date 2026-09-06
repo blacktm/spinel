@@ -10447,14 +10447,18 @@ static int promote_params_stored_in_shared_ivars(Compiler *c) {
     if (an_param_idx(ms, lname) < 0) continue;
     int icid = an_ivar_owner(c, w);
     if (icid < 0) continue;
-    /* the slot has to be one that is mutated in place; without that there is
-       no aliasing to preserve and the value representation stays cheaper. */
-    /* the slot's evidence has to be an UNAMBIGUOUS in-place mutator. Kind -1
-       is `[]=`, `insert`, `slice!`, `setbyte` and the bang forms, which name
-       Array's and Hash's methods as much as String's; those slots stay on the
-       value representation here because the handle's index-assign codegen is
-       not written yet (#4363 keeps that half). */
-    if (strbuf_ivar_mut_kind(c, icid, ivname) != 1) continue;
+    /* The slot has to be one that is mutated in place; without that there is
+       no aliasing to preserve and the value representation stays cheaper.
+       Kind -1 is the AMBIGUOUS evidence -- `[]=`, `insert`, `slice!`,
+       `setbyte` and the bang forms -- which names Array's and Hash's methods
+       as much as String's, so on its own it proves nothing. Once the slot's
+       own type says String the ambiguity is settled, and a splice is an
+       in-place mutation like any other. */
+    { int mk = strbuf_ivar_mut_kind(c, icid, ivname);
+      int ivx0 = comp_ivar_index(&c->classes[icid], ivname);
+      TyKind ivt0 = ivx0 >= 0 ? c->classes[icid].ivar_types[ivx0] : TY_UNKNOWN;
+      if (mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
+        continue; }
     if (pp->type != TY_UNKNOWN && pp->type != TY_STRING &&
         pp->type != TY_STRBUF && pp->type != TY_POLY) continue;
     if (strbuf_promote_ivar(c, icid, ivname)) changed = 1;
@@ -10584,6 +10588,28 @@ static int convert_byref_handle_params(Compiler *c) {
           int cid2 = vn2 ? an_ivar_owner(c, an2) : -1;
           if (cid2 >= 0 && strbuf_ivar_mut_kind(c, cid2, vn2) >= 0)
             if (strbuf_promote_ivar(c, cid2, vn2)) changed = 1;
+        }
+        /* `K.new(obj.reader)`: the reader has to hand out the HANDLE, or the
+           new holder and `obj` walk away with two strings. The P5 rule makes
+           exactly this mark, but only ever looked at a local write. Marking
+           alone is not enough here: this pass runs after the node-type cache
+           is finalized, and comp_ntype answers from the cache, so the caller
+           would build a `const char *` temp out of an `sp_String *`. The
+           cached type is corrected with the mark, which is what makes the two
+           agree (#4363). */
+        else if (nt_kind(nt, an2) == NK_CallNode) {
+          char ivbuf2[300]; int defc2 = -1;
+          const char *ivn2 = an_reader_ivar_of(c, an2, &defc2, ivbuf2, sizeof ivbuf2);
+          if (ivn2 && defc2 >= 0 && strbuf_ivar_mut_kind(c, defc2, ivn2) >= 0) {
+            if (strbuf_promote_ivar(c, defc2, ivn2)) changed = 1;
+            int iv3 = comp_ivar_index(&c->classes[defc2], ivn2);
+            if (iv3 >= 0 && c->classes[defc2].ivar_str_shared[iv3] &&
+                !c->strbuf_box[an2]) {
+              c->strbuf_box[an2] = 1;
+              comp_sn_retype(c, an2, TY_STRBUF);
+              changed = 1;
+            }
+          }
         }
       }
     }

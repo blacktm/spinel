@@ -55,9 +55,14 @@ def sl_caps(s)
 end
 p sl_caps("mail: user@example end")
 
-# ivar receiver in statement position
+# ivar receiver in statement position. The argument is `+"..."`: a literal is
+# frozen under spinel's baseline, so passing one and mutating it through the
+# ivar is a FrozenError, not a splice -- CRuby agrees under
+# --enable=frozen-string-literal. The bare literal passed here until the ivar
+# became a shared handle, whose frozen bit the value path had not been
+# consulting (#4363).
 class SliceBox
   def initialize(s); @s = s; end
   def chomp_digits!; @s.slice!(/\d+/); @s; end
 end
-p SliceBox.new("v1.2.3").chomp_digits!
+p SliceBox.new(+"v1.2.3").chomp_digits!

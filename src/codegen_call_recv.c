@@ -208,6 +208,40 @@ static int conv_to_ary_impossible(TyKind t) {
          ty_is_hash(t);
 }
 
+/* The shared-mutable shim over an IVAR receiver, in expression position. The
+   local form renames the slot so the value arm's reads and its write-back both
+   land on a plain shadow; an ivar has no name to rename, so the shadow is
+   published to the ivar emitter instead and the same re-run works unchanged.
+   `rerun` is the emitter whose arms are being borrowed (#4363). */
+static int sb_iv_expr_shim(Compiler *c, int id, int recvS, Buf *b,
+                           int (*rerun)(Compiler *, int, Buf *)) {
+  const NodeTable *nt = c->nt;
+  if (strbuf_local_name(c, recvS)) return 0;
+  if (nt_kind(nt, recvS) != NK_InstanceVariableReadNode || g_sb_iv_name) return 0;
+  char srefI[1024];
+  int icid = strbuf_ivar_owner(c, recvS);
+  const char *ivn = nt_str(nt, recvS, "name");
+  if (!ivn || icid < 0 || !strbuf_slot_ref(c, recvS, srefI, sizeof srefI)) return 0;
+  int tH = ++g_tmp;
+  Buf armb; memset(&armb, 0, sizeof armb);
+  snprintf(g_sb_iv_repl, sizeof g_sb_iv_repl, "lv__sb%d", tH);
+  g_sb_iv_name = ivn; g_sb_iv_cid = icid;
+  int handled = rerun(c, id, &armb);
+  g_sb_iv_name = NULL; g_sb_iv_cid = -1;
+  if (!handled) { free(armb.p); return 0; }
+  TyKind resty = comp_ntype(c, id);
+  buf_printf(b, "({ sp_String *_t%d = %s;"
+                " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
+                " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
+                " SP_GC_ROOT(lv__sb%d); ",
+             tH, srefI, tH, tH, tH, tH, tH);
+  emit_ctype(c, resty == TY_UNKNOWN || resty == TY_VOID ? TY_STRING : resty, b);
+  buf_printf(b, " _res%d = %s;", tH, armb.p ? armb.p : "0");
+  free(armb.p);
+  buf_printf(b, " sp_String_set_bin(_t%d, lv__sb%d); _res%d; })", tH, tH, tH);
+  return 1;
+}
+
 int emit_array_call(Compiler *c, int id, Buf *b) {
   /* The variadic Array mutators accept zero elements and return the receiver
      unchanged; every arm below is written for argc >= 1, so a no-argument call
@@ -288,6 +322,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         (sp_streq(nmS, "slice!") || sp_streq(nmS, "setbyte") ||
          sp_streq(nmS, "insert") || sp_streq(nmS, "clear") ||
          sp_streq(nmS, "[]="))) {
+      if (sb_iv_expr_shim(c, id, recvS, b, emit_array_call)) return 1;
       const char *sbn = strbuf_local_name(c, recvS);
       if (sbn && g_nren < MAX_RENAME) {
         Scope *shs = comp_scope_of(c, recvS);
@@ -6644,6 +6679,7 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
     int recvS = nt_ref(ntS, id, "receiver");
     if (nmS && recvS >= 0 && comp_ntype(c, recvS) == TY_STRING &&
         sp_streq(nmS, "setbyte")) {
+      if (sb_iv_expr_shim(c, id, recvS, b, emit_scalar_call)) return 1;
       const char *sbn = strbuf_local_name(c, recvS);
       if (sbn && g_nren < MAX_RENAME) {
         Scope *shs = comp_scope_of(c, recvS);
