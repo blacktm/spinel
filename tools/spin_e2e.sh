@@ -630,11 +630,13 @@ sp_int sp_emitted_real(void) { return 7; }
 EOF
 cd emitted
 "$(dirname "$SPIN")/spinel" bin/emitted.rb -c -o stray.c >/dev/null 2>&1
-expect "emitted C: the build still runs" "emitted ok" "$("$SPIN" run 2>&1 | tail -1)"
+# the FIRST build: a second one answers "up to date" without walking the tree,
+# so the report would not be reached and the check would pass on nothing
 case "$("$SPIN" build 2>&1)" in
   *"emitted/stray.c is spinel's own output"*) : ;;
   *) fail "emitted C: skipped without saying so" ;;
 esac
+expect "emitted C: the build still runs" "emitted ok" "$("$SPIN" run 2>&1 | tail -1)"
 
 # --- carried C in a subdirectory must not collide with one at the root --------
 # The cache named each object after the source's relative path with "/" mapped
