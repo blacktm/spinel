@@ -614,6 +614,28 @@ printf '[package]\nname = "excl"\n' > spin.toml
 printf '[package]\nname = "excl"\nexclude = ["standalone.c", "cbits"]\n' > spin.toml
 expect "exclude: named file and directory both pruned" "excluded ok" "$("$SPIN" run 2>&1 | tail -1)"
 
+# --- spinel's own output in the tree is skipped, and said out loud (#4362) -----
+# `spinel foo.rb -c -o out.c` inside the package leaves a .c that defines
+# main() and, through the internal header, the runtime's non-static surface:
+# compiling it buries the build in multiple-definition lines that name symbols
+# rather than the file. It is never carried C, so it is left out -- but named
+# on stderr, since it may be sitting on top of a source it overwrote.
+cd "$WORK"
+mkdir -p emitted/bin
+printf '[package]\nname = "emitted"\n' > emitted/spin.toml
+printf 'puts "emitted ok"\n' > emitted/bin/emitted.rb
+cat > emitted/real.c <<'EOF'
+#include "spinel/runtime.h"
+sp_int sp_emitted_real(void) { return 7; }
+EOF
+cd emitted
+"$(dirname "$SPIN")/spinel" bin/emitted.rb -c -o stray.c >/dev/null 2>&1
+expect "emitted C: the build still runs" "emitted ok" "$("$SPIN" run 2>&1 | tail -1)"
+case "$("$SPIN" build 2>&1)" in
+  *"emitted/stray.c is spinel's own output"*) : ;;
+  *) fail "emitted C: skipped without saying so" ;;
+esac
+
 # --- carried C in a subdirectory must not collide with one at the root --------
 # The cache named each object after the source's relative path with "/" mapped
 # to "_", which is not injective: `a/util.c` and `a_util.c` both asked for

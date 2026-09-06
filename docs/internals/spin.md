@@ -269,6 +269,17 @@ specification:* `spin lock --update` and `--frozen` (CI mode).
   excluded from compilation rather than from inclusion. Globs are expanded at
   manifest-read time into the same exact-path list `[[build]]` workdirs
   already travel in, so naming a directory prunes its subtree.
+- **Spinel's own output is not carried C** (implemented; #4362). A `.c` whose
+  first line is the compiler's banner is left out of discovery and named on
+  stderr. It defines `main` and, through the internal `spinel_rt.h`, a copy of
+  the runtime's non-static surface, so compiling it collides with the generated
+  TU on both -- and the collision reports symbols, never the file that brought
+  them. The asymmetry above is what makes this reachable at all: one
+  `spinel app.rb -c -o out.c` run inside the tree and the compiler's output IS
+  the build's input. It is skipped rather than compiled, but reported rather
+  than skipped quietly, since the file may have overwritten a source of the
+  same name -- where silence would trade a wall of link errors for a single
+  undefined symbol.
 - *Still specification:* the `spinel/runtime.h` umbrella defining the
   stable public sp_ surface for carried C; today package C sees the same
   headers as the generated TU, with no compatibility promise on internals.

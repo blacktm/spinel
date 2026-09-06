@@ -216,6 +216,14 @@ exclude = ["standalone_c_app.c", "c_lib*.c", "cbits"]
 ```
 
 Globs are relative to the package root; naming a directory prunes all of it.
+One kind of `.c` needs no entry: a file spinel itself emitted. `spinel app.rb
+-c -o out.c` writes a translation unit that defines `main` and, through the
+compiler's internal header, its own copy of the runtime, so compiling it as
+carried C collides with the real program on both. spin recognises its own
+output by the banner on the first line, leaves it out of the build, and says
+which file it left out — that file may be sitting on top of a source of the
+same name it overwrote, in which case the source is gone and needs restoring.
+
 `exclude` covers native discovery only — `.rb` needs no entry, since nothing
 compiles it unless something requires it, and an excluded `.h` is still on the
 include path for the C that is compiled. An application scaffolded by
