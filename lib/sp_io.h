@@ -44,8 +44,12 @@ typedef struct {
 sp_bool sp_io_frozen(sp_File *f);
 sp_File *sp_io_freeze(sp_File *f);
 /* Object#== on two handles: identity, except that two File::Stat handles
-   compare as Comparable does for File::Stat -- by modification time. */
+   compare as Comparable does for File::Stat -- by modification time. <=> reads
+   the same way (0 / nil, or the mtime order of two stats), boxed; to_s is
+   Object's #<Class:0xADDR> under the class the handle presents as. */
 sp_bool sp_io_eq(sp_File *a, sp_File *b);
+sp_RbVal sp_io_cmp(sp_File *a, sp_RbVal other);
+const char *sp_io_to_s(sp_File *f);
 
 /* File.open(path, mode) -> GC-managed handle (block form is codegen-only). */
 sp_File *sp_File_open(const char *path, const char *mode);
@@ -207,6 +211,11 @@ typedef struct { DIR *dp; const char *path; } sp_Dir;
    is IOError "closed directory" in CRuby; #close, #path and #inspect work. */
 SP_NORETURN SP_COLD void sp_dir_raise_closed(void);
 #define SP_DIR_OPEN(d) do { if (!(d) || !(d)->dp) sp_dir_raise_closed(); } while (0)
+
+/* Object's to_s and <=> on the handle (sp_cold.c), declared here with the
+   struct because the poly to_s and spaceship in spinel_rt.h call them. */
+const char *sp_Dir_to_s(sp_Dir *d);
+sp_RbVal sp_Dir_cmp(sp_Dir *d, sp_RbVal other);
 
 /* ---- sp_io_pipe/sysopen relocated from spinel_rt.h (0 optcarrot uses). ---- */
 sp_PolyArray *sp_io_pipe(void);

@@ -415,17 +415,29 @@ int ty_object_protocol_family(TyKind t) {
   return 100 + (int)t;
 }
 
+/* The IO family -- a File, IO or File::Stat handle and a Dir handle -- also
+   takes Object#to_s and Object#<=> from the arm. Nothing else claimed them:
+   the generic fallbacks emitted a "" for to_s and an int-or-nil sentinel for
+   <=>, which on a File/IO handle met a slot the inference had typed poly, so
+   `p f.to_s` and `f <=> f` refused to compile, and on a Dir, whose slot
+   happened to be typed, answered "" and nil. The other heap handles keep
+   their own to_s (Thread, Exception, Method) or are not audited here. */
+static int ty_object_protocol_io(TyKind t) { return t == TY_IO || t == TY_DIR; }
+
 int ty_object_protocol_answers(TyKind rt, TyKind at, const char *name, int argc) {
   if (!name) return 0;
   int kind = ty_object_protocol_kind(rt);
   if (argc == 0) {
-    if (kind == 1) return sp_streq(name, "frozen?") || sp_streq(name, "freeze");
+    if (kind == 1)
+      return sp_streq(name, "frozen?") || sp_streq(name, "freeze") ||
+             (ty_object_protocol_io(rt) && sp_streq(name, "to_s"));
     /* a Range is always frozen; Time and Tms carry no frozen bit, so neither
        question is answered for them */
     if (kind == 2) return rt == TY_STR_RANGE && sp_streq(name, "frozen?");
     return 0;
   }
   if (argc != 1) return 0;
+  if (ty_object_protocol_io(rt) && sp_streq(name, "<=>")) return 1;
   int is_equal = sp_streq(name, "equal?");
   int is_eql = sp_streq(name, "eql?");
   int is_case = sp_streq(name, "===");

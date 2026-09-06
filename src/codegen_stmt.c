@@ -157,6 +157,11 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     }
     buf_puts(b, ")); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
   }
+  else if (t == TY_IO || t == TY_DIR) {
+    /* a handle renders as Object's to_s does for it (the protocol arm's render) */
+    buf_puts(b, t == TY_IO ? "puts(sp_io_to_s(" : "puts(sp_Dir_to_s("); emit_expr(c, arg, b);
+    buf_puts(b, "));\n");
+  }
   else if (ty_is_object(t)) {
     /* default Object#to_s: #<Name:0xADDR>, like CRuby (no ivars) */
     int cid = ty_object_class(t);
