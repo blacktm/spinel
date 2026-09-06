@@ -18042,8 +18042,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int bbn = 0; const int *bbb = bdy >= 0 ? nt_arr(nt, bdy, "body", &bbn) : NULL;
       int lt = ++g_tmp;
       buf_puts(b, "({ ");
-      buf_printf(b, "const char *_t%d; while ((_t%d = sp_argf_gets()) != NULL) {", lt, lt);
-      if (bpn) buf_printf(b, " const char *lv_%s = _t%d;", bpn, lt);
+      /* the line ARGF yields is a fresh string held in this C temporary and
+         nowhere else: root the slot, and the block's parameter with it, the
+         way IO#each_line below does */
+      buf_printf(b, "const char *_t%d = NULL; SP_GC_ROOT_STR(_t%d);"
+                    " while ((_t%d = sp_argf_gets()) != NULL) {", lt, lt, lt);
+      if (bpn) buf_printf(b, " const char *lv_%s = _t%d; SP_GC_ROOT_STR(lv_%s);", bpn, lt, bpn);
       for (int k = 0; k < bbn; k++) emit_stmt(c, bbb[k], b, 0);
       buf_puts(b, " } (&sp_argf_obj); })");
       return;
@@ -18158,13 +18162,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_puts(b, "({ ");
       /* rooted for the block's duration: a temporary receiver (Dir.open(d).each)
          has no other reference, and a body that allocates would let the
-         collector close it mid-loop (the File loops below root theirs too) */
-      buf_printf(b, "sp_Dir *_t%d = %s; SP_GC_ROOT(_t%d); const char *_t%d; ", tdh, dr, tdh, tdn);
+         collector close it mid-loop (the File loops below root theirs too).
+         The entry string the loop yields is a fresh allocation held in a C
+         temporary just the same, so it and the block's parameter take roots
+         of their own. */
+      buf_printf(b, "sp_Dir *_t%d = %s; SP_GC_ROOT(_t%d); const char *_t%d = NULL; SP_GC_ROOT_STR(_t%d); ",
+                 tdh, dr, tdh, tdn, tdn);
       buf_printf(b, "while ((_t%d = sp_Dir_read(_t%d)) != NULL) {", tdn, tdh);
       if (skip_dots)
         buf_printf(b, " if (sp_str_eq(_t%d, (&(\"\\xff\" \".\")[1])) ||"
                       " sp_str_eq(_t%d, (&(\"\\xff\" \"..\")[1]))) continue;", tdn, tdn);
-      if (dbpn) buf_printf(b, " const char *lv_%s = _t%d;", dbpn, tdn);
+      if (dbpn) buf_printf(b, " const char *lv_%s = _t%d; SP_GC_ROOT_STR(lv_%s);", dbpn, tdn, dbpn);
       for (int k = 0; k < dbbn; k++) emit_stmt(c, dbbb[k], b, 0);
       buf_printf(b, " } (sp_Dir *)_t%d; })", tdh);
       return;
@@ -18746,8 +18754,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_printf(b, "const char *_t%dc; sp_int _t%d; while ((_t%dc = sp_File_getc(_t%d)) != NULL"
                       " && (_t%d = sp_str_ord(_t%dc), 1)) {", lt2, lt2, lt2, rf2, lt2, lt2);
       else
-        buf_printf(b, "const char *_t%d; while ((_t%d = sp_File_getc(_t%d)) != NULL) {", lt2, lt2, rf2);
-      if (bpn2) buf_printf(b, " %s lv_%s = _t%d;", (is_byte || is_cp) ? "sp_int" : "const char *", bpn2, lt2);
+        /* the character is a fresh string, rooted -- slot and block parameter
+           -- like the line in each_line below. each_byte and each_codepoint
+           hand the block an sp_int instead; each_codepoint's own string is
+           read by the loop condition and never again, so it needs no root */
+        buf_printf(b, "const char *_t%d = NULL; SP_GC_ROOT_STR(_t%d);"
+                      " while ((_t%d = sp_File_getc(_t%d)) != NULL) {", lt2, lt2, lt2, rf2);
+      if (bpn2) {
+        buf_printf(b, " %s lv_%s = _t%d;", (is_byte || is_cp) ? "sp_int" : "const char *", bpn2, lt2);
+        if (!is_byte && !is_cp) buf_printf(b, " SP_GC_ROOT_STR(lv_%s);", bpn2);
+      }
       for (int k = 0; k < bbn2; k++) emit_stmt(c, bbb2[k], b, 0);
       buf_printf(b, " } (sp_File *)_t%d; })", rf2);
       free(rb.p); return;
@@ -18974,11 +18990,19 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       free(rb.p); r = NULL;
       /* Each iteration yields a FRESH heap line string, matching CRuby --
          a stored reference must keep its own line, not a mutated shared
-         buffer (#2803). */
-      buf_printf(b, "const char *_t%d; while ((_t%d = sp_File_gets_sep(_t%d, ", lt, lt, rf);
+         buffer (#2803). That string is held in this C temporary and nowhere
+         else, so the slot is rooted for the block: a block that allocates
+         otherwise collects the line it was just handed and reads it back
+         empty. NULL first, because the mark walker reads the slot as it
+         stands. The block's own parameter is rooted for the same reason
+         emit_hash_filter_loop roots its key and value (codegen_iter.c): a
+         block that REBINDS it -- line = line.upcase -- holds the new string
+         in that slot alone. */
+      buf_printf(b, "const char *_t%d = NULL; SP_GC_ROOT_STR(_t%d);"
+                    " while ((_t%d = sp_File_gets_sep(_t%d, ", lt, lt, lt, rf);
       if (esep >= 0) emit_expr(c, esep, b); else buf_puts(b, "\"\\n\"");
       buf_puts(b, ", 0, 0)) != NULL) {");
-      if (bpn) buf_printf(b, " const char *lv_%s = _t%d;", bpn, lt);
+      if (bpn) buf_printf(b, " const char *lv_%s = _t%d; SP_GC_ROOT_STR(lv_%s);", bpn, lt, bpn);
       for (int k = 0; k < bbn; k++) emit_stmt(c, bbb[k], b, 0);
       buf_printf(b, " } (sp_File *)_t%d; })", rf);
       return;
