@@ -11,6 +11,24 @@
 class Set
   include Enumerable
 
+  # A Set may hold itself (`s.add(s)`), directly or through an Array, a Hash or
+  # any object that leads back to it, and #==, #inspect and #flatten all walk
+  # their elements. Without a memory of what they are already inside, each of
+  # them follows the cycle until the C stack runs out. The runtime keeps that
+  # memory for Array and Hash -- a per-fiber path of the objects (or object
+  # pairs) the current walk is inside, restored by every non-local exit -- and
+  # a Set's walks, which are written in Ruby, join it through these bindings.
+  # Each `enter` answers the mark that `leave` takes back, or -1 when the walk
+  # is already inside this Set, which is the cue to stop. No `ensure` is
+  # needed: a raise, throw or break out of a walk lands on a handler that
+  # restores the path to the depth it had when that handler was armed.
+  module RecursionGuard
+    native_func :enter_inspect, [:any], :int, "sp_poly_recur_enter_inspect"
+    native_func :enter_eq, [:any, :any], :int, "sp_poly_recur_enter_eq"
+    native_func :enter_flatten, [:any], :int, "sp_poly_recur_enter_flatten"
+    native_func :leave, [:int], :nil, "sp_poly_recur_leave"
+  end
+
   # Set[1, 2, 3] builds a Set from the given elements (CRuby's Set.[]).
   def self.[](*args)
     new(args)
@@ -271,8 +289,19 @@ class Set
   end
 
   def ==(other)
+    return true if self.equal?(other)
     return false unless other.is_a?(Set)
-    size == other.size && subset?(other)
+    return false unless size == other.size
+    mark = RecursionGuard.enter_eq(self, other)
+    # A pair already being compared answers "equal", which is what lets two
+    # distinct self-containing Sets finish. CRuby answers false here, for a
+    # reason Spinel's array-backed Set cannot reproduce: its Set is a hash
+    # table, and the element's hash was stored while the Set was still empty,
+    # so the membership probe misses.
+    return true if mark < 0
+    r = subset?(other)
+    RecursionGuard.leave(mark)
+    r
   end
   alias eql? ==
 
@@ -414,8 +443,11 @@ class Set
     end
   end
 
-  # flatten recursively merges nested Set elements into a flat Set.
+  # flatten recursively merges nested Set elements into a flat Set. A Set that
+  # holds itself has no flat form, so CRuby raises rather than looping.
   def flatten
+    mark = RecursionGuard.enter_flatten(self)
+    raise ArgumentError, "tried to flatten recursive Set" if mark < 0
     r = Set.new
     @data.each do |x|
       if x.is_a?(Set)
@@ -424,6 +456,7 @@ class Set
         r.add(x)
       end
     end
+    RecursionGuard.leave(mark)
     r
   end
 
@@ -444,7 +477,11 @@ class Set
   end
 
   def inspect
-    "Set[" + @data.map { |x| x.inspect }.join(", ") + "]"
+    mark = RecursionGuard.enter_inspect(self)
+    return "Set[...]" if mark < 0
+    r = "Set[" + @data.map { |x| x.inspect }.join(", ") + "]"
+    RecursionGuard.leave(mark)
+    r
   end
   alias to_s inspect
 end

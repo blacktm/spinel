@@ -68,7 +68,21 @@ static const char *sp_json_key(sp_RbVal k) {
   return sp_json_str("");
 }
 
-const char *sp_json_val(sp_RbVal v) {
+/* CRuby's json refuses to serialize past 100 levels of nesting, which is how
+   it answers a structure that contains itself: `a << a; JSON.generate(a)` is a
+   JSON::NestingError, not an endless document. The limit is on DEPTH, not on
+   identity -- 100 levels of distinct arrays serialize and the 101st raises,
+   whether or not anything repeats. */
+#define SP_JSON_MAX_NESTING 100
+SP_COLD static __attribute__((noinline, noreturn)) void sp_json_too_deep(void) {
+  sp_raise_cls("JSON::NestingError",
+               "nesting of 100 is too deep. Did you try to serialize objects with circular references?");
+}
+static const char *sp_json_val_d(sp_RbVal v, int depth);
+const char *sp_json_val(sp_RbVal v) { return sp_json_val_d(v, 0); }
+/* `depth` counts the containers already entered, so a container reached at
+   depth 100 would be the 101st level. */
+static const char *sp_json_val_d(sp_RbVal v, int depth) {
   switch (v.tag) {
     case SP_TAG_INT:  return sp_int_to_s(v.v.i);
     case SP_TAG_FLT:  return sp_float_to_s(v.v.f);
@@ -79,17 +93,19 @@ const char *sp_json_val(sp_RbVal v) {
     case SP_TAG_OBJ: {
       int kind = sp_json_kind_fn ? sp_json_kind_fn(v) : 0;
       if (kind == 1) {  /* array */
+        if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
         sp_int n = sp_json_len_fn(v);
         jbuf b; memset(&b, 0, sizeof b); jb_c(&b, '[');
         for (sp_int i = 0; i < n; i++) {
           if (i) jb_c(&b, ',');
-          const char *e = sp_json_val(sp_json_aref_fn(v, i));
+          const char *e = sp_json_val_d(sp_json_aref_fn(v, i), depth + 1);
           jb_add(&b, e, strlen(e));
         }
         jb_c(&b, ']');
         return jb_finish(&b);
       }
       if (kind == 2) {  /* hash */
+        if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
         sp_int n = sp_json_len_fn(v);
         jbuf b; memset(&b, 0, sizeof b); jb_c(&b, '{');
         for (sp_int i = 0; i < n; i++) {
@@ -99,7 +115,7 @@ const char *sp_json_val(sp_RbVal v) {
           const char *ks = sp_json_key(k);
           jb_add(&b, ks, strlen(ks));
           jb_c(&b, ':');
-          const char *vs = sp_json_val(val);
+          const char *vs = sp_json_val_d(val, depth + 1);
           jb_add(&b, vs, strlen(vs));
         }
         jb_c(&b, '}');
@@ -111,7 +127,7 @@ const char *sp_json_val(sp_RbVal v) {
          knowledge lives here or in the compiler; only the generic reflection. */
       /* a user class's own #to_json wins, as it does in CRuby's json */
       if (sp_obj_to_json_fn) { const char *uj = sp_obj_to_json_fn(v); if (uj) return uj; }
-      if (sp_obj_to_hash_fn) return sp_json_val(sp_obj_to_hash_fn(v));
+      if (sp_obj_to_hash_fn) return sp_json_val_d(sp_obj_to_hash_fn(v), depth);
       return JSPL("null");
     }
     default: return JSPL("null");
@@ -131,6 +147,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
   if (v.tag == SP_TAG_OBJ) {
     int kind = sp_json_kind_fn ? sp_json_kind_fn(v) : 0;
     if (kind == 1) {  /* array */
+      if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
       sp_int n = sp_json_len_fn(v);
       if (n == 0) { jb_add(b, "[]", 2); return; }
       jb_c(b, '[');
@@ -146,6 +163,7 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
       return;
     }
     if (kind == 2) {  /* hash */
+      if (depth >= SP_JSON_MAX_NESTING) sp_json_too_deep();
       sp_int n = sp_json_len_fn(v);
       if (n == 0) { jb_add(b, "{}", 2); return; }
       jb_c(b, '{');
