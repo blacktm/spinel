@@ -179,6 +179,15 @@ extern void (*sp_gc_obj_retune_hook)(size_t before);
 extern size_t sp_gc_bytes;
 extern size_t sp_gc_old_bytes;
 extern int sp_gc_cycle;
+/* SPINEL_GC_STATS=1 (report in sp_alloc.c): how many collections ran and what
+   they cost. A program whose GC share of CPU climbs with concurrency looks
+   from outside the process exactly like one collecting more often, and there
+   was no counter to tell the two apart -- which is where the diagnosis in
+   #4352 stopped. One clock pair and two increments per COLLECTION, so they
+   are always kept; only the printing is gated. */
+extern unsigned long long sp_gc_stat_collections;
+extern unsigned long long sp_gc_stat_fulls;
+extern double sp_gc_stat_seconds;
 extern void (*sp_gc_mark_suspended_fibers_hook)(void);
 
 /* Heap byte-counter accounting. The container growth paths (sp_array.h,

@@ -3,6 +3,7 @@
    Owns the string heap so that both the generated program and every standalone
    lib/*.c allocate onto one heap. sp_str_sweep is registered with the object GC
    via a constructor, so a collection triggered from any TU also reaps strings. */
+#include <time.h>
 #include "sp_alloc.h"
 #include "sp_dtoa.h"   /* sp_format_float for locale-independent Float#to_s */
 /* Per-site allocation attribution (SPINEL_ALLOC_SITES=1, on top of
@@ -154,7 +155,61 @@ void sp_alloc_worker_tune(int workers) {
 static size_t sp_gc_sat_mul(size_t v, size_t k) {
   return (k && v > (size_t)-1 / k) ? (size_t)-1 : v * k;
 }
+/* SPINEL_GC_STATS=1: a line on stderr, at most once a second, saying how many
+   collections have run and what they cost. A server whose GC share of CPU
+   climbs with concurrency and one that simply collects more often are the same
+   picture from a profile; separating them needs the COUNT beside the total
+   time, and spinel exposed neither (#4352). Reported from the object retune
+   because that runs at the end of every collection and this file is where both
+   thresholds and the string heap are visible. */
+static void sp_gc_stats_emit(void);
+static void sp_gc_stats_report(void) {
+  static int on = -1;
+  static double last = 0;
+  if (on < 0) {
+    const char *e = getenv("SPINEL_GC_STATS"); on = (e && *e && *e != '0') ? 1 : 0;
+    /* A program that exits before the next tick would otherwise report nothing
+       but its first collection, so the totals are also printed on the way out.
+       A server is killed rather than returning from main, which is why the
+       periodic line exists at all. */
+    if (on) atexit(sp_gc_stats_emit);
+  }
+  if (!on) return;
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+  if (now - last < 1.0) return;
+  last = now;
+  sp_gc_stats_emit();
+}
+static void sp_gc_stats_emit(void) {
+  static double first = 0;
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+  if (first == 0) first = now;
+  double wall = now - first;
+  unsigned long long n = sp_gc_stat_collections;
+#ifdef SP_THREADS
+  int nw = sp_active_workers; if (nw < 1) nw = 1;
+  /* Both generations: survivors are promoted, so the young total alone reads
+     as ~0 right after a collection and would say the string heap is empty. */
+  size_t sbytes = sp_str_bytes_total() + sp_str_old_total();
+#else
+  int nw = 1;
+  size_t sbytes = SP_GC_CTR_GET(sp_str_heap_bytes) + SP_GC_CTR_GET(sp_str_old_bytes);
+#endif
+  fprintf(stderr,
+          "[gc] %llu collections (%llu full) in %.2fs of %.1fs wall (%.1f%%), %.2fms avg; "
+          "live %.1f MB obj + %.1f MB str; trigger %.1f MB obj + %.2f MB str/worker x %d\n",
+          n, sp_gc_stat_fulls, sp_gc_stat_seconds, wall,
+          wall > 0 ? 100.0 * sp_gc_stat_seconds / wall : 0.0,
+          n ? 1000.0 * sp_gc_stat_seconds / (double)n : 0.0,
+          (double)SP_GC_CTR_GET(sp_gc_bytes) / 1048576.0, (double)sbytes / 1048576.0,
+          (double)SP_GC_CTR_GET(sp_gc_threshold) / 1048576.0,
+          (double)SP_GC_CTR_GET(sp_str_threshold) / 1048576.0, nw);
+}
+
 void sp_gc_retune_object(size_t before) {
+  sp_gc_stats_report();
   if (sp_gc_stress_pin) { sp_gc_threshold = sp_gc_threshold_init; return; }
   size_t live = sp_gc_bytes;
   /* saturating: the live counter is a heuristic and is allowed to lag, so it

@@ -13,6 +13,7 @@
 #define malloc_trim(x) ((void)0)
 #endif
 #include <unistd.h>
+#include <time.h>
 #include "sp_gc.h"
 #include <signal.h>
 #include <unistd.h>
@@ -397,8 +398,21 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
     free(cand);
 }
 
+unsigned long long sp_gc_stat_collections=0;
+unsigned long long sp_gc_stat_fulls=0;
+double sp_gc_stat_seconds=0;
+static double sp_gc_stat_now(void){
+#if defined(CLOCK_MONOTONIC)
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+  return (double)ts.tv_sec+(double)ts.tv_nsec*1e-9;
+#else
+  return 0.0;
+#endif
+}
+
 void sp_gc_collect(void){
   size_t ob_before = sp_gc_bytes;
+  double stat_t0 = sp_gc_stat_now();
   int full=(sp_gc_cycle%sp_gc_full_interval==0);sp_gc_cycle++;
   /* Forced by growth rather than by the schedule: the old generation has
      outgrown what the last full found live in it. */
@@ -566,6 +580,12 @@ void sp_gc_collect(void){
      collection time on allocation-heavy runs. Every 4th full keeps the RSS
      benefit at a fraction of the cost. */
   if(full&&(sp_gc_full_runs%4)==1)malloc_trim(0);
+  /* Bump BEFORE the retune hook: the hook is where the stats line is printed
+     (sp_alloc.c sees both thresholds and the string heap), and it must read
+     this collection, not the previous one. */
+  sp_gc_stat_collections++;
+  if(full)sp_gc_stat_fulls++;
+  sp_gc_stat_seconds+=sp_gc_stat_now()-stat_t0;
   if(sp_gc_obj_retune_hook)sp_gc_obj_retune_hook(ob_before);
 }
 
