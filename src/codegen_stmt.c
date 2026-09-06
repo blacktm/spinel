@@ -1164,7 +1164,9 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
     const char *hcn = ty_hash_cname(lv->type);
     int poly_val = (lv->type == TY_SYM_POLY_HASH || lv->type == TY_STR_POLY_HASH ||
                     lv->type == TY_POLY_POLY_HASH);
-    if (is_hash_new && hash_new_default >= 0) {
+    if (is_hash_new && hash_new_default >= 0 && nt_kind(c->nt, hash_new_default) != NK_NilNode) {
+      /* `Hash.new(nil)` is `Hash.new`: a nil default lowered into an Integer
+         slot as 0, and a miss then answered a truthy 0 where Ruby answers nil */
       buf_printf(b, "sp_%sHash_new_with_default(", hcn);
       if (poly_val) emit_boxed(c, hash_new_default, b); else emit_expr(c, hash_new_default, b);
       buf_puts(b, ")");
@@ -7992,7 +7994,11 @@ else {
            the default, as the local write emits (emit_assign). Before, only the
            argument-less form took this arm and the default form fell to the
            boxed poly emit, which the typed slot could not hold. */
-        else if (hash_new_default_arg(c, v) >= 0) { v_empty_hash = 1; v_hash_dflt = hash_new_default_arg(c, v); }
+        else if (hash_new_default_arg(c, v) >= 0) {
+          v_empty_hash = 1;
+          v_hash_dflt = hash_new_default_arg(c, v);
+          if (nt_kind(nt, v_hash_dflt) == NK_NilNode) v_hash_dflt = -1;   /* Hash.new(nil) is Hash.new */
+        }
       }
     }
     if (vty && sp_streq(vty, "NilNode"))
@@ -11733,8 +11739,16 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
       buf_puts(b, ")");
     }
     else {
-      buf_printf(b, "if (%ssp_%sHash_has_key(_t%d, _t%d)) sp_%sHash_set(_t%d, _t%d, ",
-                 is_or ? "!" : "", hn, ta, tb, hn, ta, tb);
+      /* `h[k] ||= v` is `h[k] || (h[k] = v)`: it is the READ that decides, and
+         on a miss the read answers the hash's default. Testing key presence
+         instead assigned over a truthy default -- `Hash.new(0)` took the write
+         on a miss where CRuby keeps the 0 -- and `&&=` refused the write the
+         truthy default calls for. The expression form already read the slot
+         and tested it for nil; this is the same test. */
+      int tc = ++g_tmp;
+      buf_printf(b, "%s _t%d = sp_%sHash_get(_t%d, _t%d); if (", c_type_name(vt), tc, hn, ta, tb);
+      emit_slot_nil_test(c, vt, tc, is_or, b);
+      buf_printf(b, ") sp_%sHash_set(_t%d, _t%d, ", hn, ta, tb);
       emit_expr(c, v, b);
       buf_puts(b, ")");
     }

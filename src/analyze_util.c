@@ -781,6 +781,48 @@ static int hash_new_default_arg_compute(Compiler *c, int recv) {
   return av[0];
 }
 
+/* The default-value node of the single `Hash.new(d)` that a local or an ivar
+   receiver is bound to, or -1. The local half is hash_new_default_arg's own;
+   the ivar half walks the class's writes of that name the way the codegen's
+   ivar_write_slot_ty does, and answers only when exactly one write exists and
+   it is that shape -- two writes, or one of another shape, are dynamic. */
+int recv_hash_new_default_arg(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  if (recv < 0) return -1;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk == NK_LocalVariableReadNode) return hash_new_default_arg(c, recv);
+  if (rk != NK_InstanceVariableReadNode) return -1;
+  const char *ivn = nt_str(nt, recv, "name");
+  Scope *rs = comp_scope_of(c, recv);
+  if (!ivn || !rs || rs->class_id < 0) return -1;
+  int found = -1;
+  NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, w) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, ivn)) continue;
+    Scope *ws = comp_scope_of(c, w);
+    if (!ws || ws->class_id != rs->class_id) continue;
+    int dn = hash_new_default_arg(c, nt_ref(nt, w, "value"));
+    if (dn < 0) return -1;
+    if (found >= 0) return -1;
+    found = dn;
+  }
+  return found;
+}
+
+/* The value type a `Hash.new(d)` default contributes to its hash's value
+   type. An empty `[]` or `{}` default infers no element type of its own, but
+   it is still a non-scalar value the hash answers on a miss, so it widens the
+   value to poly rather than vanishing into the unify -- the rule the nested
+   hash-literal typing already applies to an unresolved element (#4000). */
+TyKind hash_default_value_ty(Compiler *c, int dn) {
+  if (dn < 0) return TY_UNKNOWN;
+  TyKind t = infer_type(c, dn);
+  if (t != TY_UNKNOWN) return t;
+  NodeKind k = nt_kind(c->nt, dn);
+  if (k == NK_ArrayNode || k == NK_HashNode || k == NK_KeywordHashNode) return TY_POLY;
+  return TY_UNKNOWN;
+}
+
 /* Is CONSTNAME written directly in the body of `class CLSNAME`? Constants live
    in one flat namespace, so the AST is what says which class owns one -- what
    const_defined?/const_get need for an `inherit: false` search (#3762). */

@@ -2666,6 +2666,17 @@ int infer_write_types(Compiler *c) {
     }
     else continue;
 
+    /* The slot's own `Hash.new(default)`: the default is a value the hash
+       answers, so it is part of the value type the `[]=` writes establish.
+       Without it `h = Hash.new("none"); h["b"] = 1` made the slot a StrInt
+       hash and the C build stopped on the string handed to its Integer
+       constructor; with it the value widens to poly and the default is
+       carried boxed, which is what the global and constant slots already do.
+       A push or a splice is array evidence and has no default to consult. */
+    if (!is_push && !is_splice) {
+      int dn = recv_hash_new_default_arg(c, recv);
+      if (dn >= 0) vt = ty_unify(vt, hash_default_value_ty(c, dn));
+    }
     TyKind before = *slot;
     if (is_push) {
       /* explicit push/append: definitely array.  A PolyArray stays PolyArray

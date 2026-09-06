@@ -7952,7 +7952,7 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
         TyKind ht = ty_is_hash(comp_ntype(c, id)) ? comp_ntype(c, id)
                                                   : ivar_write_slot_ty(c, id);
         const char *hcn = ty_hash_cname(ht);
-        if (argc == 0) buf_printf(b, "sp_%sHash_new()", hcn);
+        if (argc == 0 || nt_kind(nt, argv[0]) == NK_NilNode) buf_printf(b, "sp_%sHash_new()", hcn);
         else {
           buf_printf(b, "sp_%sHash_new_with_default(", hcn);
           if (ht == TY_SYM_POLY_HASH || ht == TY_STR_POLY_HASH || ht == TY_POLY_POLY_HASH)

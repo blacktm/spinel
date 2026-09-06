@@ -646,7 +646,7 @@ static void emit_index_get(Compiler *c, int recv, int key, Buf *b) {
    is nonzero) and overwrote a legitimately stored 0 (which is truthy in Ruby).
    The typed-array branches spell it correctly; the hash branch did not, and it
    is the expression form that is reached when the result is used (#3421). */
-static void emit_slot_nil_test(Compiler *c, TyKind t, int tmp, int want_nil, Buf *b) {
+void emit_slot_nil_test(Compiler *c, TyKind t, int tmp, int want_nil, Buf *b) {
   const char *n = want_nil ? "" : "!";
   switch (t) {
     case TY_INT:    buf_printf(b, "%s(_t%d == SP_INT_NIL)", n, tmp); return;

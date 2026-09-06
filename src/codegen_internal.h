@@ -771,6 +771,10 @@ int emit_hash_call(Compiler *c, int id, Buf *b);
 int emit_scalar_call(Compiler *c, int id, Buf *b);
 int emit_object_call(Compiler *c, int id, Buf *b);
 int emit_native_object_protocol(Compiler *c, int id, Buf *b);
+/* The C test for "temp _t<tmp> of kind t holds nil" (want_nil) or "holds a
+   non-nil value" (!want_nil), spelled per kind: the int/float sentinels, a
+   NULL pointer, a poly tag. Shared by the index-or/and-write forms. */
+void emit_slot_nil_test(Compiler *c, TyKind t, int tmp, int want_nil, Buf *b);
 int emit_native_case_eq(Compiler *c, int cond, TyKind subj_t, const char *subj_ref, Buf *b);
 int exc_subclass_defines(Compiler *c, const char *name);
 int emit_value_recv_call(Compiler *c, int id, Buf *b);

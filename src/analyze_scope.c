@@ -2992,7 +2992,7 @@ static TyKind slot_hash_variant_from_writes(Compiler *c, NodeKind rk, const char
      `Hash.new(0)` filled only by `+=` has no `[]=` to learn Integer from, and a
      default of another kind than the writes widens the value to poly, where
      the boxed default is carried, rather than being cast into an Integer slot. */
-  if (dflt >= 0) { vt = ty_unify(vt, infer_type(c, dflt)); saw = 1; }
+  if (dflt >= 0) { vt = ty_unify(vt, hash_default_value_ty(c, dflt)); saw = 1; }
   if (!saw) return TY_UNKNOWN;
   TyKind want = (kt == TY_SYMBOL) ? TY_SYM_POLY_HASH
               : (kt == TY_UNKNOWN) ? TY_POLY_POLY_HASH : ty_hash_of(kt, vt);

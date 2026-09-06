@@ -8567,6 +8567,7 @@ static void mark_mixed_key_hash_locals(Compiler *c) {
   }
   free(uses);
 }
+
 /* A bare `{}` indexed or fetched with a statically-typed key takes the variant
    that key selects, instead of the StrPolyHash fallback that would coerce a
    Symbol key to a String (#3028) or emit ill-typed C for an Integer one
@@ -8665,6 +8666,13 @@ static int mark_empty_hash_key_ctx(Compiler *c) {
       int nw = 0;
       TyKind wv = aset_value_type_ex(c, recv, &nw);
       if (nw > 0 && wv == TY_UNKNOWN && g_infer_optimistic) continue;
+      /* The default is a value the hash answers, so it is part of the value
+         type: `Hash.new("none")` written with Integers widens to a poly value
+         that carries the default boxed, instead of casting the string into
+         the Integer constructor and stopping the C build. Same rule the global
+         and constant slots apply. */
+      { int dn = recv_hash_new_default_arg(c, recv);
+        if (dn >= 0) wv = ty_unify(wv, hash_default_value_ty(c, dn)); }
       want = (wv == TY_INT || wv == TY_STRING) ? ty_hash_of(TY_STRING, wv)
                                                : TY_STR_POLY_HASH;
     }
@@ -8679,6 +8687,13 @@ static int mark_empty_hash_key_ctx(Compiler *c) {
       int nw = 0;
       TyKind wv = aset_value_type_ex(c, recv, &nw);
       if (nw > 0 && wv == TY_UNKNOWN && g_infer_optimistic) continue;
+      /* The default is a value the hash answers, so it is part of the value
+         type: `Hash.new("none")` written with Integers widens to a poly value
+         that carries the default boxed, instead of casting the string into
+         the Integer constructor and stopping the C build. Same rule the global
+         and constant slots apply. */
+      { int dn = recv_hash_new_default_arg(c, recv);
+        if (dn >= 0) wv = ty_unify(wv, hash_default_value_ty(c, dn)); }
       want = (wv == TY_INT || wv == TY_STRING) ? ty_hash_of(TY_INT, wv)
                                                : TY_POLY_POLY_HASH;
     }
