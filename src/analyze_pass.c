@@ -7922,6 +7922,12 @@ int infer_block_params(Compiler *c) {
               sp_streq(name, "to_h")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
+    /* the walks a narrowed object array takes (#4846) bind its class */
+    else if ((sp_streq(name, "each") || sp_streq(name, "reverse_each") ||
+              sp_streq(name, "each_entry") || sp_streq(name, "each_with_index") ||
+              sp_streq(name, "map") || sp_streq(name, "collect")) &&
+             ty_is_obj_array(rt))
+      pt = ty_array_elem(rt);
     /* each_index { |i| } / fill { |i| } bind the index, not the element: always
        int (fill's block form takes the index and returns the value to store). */
     else if ((sp_streq(name, "each_index") || sp_streq(name, "fill") ||
@@ -8552,6 +8558,13 @@ int infer_block_params(Compiler *c) {
          assigned the loop's sp_RbVal element to an sp_FloatArray * and the
          program did not compile. */
       if (pt == TY_UNKNOWN || !pure_block_param(c, s, p0)) continue;
+      lv->type = pt; changed = 1;
+      continue;
+    }
+    /* The same for a Hash read off `r[k] = v` in the block, in the round
+       before the receiver narrowed to an object array: the element is an
+       instance of its class, whose own []= the store calls (#4846). */
+    if (ty_is_hash(lv->type) && ty_is_obj_array(rt) && pure_block_param(c, s, p0)) {
       lv->type = pt; changed = 1;
       continue;
     }
