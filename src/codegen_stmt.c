@@ -6749,8 +6749,10 @@ void emit_stmt(Compiler *c, int id, Buf *b, int indent) {
      at two sites shares its node ids, so a setter that is a statement at one
      site must still yield its value at a value-position site */
   int saved_setter = g_setter_stmt_id;
-  if (nt_kind(c->nt, id) == NK_CallNode && name_is_plain_setter(nt_str(c->nt, id, "name")))
-    g_setter_stmt_id = id;
+  if (nt_kind(c->nt, id) == NK_CallNode) {
+    int sargc; call_args(c->nt, id, &sargc);
+    if (call_is_assignment(nt_str(c->nt, id, "name"), sargc)) g_setter_stmt_id = id;
+  }
   emit_with_prelude(c, id, b, indent, emit_stmt_inner);
   g_setter_stmt_id = saved_setter;
   /* a call the statement emitters placed themselves (puts, an iterator with

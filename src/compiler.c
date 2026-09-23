@@ -959,6 +959,12 @@ int name_is_plain_setter(const char *name) {
   char p = name[ln - 2];
   return p != '=' && p != '!' && p != '<' && p != '>' && p != ']';
 }
+/* A call whose value is its last argument as written: a plain setter
+   `x.y = v`, or an element store `x[k] = v`. */
+int call_is_assignment(const char *name, int argc) {
+  if (argc == 1 && name_is_plain_setter(name)) return 1;
+  return argc == 2 && name && sp_streq(name, "[]=");
+}
 /* The attribute a setter name writes: "x=" -> "x". 0 when the name is not a
    plain setter or does not fit. */
 int setter_base_name(const char *name, char *out, size_t cap) {

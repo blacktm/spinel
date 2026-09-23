@@ -9084,7 +9084,8 @@ static void emit_isa_self_class(Compiler *c, int recv, int cid, Buf *b) {
 }
 
 /* `obj.x = v` is an assignment expression: its value is v as written, whatever
-   the writer's body returns (`def x=(v); @x = v.to_s; end` still yields v). The
+   the writer's body returns (`def x=(v); @x = v.to_s; end` still yields v), and
+   so is `obj[k] = v`, whose value is its last argument. The
    argument is evaluated once, after the receiver, into a rooted temp; the
    dispatch reads the temp through g_argov, and the temp is the result. A call
    emit_stmt is lowering (g_setter_stmt_id) has no reader for the value and
@@ -9093,16 +9094,17 @@ static void emit_isa_self_class(Compiler *c, int recv, int cid, Buf *b) {
 static int setter_value_open(Compiler *c, int id, Buf *b, TyKind *vt_out) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
-  if (id == g_setter_stmt_id || argc != 1 || nt_ref(nt, id, "block") >= 0 ||
-      !name_is_plain_setter(nt_str(nt, id, "name")) || g_n_argov >= MAX_ARG_OVERRIDE)
+  if (id == g_setter_stmt_id || nt_ref(nt, id, "block") >= 0 ||
+      !call_is_assignment(nt_str(nt, id, "name"), argc) || g_n_argov >= MAX_ARG_OVERRIDE)
     return -1;
-  TyKind vt = comp_ntype(c, argv[0]);
+  int va = argv[argc - 1];
+  TyKind vt = comp_ntype(c, va);
   if (vt == TY_UNKNOWN) return -1;
   /* nil and void have no C storage type of their own: hold them boxed */
   int boxed = (vt == TY_NIL || vt == TY_VOID);
   Buf ab; memset(&ab, 0, sizeof ab);
-  if (boxed) emit_boxed(c, argv[0], &ab);
-  else emit_expr(c, argv[0], &ab);
+  if (boxed) emit_boxed(c, va, &ab);
+  else emit_expr(c, va, &ab);
   int tv = ++g_tmp;
   emit_indent(g_pre, g_indent);
   emit_ctype(c, boxed ? TY_POLY : vt, g_pre);
@@ -9111,7 +9113,7 @@ static int setter_value_open(Compiler *c, int id, Buf *b, TyKind *vt_out) {
   free(ab.p);
   if (boxed || vt == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tv); }
   else if (needs_root(vt)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tv); }
-  g_argov_node[g_n_argov] = argv[0];
+  g_argov_node[g_n_argov] = va;
   snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", tv);
   g_n_argov++;
   buf_puts(b, "({ (void)(");

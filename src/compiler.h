@@ -993,6 +993,7 @@ static inline int comp_ty_value_obj(const Compiler *c, TyKind t) {
 int container_elem_read_p(const NodeTable *nt, int id);
 const char *poly_enum_op_for(const char *name);
 int poly_container_read_p(const char *name);
+int call_is_assignment(const char *name, int argc);
 /* 1 for a numeric read a builtin receiver answers differently (see compiler.c). */
 int poly_numeric_read_p(const char *name);
 int poly_string_read_p(const char *name);
