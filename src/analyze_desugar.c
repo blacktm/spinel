@@ -843,8 +843,8 @@ int desugar_public_send_recv(Compiler *c) {
    targets only: a nested class pattern (`{ left: Lit(value: lv) }`) bound
    nothing at all and raised nothing either, so the local came out nil (#4047).
    The case form's emitter recurses, and answers the same NoMatchingPatternError
-   on a miss. Only the nesting shapes are rewritten -- the flat ones the
-   dedicated emitter handles keep going through it. */
+   on a miss. A flat array or hash pattern keeps going through the dedicated
+   emitter; the nesting shapes, and every other pattern kind, are rewritten. */
 static int pattern_nests(const NodeTable *nt, int pat, int depth) {
   if (pat < 0 || depth > 8) return 0;
   const char *ty = nt_type(nt, pat);
@@ -868,7 +868,16 @@ int desugar_rightward_nested_pattern(Compiler *c) {
     int value = nt_ref(nt, id, "value");
     int pattern = nt_ref(nt, id, "pattern");
     if (value < 0 || pattern < 0) continue;
-    if (!pattern_nests(nt, pattern, 0)) continue;
+    /* The dedicated emitter has arms for a flat array or hash pattern only;
+       any other kind (`=> String`, `=> Integer => n`, `=> 1..9`, `=> ^x`,
+       `=> [*, 3, *]`, ...) emitted nothing at all: the value was never
+       evaluated and a miss raised nothing. The case form handles them all. */
+    const char *pty = nt_type(nt, pattern);
+    int flat = pty && (sp_streq(pty, "ArrayPatternNode") || sp_streq(pty, "HashPatternNode"));
+    if (flat && !pattern_nests(nt, pattern, 0)) continue;
+    /* `def t(x) = x => Symbol` parses as the def matched against Symbol; the
+       case form would emit the method a second time */
+    if (nt_type(nt, value) && sp_streq(nt_type(nt, value), "DefNode")) continue;
     int inn = nt_new_node(nt, "InNode");
     int st = nt_new_node(nt, "StatementsNode");
     if (inn < 0 || st < 0) continue;
