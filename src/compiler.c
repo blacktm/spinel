@@ -1729,7 +1729,10 @@ int poly_container_read_p(const char *name) {
     "delete", "dig", "values_at",
     /* a blockless each answers an Enumerator over the container; a class
        with a Ruby each in the program left an Array on the raise default */
-    "each", NULL };
+    "each",
+    /* a store: a class with its own []= sends a boxed Hash or Array through
+       the dispatch, whose builtin default is the runtime setter */
+    "[]=", NULL };
   if (!name) return 0;
   for (int i = 0; N[i]; i++) if (sp_streq(name, N[i])) return 1;
   return 0;

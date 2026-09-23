@@ -13921,9 +13921,17 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     }
   }
   /* poly receiver: []= with symbol, string, int, or poly key -> runtime dispatch
-     Skip Fiber/Fiber.current storage receivers (handled later). */
+     Skip Fiber/Fiber.current storage receivers (handled later). As with `[]`
+     below, a user class defining its own []= goes to the per-class poly
+     dispatch, whose builtin default comes back here (g_pd_skip). A range key
+     keeps the splice below. */
+  int has_user_aset = 0;
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "[]=") && argc == 2 && g_pd_skip != id &&
+      comp_ntype(c, argv[0]) != TY_RANGE)
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_poly_arm_defines_n(c, k, "[]=", argc)) { has_user_aset = 1; break; }
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "[]=") && argc == 2 &&
-      !sp_is_fiber_storage_recv(nt, recv)) {
+      !has_user_aset && !sp_is_fiber_storage_recv(nt, recv)) {
     /* arr[range] = rhs on a poly receiver: a splice over the range's span. */
     if (comp_ntype(c, argv[0]) == TY_RANGE) {
       int tv = ++g_tmp;
