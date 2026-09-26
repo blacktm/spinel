@@ -7620,7 +7620,11 @@ static sp_PolyPolyHash *sp_PolyPolyHash_from_poly(sp_RbVal src);
    rather than loop forever (#4837). */
 static sp_PolyArray *sp_enum_items_from(sp_RbVal v);
 static sp_RbVal sp_poly_iter_subject(sp_RbVal v) {
-  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE))
+  /* an Enumerator too: it has no length or element read of its own, so a
+     boxed `h.each_pair` (or a boxed Struct's) walked zero elements and
+     `.map { |k, v| k }` answered [] */
+  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE ||
+                              v.cls_id == SP_BUILTIN_ENUMERATOR))
     return sp_box_poly_array(sp_enum_items_from(v));
   return v;
 }
