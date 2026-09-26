@@ -3538,12 +3538,67 @@ static void wb_cells_collect(WbCells *cs, const char *p, size_t len) {
     memcpy(cs->v[cs->n], p + s, e - s); cs->v[cs->n][e - s] = '\0'; cs->n++;
   }
 }
+/* Whether the line at `bol` is a function definition's header: it starts in
+   column 0 with an identifier that is not a statement keyword (the emitter
+   writes some multi-line statements from column 0 -- `if (..) {`, `else {`,
+   `while (..) {` -- inside a body), opens a parameter list, and ends in `{`. */
+static int wb_is_fn_header(const Buf *b, size_t bol) {
+  char c0 = b->p[bol];
+  if (!(isalpha((unsigned char)c0) || c0 == '_')) return 0;
+  size_t e = bol;
+  while (e < b->len && b->p[e] != '\n') e++;
+  if (e == bol || b->p[e-1] != '{') return 0;
+  static const char *kw[] = { "if ", "if(", "else", "while", "for ", "for(", "switch", "do ", "do{" };
+  for (size_t k = 0; k < sizeof kw / sizeof *kw; k++)
+    if (!strncmp(b->p + bol, kw[k], strlen(kw[k]))) return 0;
+  return memchr(b->p + bol, '(', e - bol) != NULL;
+}
+/* The enclosing function's header for position `at`: the nearest header line
+   before it. `*last_at` and `*last_h` carry the previous answer, so a scan
+   walks back only as far as the previous store did. Returns the header's
+   offset, or (size_t)-1. */
+static size_t wb_fn_header(const Buf *b, size_t at, size_t *last_at, size_t *last_h) {
+  size_t k = at;
+  while (k > 0) {
+    size_t bol = k;
+    while (bol > 0 && b->p[bol-1] != '\n') bol--;
+    if (bol < at && wb_is_fn_header(b, bol)) { *last_at = at; *last_h = bol; return bol; }
+    if (*last_h != (size_t)-1 && bol <= *last_at && bol > *last_h) { *last_at = at; return *last_h; }
+    if (bol == 0) break;
+    k = bol - 1;
+  }
+  *last_h = (size_t)-1;
+  return (size_t)-1;
+}
+/* Whether the header at `h` takes `*_cell_<nm>` as a parameter. */
+static int wb_header_has_param(const Buf *b, size_t h, const char *nm, size_t nn) {
+  size_t e = h;
+  while (e < b->len && b->p[e] != '{' && b->p[e] != '\n') e++;
+  for (size_t k = h; k + 7 + nn <= e; k++) {
+    if (b->p[k] != '*' || strncmp(b->p + k + 1, "_cell_", 6) || strncmp(b->p + k + 7, nm, nn)) continue;
+    char t = b->p[k + 7 + nn];
+    if (t == ',' || t == ')') return 1;
+  }
+  return 0;
+}
 /* `(*X) = v` where X names a reference cell: wrap X so the barrier lands on the
-   cell, which is the object the collector reaches the stored value through. */
+   cell, which is the object the collector reaches the stored value through.
+
+   The names are the whole program's, since a proc body stores through a
+   capture field whose cell another function declared. So `_cell_x` matches a
+   by-reference String parameter too whenever any function anywhere has a
+   heap cell named `x` -- and a by-reference parameter may point at the
+   caller's stack local (`&lv_x`), where the barrier reads a header that is not
+   there and, if the bytes in front of the slot happen to read as an old clean
+   header, sets a dirty bit in the caller's frame. Such a store needs no
+   barrier: the lending site pins a heap cell or an ivar owner it lends
+   (sp_gc_pin_remembered), and a stack local is rooted by the caller's frame.
+   So a `_cell_x` that is the enclosing function's parameter is skipped. */
 static void gc_wb_cells(Compiler *c, Buf *b) {
   WbCells cs; memset(&cs, 0, sizeof cs);
   wb_cells_collect(&cs, b->p, b->len);
   if (!cs.n) { free(cs.v); return; }
+  size_t hdr_at = 0, hdr_h = (size_t)-1;
   for (size_t i = 0; i + 3 < b->len; i++) {
     if (b->p[i] != '(' || b->p[i+1] != '*') continue;
     size_t j = i, d = 0;
@@ -3566,13 +3621,18 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
     while (ns > is && (isalnum((unsigned char)b->p[ns-1]) || b->p[ns-1] == '_')) ns--;
     if (ns == ne) continue;
     const char *nm = b->p + ns; size_t nn = ne - ns;
-    if (nn > 6 && !strncmp(nm, "_cell_", 6)) { nm += 6; nn -= 6; }
+    int local_cell = 0;
+    if (nn > 6 && !strncmp(nm, "_cell_", 6)) { nm += 6; nn -= 6; local_cell = 1; }
     /* the capture struct's field for cell `x` is `c_x`; without the strip no
        store made through `_cap` matched the declaration and the proc body's
        every `(*cap->c_x) = v` went unrecorded */
     else if (nn > 2 && !strncmp(nm, "c_", 2) && ns >= 2 && b->p[ns-1] == '>' && b->p[ns-2] == '-') { nm += 2; nn -= 2; }
     if (!wb_cells_has(&cs, nm, nn)) continue;
     if (!strncmp(b->p + is, "SP_WBO(", 7)) continue;
+    if (local_cell) {
+      size_t h = wb_fn_header(b, i, &hdr_at, &hdr_h);
+      if (h != (size_t)-1 && wb_header_has_param(b, h, nm, nn)) continue;
+    }
     /* At statement position, run the barrier AFTER the store: the value
        usually allocates, and an allocation between the barrier and the store
        collects, which clears the record the barrier just made (see

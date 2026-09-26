@@ -1346,6 +1346,7 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_tls_first_write.rb \
                   test/proc_cell_capture_marked.rb \
                   test/gc_minor_byref_lent_slot.rb \
+                  test/gc_minor_byref_param_same_name_cell.rb \
                   test/gc_minor_barrier_holders.rb \
                   test/bound_method_fresh_receiver.rb \
                   test/thread_new_args_rooted_across_fiber_alloc.rb \
@@ -1378,6 +1379,10 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	    echo "gc-minor-test: FAIL ($$bn: output differs under SPINEL_GC_STRESS)"; \
 	    diff -u "$$src.expected" "$$tmp/$$bn.stress" | head -10; ok=0; fi; \
 	done; \
+	$(SPINEL) test/gc_minor_byref_param_same_name_cell.rb --no-line-map -c -o "$$tmp/bp.c" >/dev/null 2>&1; \
+	sed -n '/^[^ ].* sp_emit(const char \* \*_cell_io) {$$/,/^}$$/p' "$$tmp/bp.c" > "$$tmp/bp.emit"; \
+	if [ ! -s "$$tmp/bp.emit" ] || grep -q sp_gc_wb "$$tmp/bp.emit"; then \
+	  echo "gc-minor-test: FAIL (a by-reference parameter's store took a cell barrier: it reads a header off the caller's stack)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 
