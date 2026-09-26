@@ -7555,6 +7555,44 @@ static void emit_obj_to_h_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "    default: return sp_box_nil();\n  }\n}\n");
 }
 
+/* The member array of a Struct, installed as sp_obj_struct_values_fn: the
+   members in declaration order, boxed as the to_h dispatch above boxes them,
+   keyed by cls_id so a Struct read out of a poly container answers `values`,
+   `values_at` and a blockless `each` at run time. Not the to_a hook: that one
+   calls a #to_a the program wrote on the Struct. A Data has none of the three
+   names in CRuby and gets no arm. */
+static void emit_obj_struct_values_dispatch(Compiler *c, Buf *b) {
+  if (!g_gen_obj_struct_values) return;
+  buf_puts(b, "static sp_RbVal sp_obj_struct_values(sp_RbVal v) {\n");
+  buf_puts(b, "  switch (v.cls_id) {\n");
+  for (int i = 0; i < c->nclasses; i++) {
+    ClassInfo *ci = &c->classes[i];
+    if (!ci->is_struct || ci->is_data || !ci->instantiated) continue;
+    buf_printf(b, "    case %d: {\n", comp_class_index(c, ci->name));
+    buf_printf(b, "      sp_%s *o = (sp_%s *)v.v.p; (void)o;\n", ci->c_name, ci->c_name);
+    buf_puts(b, "      sp_PolyArray *a = sp_PolyArray_new(); SP_GC_ROOT(a);\n");
+    for (int j = 0; j < ci->nivars; j++) {
+      TyKind mt = ci->ivar_types[j];
+      const char *ivf = iv_c(ci->ivars[j] + 1);
+      buf_puts(b, "      sp_PolyArray_push(a, ");
+      if (mt == TY_INT) buf_printf(b, "(o->iv_%s == SP_INT_NIL ? sp_box_nil() : sp_box_int(o->iv_%s))", ivf, ivf);
+      else if (mt == TY_STRING) buf_printf(b, "(o->iv_%s ? sp_box_str(o->iv_%s) : sp_box_nil())", ivf, ivf);
+      else if (mt == TY_FLOAT) buf_printf(b, "sp_box_float(o->iv_%s)", ivf);
+      else if (mt == TY_BOOL) buf_printf(b, "sp_box_bool(o->iv_%s)", ivf);
+      else if (mt == TY_SYMBOL) buf_printf(b, "sp_box_sym(o->iv_%s)", ivf);
+      else if (mt == TY_POLY) buf_printf(b, "o->iv_%s", ivf);
+      else {
+        char fb[128]; snprintf(fb, sizeof fb, "o->iv_%s", ivf);
+        Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, mt, fb, &bx);
+        buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
+      }
+      buf_puts(b, ");\n");
+    }
+    buf_puts(b, "      return sp_box_poly_array(a);\n    }\n");
+  }
+  buf_puts(b, "    default: return sp_box_nil();\n  }\n}\n");
+}
+
 /* User-object #to_a, installed as sp_obj_to_a_fn: cls_id switch over every
    instantiated class defining a no-arg to_a with a callable symbol, so a
    container-read Set (or any to_a-bearing object) can be iterated by the
@@ -9323,6 +9361,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "static const char *sp_obj_to_json(sp_RbVal v);\n");
   if (g_gen_obj_to_h)
     buf_puts(b, "static sp_RbVal sp_obj_to_h(sp_RbVal v);\n");
+  if (g_gen_obj_struct_values)
+    buf_puts(b, "static sp_RbVal sp_obj_struct_values(sp_RbVal v);\n");
   if (obj_to_a_any(c))
     buf_puts(b, "static sp_RbVal sp_obj_to_a(sp_RbVal v);\n");
   if (obj_to_ary_any(c))
@@ -9449,6 +9489,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_obj_to_json_fn = sp_obj_to_json;\n");
   if (g_gen_obj_to_h)
     buf_puts(b, "  sp_obj_to_h_fn = sp_obj_to_h;\n");
+  if (g_gen_obj_struct_values)
+    buf_puts(b, "  sp_obj_struct_values_fn = sp_obj_struct_values;\n");
   if (obj_to_a_any(c))
     buf_puts(b, "  sp_obj_to_a_fn = sp_obj_to_a;\n");
   if (obj_to_ary_any(c))
@@ -10556,6 +10598,27 @@ static void scan_prologue_features(Compiler *c) {
   /* Any instantiated Struct/Data gets the symbol-keyed to_h dispatch, so a
      Struct/Data read out of a poly container answers #to_h (#2906). */
   g_gen_obj_to_h = 0;
+  /* and any instantiated Struct (not a Data) the member-array dispatch, so a
+     Struct read out of a poly container answers values, values_at and a
+     blockless each from its members, not from a #to_a the program wrote */
+  g_gen_obj_struct_values = 0;
+  for (int i = 0; i < c->nclasses; i++)
+    if (c->classes[i].instantiated && c->classes[i].is_struct && !c->classes[i].is_data) { g_gen_obj_struct_values = 1; break; }
+  /* only where a call of one of those names has a boxed receiver: the
+     dispatch is unreachable otherwise, and every Struct program would carry it */
+  if (g_gen_obj_struct_values) {
+    int reached = 0;
+    for (int id = 0; id < c->nt->count && !reached; id++) {
+      const char *nty = nt_type(c->nt, id);
+      if (!nty || !sp_streq(nty, "CallNode")) continue;
+      const char *nm = nt_str(c->nt, id, "name");
+      int rv = nt_ref(c->nt, id, "receiver");
+      if (nm && rv >= 0 && comp_ntype(c, rv) == TY_POLY &&
+          (sp_streq(nm, "each") || sp_streq(nm, "each_pair") ||
+           sp_streq(nm, "values") || sp_streq(nm, "values_at"))) reached = 1;
+    }
+    g_gen_obj_struct_values = reached;
+  }
   for (int i = 0; i < c->nclasses; i++) {
     if (!c->classes[i].instantiated) continue;
     if (c->classes[i].is_struct || c->classes[i].is_data) { g_gen_obj_to_h = 1; break; }
@@ -12639,6 +12702,7 @@ char *codegen_program(const NodeTable *nt) {
   emit_obj_to_hash_dispatch(c, body);
   emit_obj_to_json_dispatch(c, body);
   emit_obj_to_h_dispatch(c, body);
+  emit_obj_struct_values_dispatch(c, body);
   emit_obj_deconstruct_dispatch(c, body);
   emit_obj_is_data(c, body);
   emit_obj_to_a_dispatch(c, body);

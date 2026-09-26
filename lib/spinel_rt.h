@@ -9536,10 +9536,21 @@ static sp_RbVal sp_poly_arr_sample_n(sp_RbVal v, sp_int n) {
   if (n > r->len) n = r->len;
   return sp_box_poly_array(sp_PolyArray_slice(r, 0, n));
 }
+/* The member array of a Struct read out of a container, through the generated
+   per-class dispatch (sp_obj_struct_values_fn), nil for any other value. Not the
+   to_a hook, which calls a #to_a the program wrote on the Struct, and not the
+   to_h hook, which a Data and a class with #deconstruct_keys answer too. */
+static sp_RbVal sp_poly_struct_values(sp_RbVal v) {
+  if (v.tag != SP_TAG_OBJ || v.cls_id < 0 || !sp_obj_struct_values_fn) return sp_box_nil();
+  return sp_obj_struct_values_fn(v);
+}
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
   sp_poly_coll_chk(v, "values_at");
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT(idx);
+  /* a Struct read out of a container answers its members at the offsets, as
+     the typed Struct does; its length read as 0 here, so every offset was nil */
+  { sp_RbVal sv = sp_poly_struct_values(v); if (sv.tag != SP_TAG_NIL) v = sv; }
   int is_hash = v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id);
   sp_int alen = is_hash ? 0 : sp_poly_arr_len(v);
   sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
@@ -9822,6 +9833,12 @@ static sp_PolyArray *sp_poly_keys(sp_RbVal v) {
   return NULL;  /* unreachable: sp_raise_cls is noreturn */
 }
 static sp_PolyArray *sp_poly_values(sp_RbVal v) {
+  /* a Struct read out of a container answers its member values, as the typed
+     Struct does; it fell to the raise below */
+  {
+    sp_RbVal sv = sp_poly_struct_values(v);
+    if (sv.tag != SP_TAG_NIL) return sp_poly_to_poly_array(sv);
+  }
   if (v.tag == SP_TAG_OBJ) switch (v.cls_id) {
     case SP_BUILTIN_STR_INT_HASH:  { sp_IntArray *vv = sp_StrIntHash_values((sp_StrIntHash*)v.v.p); SP_GC_ROOT(vv); return sp_PolyArray_from_int_array(vv); }
     case SP_BUILTIN_STR_STR_HASH:  { sp_StrArray *vv = sp_StrStrHash_values((sp_StrStrHash*)v.v.p); SP_GC_ROOT(vv); return sp_PolyArray_from_str_array(vv); }
