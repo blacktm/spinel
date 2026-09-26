@@ -6571,6 +6571,25 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         }
         int defcls = -1;
         int mi = comp_method_in_chain(c, k, name, &defcls);
+        /* A Struct's synthesized each or each_pair, called with no block on a
+           boxed receiver: the typed receiver answers an Enumerator over the
+           members (its blockless each is redirected through __enum_to_a, its
+           each_pair through to_h), and the synthesized method, which yields,
+           raised LocalJumpError when this arm called it with no block. The
+           each Enumerator is built over the member array the generated
+           per-class dispatch answers, the each_pair one over the member hash
+           the to_h hook answers, so it yields [name, value] pairs. Not for a
+           Data class, which has neither name in CRuby. */
+        if (mi >= 0 && c->classes[k].is_struct && !c->classes[k].is_data &&
+            g_gen_obj_struct_values && ret == TY_POLY && argc == 0 &&
+            nt_ref(nt, id, "block") < 0 &&
+            nt_str(nt, c->scopes[mi].def_node, "synth") &&
+            (sp_streq(name, "each") || sp_streq(name, "each_pair"))) {
+          buf_printf(b, " case %d: _t%d = sp_box_obj(sp_Enumerator_new_from(%s(_t%d)), "
+                        "SP_BUILTIN_ENUMERATOR); break;",
+                     k, tr, sp_streq(name, "each") ? "sp_obj_struct_values_fn" : "sp_obj_to_h_fn", tv);
+          continue;
+        }
         /* Skip a method with no standalone definition to call: DCE-pruned (its
            params stayed TY_UNKNOWN so it was marked unreachable) or inlined at
            call sites because it yields. Emitting a `case` arm that calls the

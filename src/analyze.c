@@ -3625,6 +3625,9 @@ static void synth_struct_each(Compiler *c) {
     nt_node_set_arr(nt, body, "body", stmts, nst);
     int def = nt_new_node(nt, "DefNode");
     nt_node_set_str(nt, def, "name", "each");
+    /* marked for the boxed-receiver dispatch, which answers a blockless call
+       to the synthesized method with an Enumerator, as the typed receiver does */
+    nt_node_set_str(nt, def, "synth", "struct");
     nt_node_set_ref(nt, def, "body", body);
     Scope *ms = comp_scope_new(c, "each", def);
     ms->class_id = ci;
@@ -3658,6 +3661,7 @@ static void synth_struct_each(Compiler *c) {
       nt_node_set_arr(nt, pbody, "body", pst, pn);
       int pdef = nt_new_node(nt, "DefNode");
       nt_node_set_str(nt, pdef, "name", "each_pair");
+      nt_node_set_str(nt, pdef, "synth", "struct");
       nt_node_set_ref(nt, pdef, "body", pbody);
       Scope *ps = comp_scope_new(c, "each_pair", pdef);
       ps->class_id = ci;

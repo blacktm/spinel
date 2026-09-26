@@ -576,6 +576,7 @@ extern sp_RbVal (*sp_obj_to_hash_fn)(sp_RbVal);
 extern const char *(*sp_obj_to_json_fn)(sp_RbVal);
 /* Symbol-keyed Struct/Data #to_h, for a poly receiver (#2906). */
 extern sp_RbVal (*sp_obj_to_h_fn)(sp_RbVal);
+extern sp_RbVal (*sp_obj_struct_values_fn)(sp_RbVal);
 /* user-object #to_a for container-read poly receivers (#3234): installed by
    the generated prologue when any instantiated class defines a no-arg to_a */
 extern sp_RbVal (*sp_obj_to_a_fn)(sp_RbVal);
