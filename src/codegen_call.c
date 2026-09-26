@@ -12711,7 +12711,10 @@ static int any_class_defines(Compiler *c, const char *qm) {
    followed through the table, since a bare `include Enumerable` inside a
    module is recorded nowhere else. */
 static int class_mixes_in(Compiler *c, int cid, const char *mod, int depth) {
-  if (cid < 0 || depth > 8) return 0;
+  /* every level of the include chain is a distinct class, so the class count
+     bounds a chain without a cycle, and cuts one that has one; a fixed depth
+     of eight missed a module reached through a ninth (from the #5090 review) */
+  if (cid < 0 || depth > c->nclasses) return 0;
   if (class_includes_module_named(c, cid, mod)) return 1;
   for (int cur = cid; cur >= 0; cur = c->classes[cur].parent) {
     for (int m = 0; m < c->classes[cur].nincluded_mods; m++)
