@@ -12686,6 +12686,56 @@ static int any_class_defines(Compiler *c, const char *qm) {
       return 1;
   return 0;
 }
+/* Does the class, an ancestor, or a module one of them includes carry a
+   literal `include <mod>`? class_includes_module_named reads the class
+   bodies along the parent chain; the user modules a class includes are
+   followed through the table, since a bare `include Enumerable` inside a
+   module is recorded nowhere else. */
+static int class_mixes_in(Compiler *c, int cid, const char *mod, int depth) {
+  if (cid < 0 || depth > 8) return 0;
+  if (class_includes_module_named(c, cid, mod)) return 1;
+  for (int cur = cid; cur >= 0; cur = c->classes[cur].parent) {
+    for (int m = 0; m < c->classes[cur].nincluded_mods; m++)
+      if (class_mixes_in(c, c->classes[cur].included_mods[m], mod, depth + 1)) return 1;
+    if (c->classes[cur].parent == cur) break;
+  }
+  return 0;
+}
+/* The names an instance answers respond_to? for without an entry in its
+   class's method table: Enumerable's once the class includes the module
+   and has the `each` it serves (the synthesized __enum_to_a marks any
+   yielding `each`, include or not; a Struct is Enumerable without the
+   line), Comparable's once it includes that module and defines `<=>`, the
+   names a Struct and a Data carry from their core class. The typed fold
+   and the run-time check for a boxed receiver read this one list. The
+   Struct-only names are a Struct's, not a Data's, which answers none of
+   them in CRuby. */
+static int class_implicit_responds(Compiler *c, int cid, const char *qm) {
+  if (comp_method_in_chain(c, cid, "__enum_to_a", NULL) >= 0 &&
+      name_is_enumerable_module_method(qm) &&
+      (c->classes[cid].is_struct || class_mixes_in(c, cid, "Enumerable", 0))) return 1;
+  if (comp_method_in_chain(c, cid, "<=>", NULL) >= 0 &&
+      name_is_comparable_module_method(qm) &&
+      class_mixes_in(c, cid, "Comparable", 0)) return 1;
+  if (!c->classes[cid].is_struct && !c->classes[cid].is_data) return 0;
+  if (sp_streq(qm, "members") || sp_streq(qm, "to_h") ||
+      sp_streq(qm, "deconstruct") || sp_streq(qm, "deconstruct_keys")) return 1;
+  if (c->classes[cid].is_data) return sp_streq(qm, "with");
+  static const char *const sm[] = {
+    "to_a", "values", "values_at", "dig", "each", "each_pair", "size",
+    "length", "[]", "[]=", NULL };
+  for (int i = 0; sm[i]; i++) if (sp_streq(qm, sm[i])) return 1;
+  return 0;
+}
+/* Does any user class answer respond_to?(qm) at run time, through a method of
+   its own or a name it carries implicitly? Decides whether a boxed receiver
+   asks the per-class check or only the builtin surface. */
+static int any_class_responds(Compiler *c, const char *qm) {
+  if (any_class_defines(c, qm)) return 1;
+  for (int k = 0; k < c->nclasses; k++)
+    if (class_implicit_responds(c, k, qm)) return 1;
+  return 0;
+}
 /* Read the analyze-time `recv.<qm>` probes stashed on a respond_to? node: a
    recognized method infers a concrete type, an unrecognized one stays UNKNOWN.
    Reading the cached type is side-effect free (unlike emitting, which mutates
@@ -31663,23 +31713,10 @@ else {
           int found = comp_method_in_chain(c, cid, qm, NULL) >= 0 ||
                       comp_reader_in_chain(c, cid, qm, NULL) ||
                       (is_wr && comp_writer_in_chain(c, cid, wbase, NULL));
-          /* an Enumerable includer (marked by its synthesized __enum_to_a)
-             answers true for the module's methods even though they have no
-             entry in the class's own method table (the redirect serves them) */
-          if (!found && comp_method_in_chain(c, cid, "__enum_to_a", NULL) >= 0 &&
-              name_is_enumerable_module_method(qm)) { resolved = 1; yes = 1; }
-          else if (!found && comp_method_in_chain(c, cid, "<=>", NULL) >= 0 &&
-                   name_is_comparable_module_method(qm)) { resolved = 1; yes = 1; }
-          /* a Struct/Data instance answers the implicit accessors it always
-             carries even though they have no user method-table entry (#2663). */
-          else if (!found && (c->classes[cid].is_data || c->classes[cid].is_struct) &&
-                   (sp_streq(qm, "members") || sp_streq(qm, "to_h") ||
-                    sp_streq(qm, "deconstruct") || sp_streq(qm, "deconstruct_keys") ||
-                    (c->classes[cid].is_data && sp_streq(qm, "with")) ||
-                    (c->classes[cid].is_struct &&
-                     (sp_streq(qm, "to_a") || sp_streq(qm, "values") || sp_streq(qm, "each") ||
-                      sp_streq(qm, "size") || sp_streq(qm, "length") || sp_streq(qm, "[]") ||
-                      sp_streq(qm, "[]="))))) { resolved = 1; yes = 1; }
+          /* the names the class answers without a method-table entry: an
+             Enumerable includer's, a Comparable's, a Struct's or a Data's
+             core names (#2663) */
+          if (!found && class_implicit_responds(c, cid, qm)) { resolved = 1; yes = 1; }
           else if (!found) { resolved = 1; yes = 0; }
           else {
             int v = comp_method_vis_in_chain(c, cid, qm);
@@ -31728,7 +31765,7 @@ else {
         /* a poly receiver with no user class owning the name still has the
            builtin surface of whatever it holds: ask the runtime rather than
            folding a flat false (#3619) */
-        else if ((rt == TY_POLY || rt == TY_UNKNOWN) && !any_class_defines(c, qm)) {
+        else if ((rt == TY_POLY || rt == TY_UNKNOWN) && !any_class_responds(c, qm)) {
           buf_puts(b, "sp_poly_responds_builtin(");
           emit_boxed(c, recv, b);
           buf_puts(b, ", \"");
@@ -31736,7 +31773,7 @@ else {
           buf_puts(b, "\")");
           return;
         }
-        else if ((rt == TY_POLY || rt == TY_UNKNOWN) && any_class_defines(c, qm)) {
+        else if ((rt == TY_POLY || rt == TY_UNKNOWN) && any_class_responds(c, qm)) {
           /* poly receiver + a user protocol method (some user class defines qm):
              the analyze probe answers "SOME union member responds", which
              mis-decides per value -- a String member of String|UserClass would
@@ -31756,7 +31793,11 @@ else {
             int has = comp_method_in_chain(c, k, qm, NULL) >= 0 ||
                       comp_reader_in_chain(c, k, qm, NULL) ||
                       (is_wr && comp_writer_in_chain(c, k, wbase, NULL)) ||
-                      (c->classes[k].is_native_class && comp_native_method_find(c, k, qm, 0, 0) >= 0);
+                      (c->classes[k].is_native_class &&
+                       comp_native_method_find(c, k, qm, 0, 0) >= 0) ||
+                      /* the names the class carries without a method entry
+                         answer as they do on the typed receiver */
+                      class_implicit_responds(c, k, qm);
             if (has) { buf_printf(b, "%s_t%d.cls_id == %d", first ? "" : " || ", tv, k); first = 0; }
           }
           if (first) buf_puts(b, "0");
