@@ -565,6 +565,8 @@ int proc_slot_is_ptr(TyKind t);
 int proc_slot_via_poly(Compiler *c, TyKind t);
 int cell_is_typed_ptr(Compiler *c, LocalVar *lv);
 int call_returns_nullable_int(Compiler *c, int node);
+int box_nullable_arg(Compiler *c, int v);
+int ivar_assigned_in_initialize(Compiler *c, int k, const char *ivn);
 int recv_may_be_sentinel(Compiler *c, int node);
 int nil_answers_name(const char *n);
 void emit_sg_activate(Compiler *c, int node, int recv, Buf *b, int indent);

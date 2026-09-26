@@ -14009,6 +14009,59 @@ static int elem_miss_call(Compiler *c, int v) {
 }
 
 /* Can this expression leave the sentinel in an int slot? */
+/* Whether an unconditional write of ivar `ivn` is among the top-level
+   statements of class k's initialize, or of the initialize it inherits. */
+int ivar_assigned_in_initialize(Compiler *c, int k, const char *ivn) {
+  const NodeTable *nt = c->nt;
+  int mi = comp_method_in_chain(c, k, "initialize", NULL);
+  if (mi < 0 || !ivn) return 0;
+  int body = c->scopes[mi].body;
+  if (body < 0) return 0;
+  int n = 0; const int *st = nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : &body;
+  if (nt_kind(nt, body) != NK_StatementsNode) n = 1;
+  for (int i = 0; i < n; i++) {
+    int w = st[i];
+    /* `@a = @b = 0` assigns both */
+    for (int x = w; x >= 0 && nt_kind(nt, x) == NK_InstanceVariableWriteNode; x = nt_ref(nt, x, "value")) {
+      const char *wn = nt_str(nt, x, "name");
+      if (wn && sp_streq(wn, ivn)) return 1;
+    }
+    if (nt_kind(nt, w) == NK_MultiWriteNode) {
+      int ln = 0; const int *ls = nt_arr(nt, w, "lefts", &ln);
+      for (int j = 0; j < ln; j++)
+        if (nt_kind(nt, ls[j]) == NK_InstanceVariableTargetNode &&
+            nt_str(nt, ls[j], "name") && sp_streq(nt_str(nt, ls[j], "name"), ivn)) return 1;
+    }
+  }
+  return 0;
+}
+
+/* An argument whose boxing must allow nil though its typed reads need no
+   nil check: an int ivar read nothing has to assign first, or a parameter
+   already bound from one. */
+int box_nullable_arg(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0) return 0;
+  if (nt_kind(nt, v) == NK_InstanceVariableReadNode) {
+    Scope *s = comp_scope_of(c, v);
+    int cid = s ? s->class_id : -1;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0 || cid >= c->nclasses) return 0;
+    ClassInfo *ci = &c->classes[cid];
+    const char *ivn = nt_str(nt, v, "name");
+    int iv = comp_ivar_index(ci, ivn);
+    if (iv < 0 || (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT)) return 0;
+    return !ivar_assigned_in_initialize(c, cid, ivn);
+  }
+  if (nt_kind(nt, v) == NK_LocalVariableReadNode) {
+    Scope *s = comp_scope_of(c, v);
+    const char *ln = nt_str(nt, v, "name");
+    LocalVar *lv = s && ln ? scope_local(s, ln) : NULL;
+    return lv && lv->is_param && lv->box_nullable;
+  }
+  return 0;
+}
+
 int nullable_int_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
@@ -14556,7 +14609,10 @@ static void mark_nullable_int_locals(Compiler *c) {
         if ((p->type == TY_INT_ARRAY || p->type == TY_FLOAT_ARRAY) && !p->nullable_int_elem &&
             nullable_int_elem_expr(c, av[k], 0)) { p->nullable_int_elem = 1; changed = 1; }
         if ((p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int) continue;
-        if (nullable_int_value(c, av[k])) { p->nullable_int = 1; changed = 1; }
+        if (nullable_int_value(c, av[k])) { p->nullable_int = 1; changed = 1; continue; }
+        /* an ivar that can be read before anything assigned it, or a parameter
+           already carrying one: boxing the parameter has to answer nil (#5085) */
+        if (!p->box_nullable && box_nullable_arg(c, av[k])) { p->box_nullable = 1; changed = 1; }
       }
     }
     /* A destructuring target the right side cannot supply gets nil, through a

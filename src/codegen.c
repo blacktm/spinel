@@ -1405,14 +1405,18 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
        --int-overflow=promote (where int? widens to poly); in default/wrap mode
        a real int is never the sentinel, so skip the per-box check there -- it is
        on the hot path (every int boxed into poly, e.g. optcarrot's pixels). */
+    /* A parameter bound from an ivar read before anything had to assign it
+       (box_nullable_arg) boxes as nil too; its typed reads stay unchecked,
+       so the flag is asked here alone (#5085). */
     case TY_INT:    fn = (g_promote_mode || call_returns_nullable_int(c, node) ||
-                          nt_kind(c->nt, node) == NK_InstanceVariableReadNode)
+                          nt_kind(c->nt, node) == NK_InstanceVariableReadNode ||
+                          box_nullable_arg(c, node))
                            ? "sp_box_int_or_nil" : "sp_box_int"; break;
     /* A float slot has its own reserved nil sentinel, and the same rule
        applies: box it as nil where the value can be one, or it goes out as an
        ordinary Float and no literal nil matches it (#3493). */
-    case TY_FLOAT:  fn = call_returns_nullable_int(c, node) ? "sp_box_float_or_nil"
-                                                            : "sp_box_float"; break;
+    case TY_FLOAT:  fn = (call_returns_nullable_int(c, node) || box_nullable_arg(c, node))
+                           ? "sp_box_float_or_nil" : "sp_box_float"; break;
     /* NULL is a bigint slot's nil (nil_value), and boxing it as a Bignum made
        a truthy Integer that printed 0 (#4800). Unconditional: a live Bignum is
        never the NULL pointer, so the test costs one compare on a path that

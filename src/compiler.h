@@ -88,6 +88,11 @@ typedef struct {
   int nullable_int; /* an int local that was assigned a value which can be the
                        nil sentinel (a search miss, a pop off an empty array):
                        boxing it has to yield nil, not INTPTR_MIN */
+  int box_nullable; /* an int parameter bound from an ivar that can be read
+                       before anything assigned it: only BOXING it has to
+                       yield nil. Kept apart from nullable_int, which also
+                       arms the typed nil checks (optcarrot's CPU reads such
+                       ivars on its hot path, #5085) */
   int arr_or_nil;   /* a poly slot proven to hold only a poly array or nil, so
                        an index read of it takes the runtime's inline array arm
                        -- which neither allocates nor re-enters Ruby code. That
