@@ -1428,6 +1428,12 @@ backtrace-test: $(SPINEL) $(SP_RT_LIB)
 	  { echo "backtrace-test: FAIL (#4310: fewer than 4 frames)"; cat "$$tmp/out"; ok=0; }; \
 	head -2 "$$tmp/out" | tail -1 | grep -q "Feeder#inner" || \
 	  { echo "backtrace-test: FAIL (#4310: the raising frame is not first)"; cat "$$tmp/out"; ok=0; }; \
+	$(SPINEL) --debug --no-inline-hot test/backtrace/pass_through_rescue.rb -o "$$tmp/pt" >/dev/null 2>&1 || \
+	  { echo "backtrace-test: FAIL (compile pass_through_rescue)"; ok=0; }; \
+	"$$tmp/pt" > "$$tmp/pt.out" 2>&1; \
+	for f in "Chain#inner" "Chain#mid" "Chain#outer" "Chain#top"; do \
+	  grep -q "$$f" "$$tmp/pt.out" || { echo "backtrace-test: FAIL (#5084: frame $$f cut by a rescue that did not match)"; cat "$$tmp/pt.out"; ok=0; }; \
+	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "backtrace-test: pass"; else exit 1; fi
 

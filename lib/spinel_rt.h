@@ -10041,6 +10041,13 @@ static SP_TLS void *sp_inflight_cause = NULL;
 /* A bare `raise` re-raises the handled exception itself, keeping the cause it
    already carries rather than becoming its own cause (#3745). */
 static SP_TLS int sp_reraise_current = 0;
+/* An exception passing on (a rescue that does not match it, a modifier
+   rescue that catches StandardError only): sp_raise_cls raises it again from
+   the landing, and snapshotting the stack there replaced the frames below
+   with the landing's own -- a debug build's backtrace named the rescuing
+   method and up, never the statement that raised (#5084). The pass-through
+   sets this so the raise keeps the snapshot it already has. */
+static SP_TLS int sp_bt_keep = 0;
 /* `raise ..., cause: exc`: the explicit cause overrides the implicit
    currently-handled exception for exactly one raise. The `_set` flag records
    that a cause: was given at all, so `cause: nil` suppresses the implicit cause
@@ -10269,8 +10276,11 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
   if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg);
   SP_GC_ROOT_STR(msg);
 #if SP_BT_AVAILABLE
-  if (sp_bt_enabled) sp_bt_n = backtrace(sp_bt_buf, 256);
+  /* a pass-through, or a bare `raise` re-raising the handled exception, keeps
+     the frames of the raise that made it, as CRuby does */
+  if (sp_bt_enabled && !sp_bt_keep && !sp_reraise_current) sp_bt_n = backtrace(sp_bt_buf, 256);
 #endif
+  sp_bt_keep = 0;
   /* A real exception supersedes any non-local unwind in flight (e.g. raised from
      inside an `ensure` running during a proc-return / throw): clear the unwind so
      an outer handler treats this as an exception, not a continued unwind. */
