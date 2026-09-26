@@ -1937,6 +1937,55 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
       emitted_default = 1;
     }
   }
+  /* A String's own iterators: the switch exists because a user class owns
+     the name (packages/stringio's StringIO#each_char), and its arms are that
+     class's, so a String reaching it raised NoMethodError for a method String
+     has (#5083, the block-taking sibling of #4816). The default arm serves a
+     String with the ordinary String emission: the receiver is handed over as
+     the string's bytes, typed String for the length of the emission, so the
+     typed iterator runs the block exactly as it would with no user class of
+     that name in the program. */
+  if (!emitted_default && nt_ref(nt, id, "arguments") < 0 &&
+      (sp_streq(name, "each_char") || sp_streq(name, "each_byte") ||
+       sp_streq(name, "each_line") || sp_streq(name, "each_grapheme_cluster") ||
+       sp_streq(name, "each_codepoint")) &&
+      g_n_argov + 1 <= MAX_ARG_OVERRIDE) {
+    int ts = ++g_tmp;
+    Buf ab; memset(&ab, 0, sizeof ab);
+    int slot = g_n_argov++;
+    g_argov_node[slot] = recv;
+    snprintf(g_argov_text[slot], sizeof g_argov_text[0], "_t%d", ts);
+    TyKind sv_rt = c->ntype[recv];
+    c->ntype[recv] = TY_STRING;
+    /* analysis renames a String's each_grapheme_cluster to each_char (the
+       two agree over the text spinel carries); this receiver was not a
+       String then, so the arm takes the same spelling for its emission */
+    int graph = sp_streq(name, "each_grapheme_cluster");
+    if (graph) nt_node_set_str((NodeTable *)nt, id, "name", "each_char");
+    emit_stmt(c, id, &ab, indent + 2);
+    if (graph) {
+      nt_node_set_str((NodeTable *)nt, id, "name", "each_grapheme_cluster");
+      name = nt_str(nt, id, "name");   /* the set replaced the string name read */
+    }
+    c->ntype[recv] = sv_rt;
+    g_n_argov--;
+    if (ab.p && !strstr(ab.p, "sp_raise_nomethod(")) {
+      emit_indent(&sw, indent); buf_puts(&sw, "default: {\n");
+      emit_indent(&sw, indent + 1);
+      buf_printf(&sw, "if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) {\n", trecv, trecv);
+      emit_indent(&sw, indent + 2);
+      buf_printf(&sw, "const char *_t%d = sp_poly_recv_s(_t%d, \"%s\"); SP_GC_ROOT_STR(_t%d);\n",
+                 ts, trecv, name, ts);
+      buf_puts(&sw, ab.p);
+      emit_indent(&sw, indent + 2); buf_puts(&sw, "break;\n");
+      emit_indent(&sw, indent + 1); buf_puts(&sw, "}\n");
+      emit_indent(&sw, indent + 1);
+      buf_printf(&sw, "sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;\n", name, trecv);
+      emit_indent(&sw, indent); buf_puts(&sw, "}\n");
+      emitted_default = 1;
+    }
+    free(ab.p);
+  }
   /* Every other poly dispatch closes with a raising default; this one closed
      with nothing, so a runtime class outside the candidate set fell through
      the switch and the call silently did nothing -- CRuby raises NoMethodError
