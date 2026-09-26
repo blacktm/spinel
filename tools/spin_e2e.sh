@@ -934,16 +934,34 @@ fi
 # from the M2 case above) is the other kind of native package: a bundled one
 # compiles beside its source, a dependency compiles into the shared cache, and
 # the pack has to find the source of each.
+# A dependency whose C is laid out like a vendored library travels in its own
+# tree: a source in a subdirectory that includes a header and an `.inc` table
+# from the package root (`spin build` compiles with -I at the root), and a
+# source whose basename another dependency also uses -- flattened into one
+# native/ directory, the two `fast_ext.c` were one file.
 cd "$WORK"
+mkdir -p spinel-deep/src spinel-deep/inc
+printf '[package]\nname = "deep"\nsources = ["src/*.c"]\n' > spinel-deep/spin.toml
+printf 'module Deep\n  ffi_func :deep_triple, [:int], :int\nend\n' > spinel-deep/deep.rb
+printf '#define DEEP_FACTOR 3\n' > spinel-deep/inc/deep.h
+printf 'DEEP_FACTOR\n' > spinel-deep/inc/factor.inc
+cat > spinel-deep/src/fast_ext.c <<'CEOF'
+#include <stdint.h>
+#include "inc/deep.h"
+intptr_t deep_triple(intptr_t x) { return x * (
+#include "inc/factor.inc"
+); }
+CEOF
 "$SPIN" new packer >/dev/null || fail "pack: new"
 cd packer
-printf '[package]\nname = "packer"\n\n[dependencies]\nfast = { path = "../spinel-fast" }\n' > spin.toml
+printf '[package]\nname = "packer"\n\n[dependencies]\nfast = { path = "../spinel-fast" }\ndeep = { path = "../spinel-deep" }\n' > spin.toml
 cat > bin/packer.rb <<'RBEOF'
 require "json"
 require "fast"
+require "deep"
 ths = (0...4).map { |i| Thread.new(i) { |n| n * 10 } }
 puts "threads #{ths.map(&:value).inspect}"
-puts "json #{JSON.generate({ "a" => 1, "b" => [2, 3] })} fast #{Fast.fast_quad(10)} crypt #{"spin".crypt("ab")}"
+puts "json #{JSON.generate({ "a" => 1, "b" => [2, 3] })} fast #{Fast.fast_quad(10)} deep #{Deep.deep_triple(10)} crypt #{"spin".crypt("ab")}"
 RBEOF
 REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 "$SPIN" pack >/dev/null 2>&1 || fail "pack: spin pack"
@@ -952,7 +970,9 @@ REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 [ -f build/pack/packer/lib/sp_gc.c ] || fail "pack: no runtime source"
 [ -f build/pack/packer/lib/spinel/runtime.h ] || fail "pack: no package ABI header"
 [ -f build/pack/packer/native/sp_json.c ] || fail "pack: native package not carried as source"
-[ -f build/pack/packer/native/fast_ext.c ] || fail "pack: dependency's native C not carried as source"
+[ -f build/pack/packer/native/fast/fast_ext.c ] || fail "pack: dependency's native C not carried as source"
+[ -f build/pack/packer/native/deep/src/fast_ext.c ] || fail "pack: a dependency's tree not mirrored"
+[ -f build/pack/packer/native/deep/inc/factor.inc ] || fail "pack: a dependency's .inc not carried"
 grep -q -- "-DSP_THREADS" build/pack/packer/Makefile || fail "pack: threaded program without -DSP_THREADS"
 grep -q -- "-lpthread" build/pack/packer/Makefile || fail "pack: threaded program without -lpthread"
 # -lcrypt is the recipient's platform's to decide (glibc ships it, Darwin does

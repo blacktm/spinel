@@ -1188,6 +1188,23 @@ class Project
     ""
   end
 
+  # A dep package's native object as "name\tdir\trel": the package, its
+  # source tree, and the source's path in it without ".c". "" for an object
+  # that is not a dep's (a bundled package's sits beside its source).
+  def native_source_parts(obj)
+    @dep_srcs.split("\n").each do |s|
+      f = s.split("\t")
+      key = "/" + f[0] + "-" + f[2] + "-" + cc_cache_key + "/"
+      at = obj.index(key)
+      next if at.nil?
+      rel = obj[(at + key.length)..-1].to_s
+      rel = rel[0, rel.length - 2]
+      rel = rel[0, rel.length - 3] if rel.length > 3 && rel[rel.length - 3, 3] == "_mt"
+      return f[0] + "\t" + f[1] + "\t" + rel if File.exist?(File.join(f[1], rel + ".c"))
+    end
+    ""
+  end
+
   # carried native C across the root package and every resolved dep (M2)
   def native_objs
     objs = []
@@ -1487,6 +1504,8 @@ def cmd_pack(prj, targets, outdir)
   natives = ""
   rtdir = ""
   threaded = false   # the program uses Thread: its runtime needs pthread on the recipient
+  pack_pkgs = []     # dep packages whose headers are already in the pack
+  pkg_rules = ""     # one compile rule per dep package: its root is on -I
   report.each_line do |ln|
     ln = ln.chomp
     sp = ln.index(" ")
@@ -1522,8 +1541,35 @@ def cmd_pack(prj, targets, outdir)
       # a package's native object. Its SOURCE is what travels; the object was
       # built for the packer's platform and the pack exists to leave that
       # behind. A `_mt` object is the threaded variant of one source file.
+      parts = prj.native_source_parts(val)
       src = prj.native_source_for(val)
-      if src != ""
+      if parts != ""
+        # A dep's C travels in its own tree, as `spin build` compiles it:
+        # the package's layout mirrored under native/<name>/ and compiled
+        # with -I at its root. Flattening it lost every header outside the
+        # source's own directory -- spinel-nokogiri's sources include
+        # <libxml/...> from the package root -- and gave two packages'
+        # `list.c` one object.
+        pf = parts.split("\t")
+        pdir = "native/" + pf[0]
+        dst = File.join(outdir, pdir, pf[2] + ".c")
+        mkdir_p_path(File.dirname(dst))
+        pack_copy(src, dst)
+        natives += " " + pdir + "/" + pf[2] + ".o"
+        unless pack_pkgs.include?(pf[0])
+          pack_pkgs.push(pf[0])
+          # what a source includes: headers, and the `.inc` / `.def` tables
+          # C code includes by the same rule (cmark's entities.inc)
+          ["*.h", "*.inc", "*.def"].each do |pat|
+            Dir.glob(File.join(pf[1], "**", pat)).each do |hf|
+              hd = File.join(outdir, pdir, hf[(pf[1].length + 1)..-1].to_s)
+              mkdir_p_path(File.dirname(hd))
+              pack_copy(hf, hd)
+            end
+          end
+          pkg_rules += pdir + "/%.o: " + pdir + "/%.c\n\t$(CC) $(CFLAGS) -I" + pdir + " -c $< -o $@\n\n"
+        end
+      elsif src != ""
         stem = File.basename(src)
         stem = stem[0, stem.length - 2]
         pack_copy(src, File.join(outdir, "native", stem + ".c"))
@@ -1594,7 +1640,7 @@ def cmd_pack(prj, targets, outdir)
 "        "#{name}: $(OBJS)
 "        "\t$(CC) $(CFLAGS) $(OBJS) $(LIBS) -o $@
 "        "
-"        "%.o: %.c
+"        "#{pkg_rules}%.o: %.c
 "        "\t$(CC) $(CFLAGS) -c $< -o $@
 "        "
 "        "clean:
