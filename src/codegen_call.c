@@ -9617,6 +9617,23 @@ static int call_has_splat_arg(const NodeTable *nt, const int *argv, int argc) {
   return 0;
 }
 
+/* Does any class define `name` as a class method? A boxed Class or Module
+   reaches that method through the general dispatch, so an IO name only the
+   poly-IO arm answers must not claim the call. */
+static int class_method_named(Compiler *c, const char *name) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_cmethod_in_chain(c, k, name, NULL) >= 0) return 1;
+  return 0;
+}
+
+/* A File::Stat rides in the same boxed handle as an IO (its mode "stat" or
+   "lstat") and has no wait: the NoMethodError CRuby raises for it. */
+static void emit_stat_has_no_wait(int th, int tv, const char *name, Buf *b) {
+  buf_printf(b, "if (_t%d->mode && (strcmp(_t%d->mode, \"stat\") == 0 || "
+                "strcmp(_t%d->mode, \"lstat\") == 0)) sp_raise_poly_nomethod(\"%s\", _t%d); ",
+             th, th, th, name, tv);
+}
+
 /* A splat operand as a poly array: an Array kept, and anything else -- a
    boxed operand that is an Array only at run time, nil, a scalar -- spread
    by Ruby's rule (nil to [], any other value to [v]). */
@@ -24764,6 +24781,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        sp_streq(name, "stat") || sp_streq(name, "seek") || sp_streq(name, "tell") ||
        sp_streq(name, "pos") || sp_streq(name, "pread") || sp_streq(name, "pwrite") ||
        sp_streq(name, "fsync") || sp_streq(name, "fdatasync") ||
+       /* the readiness pair, unless a splat carries the arguments or a
+          class method of that name may be the receiver's (a boxed Class) */
+       ((sp_streq(name, "wait_readable") || sp_streq(name, "wait_priority")) &&
+        !call_has_splat_arg(nt, argv, argc) && !class_method_named(c, name)) ||
        sp_streq(name, "sync") || sp_streq(name, "sync=") ||
        /* the non-blocking pair: a Socket destructured out of Socket.pair, or
           read back out of a container, is a poly value like any other, and
@@ -24790,6 +24811,57 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     }
     if (!iocand) {
       int tio2 = ++g_tmp;
+      /* wait_readable / wait_priority, as the typed arm answers them: the
+         handle once it is ready, nil when the timeout runs out, no timeout
+         (or nil) waiting for good. The receiver and then the
+         arguments are evaluated before the handle is unboxed, so a receiver
+         that is no IO raises NoMethodError after them, as in CRuby, and so
+         does a File::Stat; with an IO, two or more arguments raise
+         ArgumentError. */
+      if (sp_streq(name, "wait_readable") || sp_streq(name, "wait_priority")) {
+        int trv = ++g_tmp, tto = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", trv);
+        emit_boxed(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", trv);
+        if (argc >= 2) {
+          for (int ai = 0; ai < argc; ai++) {
+            buf_puts(b, "(void)");
+            emit_boxed(c, argv[ai], b);
+            buf_puts(b, "; ");
+          }
+          buf_printf(b, "sp_File *_t%d = sp_poly_as_io(_t%d, \"%s\"); ", tio2, trv, name);
+          emit_stat_has_no_wait(tio2, trv, name, b);
+          buf_printf(b, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments "
+                        "(given %d, expected 0..1)\"); (sp_File *)0; })", argc);
+        }
+        else {
+          /* an Integer or Float timeout as the typed arm reads it; any other
+             value is held as it is and converted by sp_poly_to_timeout once
+             the handle is known to be an IO (a Rational waits that long, a
+             nil held in a variable waits for good, a String is CRuby's
+             TypeError) */
+          TyKind tk = argc == 1 ? comp_ntype(c, argv[0]) : TY_NIL;
+          int lit_none = argc == 0 || (nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "NilNode"));
+          int held = !lit_none && tk != TY_INT && tk != TY_FLOAT;
+          int tbx = ++g_tmp;
+          if (held) {
+            buf_printf(b, "sp_RbVal _t%d = ", tbx);
+            emit_boxed(c, argv[0], b);
+            buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tbx);
+          }
+          else {
+            buf_printf(b, "sp_float _t%d = ", tto);
+            if (lit_none) buf_puts(b, "-1.0");
+            else emit_float_expr(c, argv[0], b);
+            buf_puts(b, "; ");
+          }
+          buf_printf(b, "sp_File *_t%d = sp_poly_as_io(_t%d, \"%s\"); ", tio2, trv, name);
+          emit_stat_has_no_wait(tio2, trv, name, b);
+          if (held) buf_printf(b, "sp_float _t%d = sp_poly_to_timeout(_t%d); ", tto, tbx);
+          buf_printf(b, "sp_io_wait_events(_t%d, _t%d, %d); })", tio2, tto, sp_streq(name, "wait_priority") ? 2 : 0);
+        }
+        return;
+      }
       buf_printf(b, "({ sp_File *_t%d = sp_poly_as_io(", tio2);
       emit_boxed(c, recv, b);
       buf_printf(b, ", \"%s\"); ", name);

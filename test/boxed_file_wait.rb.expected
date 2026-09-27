@@ -1,0 +1,21 @@
+[File, true]
+[File, true]
+[File, true]
+[File, true]
+[File, true]
+[File, true]
+[File, true]
+[File, File]
+ready
+[ArgumentError, "wrong number of arguments (given 2, expected 0..1)"]
+[TypeError, "can't convert String into time interval"]
+NoMethodError
+NoMethodError
+[IOError, "closed stream"]
+argument
+NoMethodError
+100
+nil
+nil
+not ready
+true

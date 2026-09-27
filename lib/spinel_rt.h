@@ -2994,6 +2994,17 @@ static sp_RbVal sp_poly_case_conv(sp_RbVal v, const char *(*fn)(const char *), c
   return sp_box_str(fn(sp_poly_recv_s(v, meth)));
 }
 static sp_bool sp_poly_numeric_p(sp_RbVal v) { return v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT; }
+/* A wait timeout whose class is known only at run time, as IO#wait_readable
+   reads one: nil waits for good (-1), a number (a Rational too) waits that
+   many seconds, and anything else is CRuby's TypeError. */
+static sp_float sp_poly_to_timeout(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return -1.0;
+  if (sp_poly_numeric_p(v) || (v.tag == SP_TAG_OBJ &&
+      (v.cls_id == SP_BUILTIN_RATIONAL || v.cls_id == SP_BUILTIN_BIG_RATIONAL)))
+    return sp_poly_to_f(v);
+  sp_raise_cls("TypeError", sp_sprintf("can't convert %s into time interval", sp_poly_class_name(v)));
+  return 0.0;
+}
 /* Display form of a value in a `can't convert %s into ...` TypeError:
    nil/true/false render lowercase, everything else by class name (CRuby). */
 static const char *sp_convert_src_name(sp_RbVal v) {

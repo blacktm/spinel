@@ -5565,6 +5565,21 @@ else {
       /* the descriptor surface, typed as the TY_IO arms type it: a stat is
          carried as the handle itself, the offsets and counts are ints */
       if (sp_streq(name, "stat") && argc == 0) return an_poly_concrete(c, name, TY_IO);
+      /* the readiness pair answers the handle or nil, as on TY_IO, where
+         the poly-IO arm is the one that emits it. A class of the program's
+         own (Object reopened included) that defines the name, as an
+         instance or a class method, owns the call instead, and its answer
+         may be anything; so it is asked here even in the builtin-only
+         derivation, which shapes the dispatch's default arm, where TY_IO
+         would box an `Object#wait_readable` Symbol as a handle. */
+      if (sp_streq(name, "wait_readable") || sp_streq(name, "wait_priority")) {
+        int owned = 0;
+        for (int k = 0; k < c->nclasses && !owned; k++)
+          if (comp_poly_arm_defines(c, k, name) || comp_cmethod_in_chain(c, k, name, NULL) >= 0 ||
+              (!c->classes[k].is_native_class && comp_is_reader(&c->classes[k], name)))
+            owned = 1;
+        if (!owned) return TY_IO;
+      }
       if (sp_streq(name, "seek") || sp_streq(name, "tell") || sp_streq(name, "pos") ||
           sp_streq(name, "pwrite") || sp_streq(name, "fsync") ||
           sp_streq(name, "fdatasync")) return an_poly_concrete(c, name, TY_INT);
