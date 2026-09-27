@@ -4052,7 +4052,29 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
 }
 /* Numeric#coerce: [other, self], both lifted to the wider of the two kinds.
    The numeric protocol's entry point, so a boxed receiver has to answer it. */
+static sp_RbVal sp_poly_to_r_m(sp_RbVal v);   /* fwd: Integer#to_r and kin */
+static sp_RbVal sp_poly_to_c_m(sp_RbVal v);   /* fwd: Integer#to_c and kin */
 static sp_RbVal sp_poly_coerce(sp_RbVal a, sp_RbVal b) {
+  /* A Rational or a Complex receiver answers as its typed arm does: the
+     operand as the receiver's kind, paired with the receiver (a Float operand
+     makes both Floats for a Rational). The operands neither kind can hold
+     exactly here (a Bignum, a Complex for a Rational, a Rational for a
+     Complex) and every non-number raise CRuby's TypeError. */
+  if (a.tag == SP_TAG_OBJ && (a.cls_id == SP_BUILTIN_RATIONAL || a.cls_id == SP_BUILTIN_COMPLEX)) {
+    int rat = a.cls_id == SP_BUILTIN_RATIONAL;
+    sp_RbVal ob;
+    if (rat && b.tag == SP_TAG_FLT) ob = b;
+    else if (b.tag == SP_TAG_INT || (!rat && b.tag == SP_TAG_FLT)) ob = rat ? sp_poly_to_r_m(b) : sp_poly_to_c_m(b);
+    else if (b.tag == SP_TAG_OBJ && b.cls_id == a.cls_id) ob = b;
+    else sp_raise_cls("TypeError", sp_sprintf("%s can't be coerced into %s", sp_poly_class_name(b),
+                                             rat ? "Rational" : "Complex"));
+    SP_GC_ROOT_RBVAL(ob);
+    sp_PolyArray *pair = sp_PolyArray_new();
+    SP_GC_ROOT(pair);
+    sp_PolyArray_push(pair, ob);
+    sp_PolyArray_push(pair, rat && b.tag == SP_TAG_FLT ? sp_box_float(sp_poly_to_f_with_rational(a)) : a);
+    return sp_box_poly_array(pair);
+  }
   if (!sp_poly_numeric_p(a)) sp_raise_poly_nomethod("coerce", a);
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);

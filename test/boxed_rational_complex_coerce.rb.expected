@@ -1,0 +1,11 @@
+[(2/1), (7/2)]
+[(1/3), (7/2)]
+[2.5, 3.5]
+[(2+0i), (2+3i)]
+[(2.5+0i), (2+3i)]
+[(1+1i), (2+3i)]
+[TypeError, "String can't be coerced into Rational"]
+[TypeError, "NilClass can't be coerced into Rational"]
+[TypeError, "String can't be coerced into Complex"]
+[TypeError, "NilClass can't be coerced into Complex"]
+(13/2)
