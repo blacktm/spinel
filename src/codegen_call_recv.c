@@ -2590,12 +2590,25 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         int dbn = 0; const int *dbb = dbody >= 0 ? nt_arr(nt, dbody, "body", &dbn) : NULL;
         if (dbn >= 1) {
           Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_PolyArray *", "SP_GC_ROOT", b, &rb);
-          int tdr = ++g_tmp;
-          buf_printf(b, "({ sp_RbVal _t%d = sp_PolyArray_delete(%s, ", tdr, rb.p); free(rb.p);
-          emit_boxed(c, argv[0], b);
-          buf_printf(b, "); _t%d.tag != SP_TAG_NIL ? _t%d : ", tdr, tdr);
-          emit_boxed(c, dbb[dbn - 1], b);
-          buf_puts(b, "; })");
+          int tdr = ++g_tmp, tda = ++g_tmp;
+          buf_printf(b, "({ sp_RbVal _t%d = ", tda); emit_boxed(c, argv[0], b);
+          buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = sp_PolyArray_delete(%s, _t%d);",
+                     tda, tdr, rb.p, tda); free(rb.p);
+          /* on a miss the whole block runs, its parameter bound to the
+             argument, and its value is the answer */
+          buf_printf(b, " if (_t%d.tag == SP_TAG_NIL) { ", tdr);
+          const char *dp0 = block_param_name(c, dblk, 0);
+          Scope *dps = dp0 ? comp_scope_of(c, dblk) : NULL;
+          LocalVar *dplv = dps ? scope_local(dps, dp0) : NULL;
+          if (dplv) {
+            char an[24]; snprintf(an, sizeof an, "_t%d", tda);
+            buf_printf(b, "lv_%s = ", rename_local(dp0));
+            if (dplv->type == TY_POLY) buf_puts(b, an); else emit_unbox_text(c, dplv->type, an, b);
+            buf_puts(b, "; ");
+          }
+          for (int j = 0; j < dbn - 1; j++) emit_stmt(c, dbb[j], b, 0);
+          buf_printf(b, "_t%d = ", tdr); emit_boxed(c, dbb[dbn - 1], b);
+          buf_printf(b, "; } _t%d; })", tdr);
           if (ch) buf_puts(b, "; })");
           return 1;
         }
