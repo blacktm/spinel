@@ -10580,6 +10580,35 @@ static sp_PolyArray *sp_bm_parameters(sp_BoundMethod *m) {
   }
   return out;
 }
+/* #source_location from the same rendering: the " FILE:LINE>" that follows
+   its parameter list, as [file, line]; nil where the rendering carries no
+   position (a builtin, or an attribute method, whose rendering has none). */
+static sp_RbVal sp_bm_source_location(sp_BoundMethod *m) {
+  if (!m || !m->desc) return sp_box_nil();
+  const char *d = m->desc;
+  const char *open = strchr(d, '(');
+  const char *close = open ? strchr(open, ')') : NULL;
+  size_t dl = strlen(d);
+  if (!close || close[1] != ' ' || d[dl - 1] != '>') return sp_box_nil();
+  const char *f = close + 2, *end = d + dl - 1, *colon = NULL;
+  for (const char *q = f; q < end; q++) {
+    if (*q == ':') colon = q;
+  }
+  if (!colon || colon == f) return sp_box_nil();
+  sp_int line = 0;
+  for (const char *q = colon + 1; q < end; q++) {
+    if (*q < '0' || *q > '9') return sp_box_nil();
+    line = line * 10 + (*q - '0');
+  }
+  size_t fl = (size_t)(colon - f);
+  char *file = sp_str_alloc(fl);
+  memcpy(file, f, fl); file[fl] = 0;
+  SP_GC_ROOT_STR(file);
+  sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
+  sp_PolyArray_push(out, sp_box_str(file));
+  sp_PolyArray_push(out, sp_box_int(line));
+  return sp_box_poly_array(out);
+}
 static sp_RbVal sp_bm_receiver(sp_BoundMethod *m) {
   if (!m || !m->self) return sp_box_nil();
   if (m->self_kind == SP_BM_SELF_STR) return sp_box_str((const char *)m->self);

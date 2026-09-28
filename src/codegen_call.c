@@ -4520,6 +4520,22 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
                tv, tv, tv, tv, tv);
     return 1;
   }
+  /* source_location on a boxed Method or UnboundMethod: [file, line] from its
+     rendering (sp_bm_source_location). Not where a reopened Object or Kernel
+     has a source_location, which answers for every other receiver. */
+  if (sp_streq(name, "source_location") && argc == 0 &&
+      !(comp_class_index(c, "Object") >= 0 &&
+        comp_method_in_chain(c, comp_class_index(c, "Object"), name, NULL) >= 0) &&
+      !(comp_class_index(c, "Kernel") >= 0 &&
+        comp_method_in_chain(c, comp_class_index(c, "Kernel"), name, NULL) >= 0)) {
+    int tv = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
+                  " ? sp_bm_source_location((sp_BoundMethod *)_t%d.v.p)"
+                  " : (sp_raise_nomethod(sp_nomethod_msg(\"source_location\", _t%d)), sp_box_nil()); })",
+               tv, tv, tv, tv, tv);
+    return 1;
+  }
   if (sp_streq(name, "parameters") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);

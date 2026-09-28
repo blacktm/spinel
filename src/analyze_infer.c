@@ -5133,6 +5133,8 @@ else {
       if (argc == 0 && sp_streq(name, "parameters")) return an_poly_concrete(c, name, TY_POLY_ARRAY);
       if (argc == 0 && sp_streq(name, "curry")) return an_poly_concrete(c, name, TY_CURRY);
       if (argc == 0 && sp_streq(name, "to_proc")) return an_poly_concrete(c, name, TY_POLY);
+      /* source_location on a boxed Method: [file, line] or nil, boxed */
+      if (argc == 0 && sp_streq(name, "source_location")) return an_poly_concrete(c, name, TY_POLY);
       /* String transforms on a boxed value: emit_poly_call routes these
          through sp_poly_to_s and re-boxes the result, so the value stays
          poly (mirrors the codegen list in codegen_call_recv.c). */
