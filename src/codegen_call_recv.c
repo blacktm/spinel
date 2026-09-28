@@ -14748,6 +14748,8 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
   else if (at == TY_POLY) {
     const char *bid = ty_nullable_builtin_id(rt);
     buf_printf(b, "sp_RbVal _u%d = %s; ", t, a);
+    /* a NULL handle is nil, and equal to a boxed nil, as `== nil` answers */
+    if (kind == 1) buf_printf(&test, "(_t%d == NULL && _u%d.tag == SP_TAG_NIL) || ", t, t);
     if (!bid) buf_printf(&test, "((void)_u%d, 0)", t);
     else {
       buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && _u%d.cls_id == %s && ", t, t, bid);
