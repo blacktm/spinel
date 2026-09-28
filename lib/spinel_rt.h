@@ -4855,6 +4855,12 @@ static sp_PolyArray *sp_poly_arr_recv(sp_RbVal v, const char *m) {
      reject on a boxed one raised NoMethodError naming Range (#4837) */
   if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE))
     return sp_enum_items_from(v);
+  /* An Enumerator enumerates its values for the Enumerable names that reach
+     here (select, reject, zip, sort, ...); flatten, each_index and map! are
+     Array's alone, and keep CRuby's NoMethodError. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR &&
+      strcmp(m, "flatten") != 0 && strcmp(m, "each_index") != 0 && strcmp(m, "map!") != 0)
+    return sp_enum_items_from(v);
   /* A boxed Hash enumerates as its [key, value] pairs, which is what every
      Enumerable name reaching here wants (#3449). The few whose Hash result is
      itself a Hash rebuild one from the pairs at their own call site. */
