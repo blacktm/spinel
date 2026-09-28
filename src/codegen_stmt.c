@@ -1967,6 +1967,9 @@ int static_isa_cond(Compiler *c, int pred) {
   if (ac != 1 || !av || !nt_type(nt, av[0]) || !sp_streq(nt_type(nt, av[0]), "ConstantReadNode")) return -1;
   const char *target_name = nt_str(nt, av[0], "name");
   if (!target_name) return -1;
+  /* a receiver with an effect (`mk.is_a?(K)`) has to run: the test is made
+     at run time, where the call emitter evaluates it */
+  if (subtree_has_side_effect(c, recv)) return -1;
   /* A scalar local against a builtin class is answered from its type. Not a
      bool (TrueClass/FalseClass depends on the value), not a Queue (shares its
      runtime object with SizedQueue), and only a local read so no receiver
