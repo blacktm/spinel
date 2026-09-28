@@ -7166,10 +7166,18 @@ TyKind infer_uncached(Compiler *c, int id) {
     LocalVar *lv = rn ? comp_gvar(c, rn) : NULL;
     return lv ? lv->type : TY_UNKNOWN;
   }
+  /* `$g = v` used as a value is the global's slot, which codegen reads back
+     after the write, as the ivar-write rule above answers the ivar's */
+  if (nk == NK_GlobalVariableWriteNode) {
+    const char *nm = nt_str(nt, id, "name");
+    const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
+    LocalVar *lv = rn ? comp_gvar(c, rn) : NULL;
+    if (lv && lv->type != TY_UNKNOWN) return lv->type;
+    return infer_type(c, nt_ref(nt, id, "value"));
+  }
   if (nk == NK_GlobalVariableOperatorWriteNode) {
     /* `$g += v` evaluates to the updated value (the local/ivar op-write forms
-       above already do; #1484). Plain `$g = v` and `||=`/`&&=` stay untyped
-       statements, mirroring the local-variable policy. */
+       above already do; #1484). `||=`/`&&=` stay untyped statements. */
     const char *nm = nt_str(nt, id, "name");
     const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
     LocalVar *lv = rn ? comp_gvar(c, rn) : NULL;

@@ -1581,6 +1581,20 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     buf_puts(b, "; })");
     return;
   }
+  /* `$g = rhs` used as a value: the write the statement form emits, then
+     the global read back, as the @ivar arm below answers its slot. A global
+     the program never registered keeps the refusal below. */
+  if (sp_streq(ty, "GlobalVariableWriteNode")) {
+    const char *gnm = nt_str(nt, id, "name");
+    const char *gkey = gnm ? comp_resolve_gvar(c, gnm + 1) : NULL;
+    if (gkey && comp_gvar(c, gkey)) {
+      Buf gsb; memset(&gsb, 0, sizeof gsb);
+      emit_stmt(c, id, &gsb, 0);
+      buf_puts(b, "({\n"); buf_puts(b, gsb.p ? gsb.p : ""); buf_printf(b, " gv_%s; })", gkey);
+      free(gsb.p);
+      return;
+    }
+  }
   if (sp_streq(ty, "InstanceVariableWriteNode")) {
     /* @ivar = rhs used as expression: ({ self->iv_x = rhs; self->iv_x; }) */
     const char *nm = nt_str(nt, id, "name");
