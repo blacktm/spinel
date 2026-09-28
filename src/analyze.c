@@ -444,7 +444,8 @@ void compute_reachable(Compiler *c) {
       const char *nm = nt_str(c->nt, id, "name");
       if (!nm) continue;
       if (sp_streq(nm, "Integer")) has_kint = 1;
-      else if (sp_streq(nm, "Float")) has_kflt = 1;
+      /* Integer#coerce converts an object argument through its #to_f too */
+      else if (sp_streq(nm, "Float") || sp_streq(nm, "coerce")) has_kflt = 1;
     }
     /* a Numeric of the program's own converts through its #to_f wherever a
        Float argument is taken (Math.sqrt(big_decimal)): the same bridge */
