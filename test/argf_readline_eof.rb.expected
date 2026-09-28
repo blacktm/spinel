@@ -1,0 +1,9 @@
+"a\n"
+"b"
+"c\n"
+nil
+EOFError
+end of file reached
+EOFError
+EOFError
+done

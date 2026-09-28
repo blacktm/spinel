@@ -25,6 +25,7 @@ extern sp_StrArray *sp_argv_array_cache;
 sp_StrArray *sp_get_ARGV(void);
 int sp_argf_ensure(void);
 const char *sp_argf_gets(void);
+const char *sp_argf_readline(void);
 const char *sp_argf_read(void);
 sp_StrArray *sp_argf_readlines(void);
 const char *sp_argf_filename(void);

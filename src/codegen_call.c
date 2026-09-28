@@ -25520,16 +25520,18 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        holds (a last line without "\n" keeps its "\r") */
     int chomp_kw = argc == 1 && nt_kind(nt, argv[0]) == NK_KeywordHashNode
                    ? struct_kwarg_value(c, argv[0], "chomp") : -1;
+    /* readline raises EOFError where gets answers nil */
+    const char *argf_line = sp_streq(name, "readline") ? "sp_argf_readline()" : "sp_argf_gets()";
     if ((sp_streq(name, "gets") || sp_streq(name, "readline")) && chomp_kw >= 0) {
       int tf = ++g_tmp, tl = ++g_tmp;
       buf_printf(b, "({ int _t%d = ", tf);
       emit_kw_flag(c, chomp_kw, b);
-      buf_printf(b, "; const char *_t%d = sp_argf_gets(); SP_GC_ROOT_STR(_t%d);"
+      buf_printf(b, "; const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);"
                     " _t%d && _t%d && sp_str_byte_len(_t%d) > 0 && _t%d[sp_str_byte_len(_t%d) - 1] == '\\n'"
-                    " ? sp_str_chomp(_t%d) : _t%d; })", tl, tl, tl, tf, tl, tl, tl, tl, tl);
+                    " ? sp_str_chomp(_t%d) : _t%d; })", tl, argf_line, tl, tl, tf, tl, tl, tl, tl, tl);
       return;
     }
-    if (sp_streq(name, "gets") || sp_streq(name, "readline")) { buf_puts(b, "sp_argf_gets()"); return; }
+    if (sp_streq(name, "gets") || sp_streq(name, "readline")) { buf_puts(b, argf_line); return; }
     if (sp_streq(name, "readlines") || sp_streq(name, "to_a")) { buf_puts(b, "sp_argf_readlines()"); return; }
     if (sp_streq(name, "filename") || sp_streq(name, "path")) { buf_puts(b, "sp_argf_filename()"); return; }
     if (sp_streq(name, "eof?") || sp_streq(name, "eof")) { buf_puts(b, "sp_argf_eof()"); return; }

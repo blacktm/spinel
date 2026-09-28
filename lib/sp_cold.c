@@ -3222,6 +3222,12 @@ const char *sp_argf_gets(void) {
     sp_argf_obj.cur = NULL;  /* EOF on this stream; advance on next ensure */
   }
 }
+/* ARGF.readline: the next line, or EOFError at end of input */
+const char *sp_argf_readline(void) {
+  const char *r = sp_argf_gets();
+  if (!r) sp_raise_cls("EOFError", "end of file reached");
+  return r;
+}
 const char *sp_argf_read(void) {
   sp_String *s = sp_String_new(""); SP_GC_ROOT(s);
   const char *line;
