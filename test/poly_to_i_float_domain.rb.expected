@@ -1,0 +1,5 @@
+[FloatDomainError, "NaN"]
+[FloatDomainError, "Infinity"]
+[FloatDomainError, "-Infinity"]
+[FloatDomainError, "-Infinity"]
+2

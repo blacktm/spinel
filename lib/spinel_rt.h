@@ -3164,8 +3164,12 @@ static sp_RbVal sp_poly_succ_m(sp_RbVal v, sp_bool allow_enum) {
    conversion protocol's TypeError, which sp_poly_to_i raises for the slot
    case. A class that does define #to_i never reaches here (poly dispatch gives
    it its own arm), and a builtin receiver carries a negative cls_id. */
+static inline void sp_poly_flo_domain_ck(sp_float f);   /* defined below */
 static sp_int sp_poly_to_i_meth(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
+  /* a NaN or an infinite Float raises FloatDomainError, as the boxed-slot
+     twin sp_poly_to_i_meth_v checks */
+  if (v.tag == SP_TAG_FLT) sp_poly_flo_domain_ck(v.v.f);
   /* The call answers an sp_int, and a Bignum is one Integer that does not
      fit it: say so rather than hand back its low word (#4665). Promoting
      the slot is the wider question of #2024. */
