@@ -266,12 +266,23 @@ sp_Rational sp_str_to_r_strict(const char *s) {SP_GC_ROOT_STR(s);
     p++;
     sp_int d2 = 0; int anyd = 0;
     while ((*p >= '0' && *p <= '9') || *p == '_') { if (*p != '_') { d2 = d2 * 10 + (*p - '0'); anyd = 1; } p++; }
-    if (!anyd) sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
-    if (d2 == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+    /* each failure below answers nil under `exception: false`, as the
+       digitless one above does */
+    if (!anyd) {
+      if (sp_convert_soft) { sp_convert_failed = 1; return sp_rational_new(0, 1); }
+      sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
+    }
+    if (d2 == 0) {
+      if (sp_convert_soft) { sp_convert_failed = 1; return sp_rational_new(0, 1); }
+      sp_raise_cls("ZeroDivisionError", "divided by 0");
+    }
     den *= d2;
   }
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f' || *p == '\v') p++;
-  if (*p) sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
+  if (*p) {
+    if (sp_convert_soft) { sp_convert_failed = 1; return sp_rational_new(0, 1); }
+    sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
+  }
   return sp_rational_new(sign * num, den);
 }
 /* The products of two sp_int fit a 128-bit integer on the 64-bit build and a
