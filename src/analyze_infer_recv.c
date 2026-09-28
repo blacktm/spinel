@@ -1854,10 +1854,20 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       !an_user_defines_method(c, name) &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
        sp_streq(name, "errno") ||
-       sp_streq(name, "key") || sp_streq(name, "receiver") ||
-       sp_streq(name, "args") || sp_streq(name, "private_call?") ||
-       sp_streq(name, "reason")))
+       sp_streq(name, "key") || sp_streq(name, "receiver")))
     { *out = sp_streq(name, "message") ? TY_STRING : TY_POLY; return 1; }
+  /* args and private_call? (NoMethodError) and reason (LocalJumpError) join
+     them, under the dispatch's own test: a method or a reader of the name in
+     any class of the program's own (`attr_reader :args` is common) keeps the
+     call its own, in the builtin-only derivation too, so the dispatch's
+     default arm is not given a type its answer would widen */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      (sp_streq(name, "args") || sp_streq(name, "private_call?") || sp_streq(name, "reason"))) {
+    int own = 0;
+    for (int k = 0; k < c->nclasses && !own; k++)
+      if (comp_method_in_class(c, k, name) >= 0 || comp_reader_in_chain(c, k, name, NULL)) own = 1;
+    if (!own) { *out = TY_POLY; return 1; }
+  }
   /* Integer / Time accessors, Proc#arity on a poly value read out of a
      container: an int-returning builtin the poly-builtin dispatch handles at
      runtime; type it int so the result is not boxed to nil (#3162). */
