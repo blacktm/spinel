@@ -3152,12 +3152,18 @@ sp_StrArray *sp_get_ARGV(void) {
    The files are the program's ARGV as it stands when ARGF needs the next
    one, taken off its front as each is opened, as CRuby's ARGF does; a file
    that does not open raises. With ARGV empty before any file, stdin. */
+static const char *const sp_argf_default_stdin = &("\xff" "-")[1];
 int sp_argf_ensure(void) {
+  /* on the default stdin (no file named when ARGF began), a file since
+     pushed onto ARGV is read next, as CRuby's ARGF moves to it */
+  if (sp_argf_obj.cur == stdin && sp_argf_obj.fname == sp_argf_default_stdin &&
+      sp_get_ARGV()->len > 0)
+    sp_argf_obj.cur = NULL;
   if (sp_argf_obj.cur) return 1;
   sp_StrArray *av = sp_get_ARGV();
   if (av->len == 0) {
     if (sp_argf_obj.started) return 0;
-    sp_argf_obj.started = 1; sp_argf_obj.cur = stdin; sp_argf_obj.fname = &("\xff" "-")[1];
+    sp_argf_obj.started = 1; sp_argf_obj.cur = stdin; sp_argf_obj.fname = sp_argf_default_stdin;
     return 1;
   }
   const char *fn = sp_StrArray_shift(av);
