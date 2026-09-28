@@ -1170,6 +1170,9 @@ const char *sp_File_readpartial(sp_File *f, sp_int n);
 /* IO#pread(len, offset): read without moving the file position. Inline
    because it allocates from this TU's string heap (#3038). */
 static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
+  /* a zero length answers "" before the stream is checked, as CRuby's
+     pread does on a closed handle too */
+  if (len == 0) return sp_str_empty_binary();
   SP_IO_OPEN(f);
   if (len < 0) len = 0;
   char *buf = (char *)sp_str_alloc((size_t)len);
