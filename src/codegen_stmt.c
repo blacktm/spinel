@@ -4850,7 +4850,9 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           else if (at == TY_POLY_ARRAY) {
             buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, inner, b);
             buf_printf(b, "; _t%d && sp_PolyArray_include(_t%d, ", ta, ta);
-            emit_boxed(c, pred, b);
+            /* the subject's temp, not the subject again: it runs once */
+            { char st[24]; snprintf(st, sizeof st, "_t%d", t);
+              if (pt == TY_POLY) buf_puts(b, st); else emit_boxed_text(c, pt, st, b); }
             buf_puts(b, "); })");
           }
           else {
