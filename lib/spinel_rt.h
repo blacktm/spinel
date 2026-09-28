@@ -4175,10 +4175,14 @@ SP_COLD void sp_exc_stage_val(sp_RbVal v);
 #else
 SP_COLD void sp_exc_stage_val(sp_RbVal v)  { sp_pending_exc_val = v;  sp_pending_exc_flags |= 4; }
 #endif
+static void sp_raise_frozen_obj(sp_RbVal v, const char *what);   /* defined below */
 /* frozen-Hash raise carrying the receiver (identity-preserving) (#3119) */
 static SP_NOINLINE SP_COLD void sp_raise_frozen_hash_at(void *h, int cls_id) {
-  sp_exc_stage_recv(sp_box_obj(h, cls_id));
-  sp_raise_cls("FrozenError", (&("\xff" "can't modify frozen Hash")[1]));
+  /* the message names the Hash as CRuby's does ("can't modify frozen Hash:
+     {a: 1}"); the Hash is rooted while the message inspects it */
+  sp_RbVal hv = sp_box_obj(h, cls_id);
+  SP_GC_ROOT_RBVAL(hv);
+  sp_raise_frozen_obj(hv, (&("\xff" "can't modify frozen Hash")[1]));
 }
 /* Numeric queries / rounding on a poly value: dispatch on the runtime tag the
    way CRuby dispatches on the class. A tag whose class does not define the
