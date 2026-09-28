@@ -9802,6 +9802,8 @@ int infer_return_types(Compiler *c) {
                          ? nt_str(nt, pav[0], "name") : NULL;
       int kcid = kn ? comp_class_index(c, kn) : -1;
       if (kcid < 0) continue;
+      /* a module has no instances of its own: the value is still v's class */
+      if (comp_class_is_module(c, &c->classes[kcid])) continue;
       /* single-statement then-arm returning the SAME variable */
       int stm = nt_ref(nt, id, "statements");
       int sn = 0; const int *sb = stm >= 0 ? nt_arr(nt, stm, "body", &sn) : NULL;
