@@ -5227,10 +5227,11 @@ else {
       /* `x = v` through a writer on a poly receiver is the assigned value as
          written, like `[]=` below: the dispatch calls the writer for effect
          and yields the argument's own temp, so no arm's return widens it.
-         Only when some class has the writer -- otherwise the call is the
-         NoMethodError the dispatch raises. */
+         Only when some class has the writer, or ostruct is in the program,
+         where a boxed OpenStruct takes any writer -- otherwise the call is
+         the NoMethodError the dispatch raises. */
       if (argc == 1 && call_is_setter_assign(nt, id) && nt_ref(nt, id, "block") < 0) {
-        int owned = 0;
+        int owned = sp_feature_required("ostruct");
         char sbase[256];
         int has_base = setter_base_name(name, sbase, sizeof sbase);
         for (int k = 0; k < c->nclasses && !owned; k++)

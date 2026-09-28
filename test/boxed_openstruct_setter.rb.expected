@@ -1,0 +1,6 @@
+[3, "s"]
+[1, 2]
+[1, 2]
+{a: 3, b: "s", c: [1, 2]}
+2
+"undefined method 'z=' for nil"

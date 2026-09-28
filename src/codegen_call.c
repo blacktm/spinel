@@ -7300,6 +7300,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        the runtime store, anything else its own arm or the default (#4195). */
     int is_pstore = sp_streq(name, "store") && argc == 2 && !has_splat_arg &&
                     nt_ref(nt, id, "block") < 0;
+    /* `x.member = v` where ostruct is in the program: a boxed OpenStruct takes
+       a writer of any name, as the typed one does (sp_OpenStruct_set); the
+       zero-argument gate reads a member the same way. */
+    int is_ostruct_set = argc == 1 && !has_splat_arg && nt_ref(nt, id, "block") < 0 &&
+                         call_is_setter_assign(nt, id) && sp_feature_required("ostruct");
     /* split(sep) on a TAG_STR receiver, when a user class also owns `split`
        (the bundled Pathname does) and the dispatch therefore lost the String
        arm. Same hole #3394 closed for the zero-arg form (#3401). */
@@ -7440,7 +7445,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
     /* see the zero-argument gate's own note: the emitters stand down by
        name, so the dispatch has to open by name too */
     int name_taken2 = user_defines_or_reads(c, name);
-    if (ncand > 0 || name_taken2 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_ctryconv) {
+    if (ncand > 0 || name_taken2 || is_index || is_pdelete || is_pdig || is_pvalues_at || is_pfirstn || is_include || is_fetch || is_push || is_unshift || is_pjoin || is_ppack || is_pred || is_strftime || is_intersect || is_arr_index || is_cover || is_gcdlcm || is_pmerge || is_ctryconv || is_ostruct_set) {
       /* A splatted argument spreads across each arm's own parameters: its
          temp holds the array, and every arm reads its fixed parameters out of
          it, packs its rest from it and judges the count the array gives. The
@@ -7662,6 +7667,17 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           else buf_puts(b, call);
           buf_puts(b, "; }\nelse ");
         }
+      }
+      /* a member writer on a boxed OpenStruct; the argument's temp is the
+         value, as for every setter arm */
+      if (is_ostruct_set) {
+        const char *nm = nt_str(nt, id, "name");
+        char a0[32]; snprintf(a0, sizeof a0, "_t%d", atmp[0]);
+        buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_OPENSTRUCT) "
+                      "sp_OpenStruct_set((sp_OpenStruct *)_t%d.v.p, sp_sym_intern(\"%.*s\"), ",
+                   tv, tv, tv, (int)strlen(nm) - 1, nm);
+        if (atmp_ty[0] == TY_POLY) buf_puts(b, a0); else emit_boxed_text(c, atmp_ty[0], a0, b);
+        buf_puts(b, ");\nelse ");
       }
       /* Hash#store on a boxed hash receiver (#4195) */
       if (is_pstore && ret == TY_POLY) {
