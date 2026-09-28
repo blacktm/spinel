@@ -4648,6 +4648,27 @@ static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int
   return 0;
 }
 
+/* `when <Regexp>` whose Regexp is typed as one but is not a literal the
+   literal arm precompiles (a call, a variable, an interpolation): Regexp#===
+   against a String, a Symbol or a boxed subject in _t<t>, as the literal arm
+   answers it. The arm is read once, and a nil one is nil's ===, true for a
+   nil subject alone. 0 when the arm is not typed Regexp or the subject none
+   of those. */
+static int emit_when_regex_value(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
+  if (comp_ntype(c, cond) != TY_REGEX) return 0;
+  if (pt != TY_STRING && pt != TY_POLY && pt != TY_SYMBOL) return 0;
+  int tr = ++g_tmp;
+  buf_puts(b, "({ "); emit_ctype(c, TY_REGEX, b); buf_printf(b, " _t%d = ", tr);
+  emit_expr(c, cond, b); buf_puts(b, "; ");
+  if (pt == TY_STRING)
+    buf_printf(b, "_t%d ? (_t%d && sp_re_match(_t%d, _t%d) >= 0) : _t%d == NULL; })", tr, t, tr, t, t);
+  else if (pt == TY_POLY)
+    buf_printf(b, "_t%d ? sp_re_case_eq(_t%d, _t%d) : _t%d.tag == SP_TAG_NIL; })", tr, tr, t, t);
+  else
+    buf_printf(b, "_t%d && sp_re_case_eq(_t%d, sp_box_sym(_t%d)); })", tr, tr, t);
+  return 1;
+}
+
 /* `case <array or hash> when <cond>`: Array#=== and Hash#=== are Object#===,
    which is ==, so the arm compares by value through sp_poly_eq. An arm of
    another kind can never be == an Array or a Hash, and comparing the two
@@ -4976,6 +4997,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           else if (reidx >= 0 && pt == TY_SYMBOL) {
             buf_printf(b, "sp_re_case_eq(sp_re_pat_%d, sp_box_sym(_t%d))", reidx, t);
           }
+          else if (reidx < 0 && emit_when_regex_value(c, conds[j], t, pt, b)) { }
           else if (pt == TY_STRING && emit_when_string_range(c, conds[j], t, b)) {
             /* emitted the lexicographic cover check */
           }
@@ -5332,6 +5354,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
         if (reidx >= 0 && pt == TY_STRING) { buf_printf(b, "(sp_re_match(sp_re_pat_%d, _t%d) >= 0)", reidx, t); }
         else if (reidx >= 0 && pt == TY_POLY) { buf_printf(b, "sp_re_case_eq(sp_re_pat_%d, _t%d)", reidx, t); }
         else if (reidx >= 0 && pt == TY_SYMBOL) { buf_printf(b, "sp_re_case_eq(sp_re_pat_%d, sp_box_sym(_t%d))", reidx, t); }
+        else if (reidx < 0 && emit_when_regex_value(c, conds[j], t, pt, b)) { }
         else if (pt == TY_STRING && emit_when_string_range(c, conds[j], t, b)) {
           /* emitted the lexicographic cover check */
         }
