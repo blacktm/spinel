@@ -4835,17 +4835,26 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           int inner = nt_ref(nt, conds[j], "expression");
           TyKind at = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
           int ta = ++g_tmp;
-          if (at == TY_INT_ARRAY) {
+          if (at == TY_INT_ARRAY && pt == TY_INT) {
             buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_expr(c, inner, b);
             buf_printf(b, "; _t%d && sp_IntArray_include(_t%d, _t%d); })", ta, ta, t);
           }
-          else if (at == TY_STR_ARRAY) {
+          else if (at == TY_STR_ARRAY && pt == TY_STRING) {
             buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_expr(c, inner, b);
             buf_printf(b, "; _t%d && sp_StrArray_include(_t%d, _t%d); })", ta, ta, t);
           }
-          else if (at == TY_FLOAT_ARRAY) {
+          else if (at == TY_FLOAT_ARRAY && pt == TY_FLOAT) {
             buf_printf(b, "({ sp_FloatArray *_t%d = ", ta); emit_expr(c, inner, b);
             buf_printf(b, "; _t%d && sp_FloatArray_include(_t%d, _t%d); })", ta, ta, t);
+          }
+          /* a typed Array splat against a subject of another type: the
+             elements compared with the subject boxed, as a mixed Array's are */
+          else if (at == TY_INT_ARRAY || at == TY_STR_ARRAY || at == TY_FLOAT_ARRAY) {
+            buf_printf(b, "({ sp_PolyArray *_t%d = sp_poly_to_poly_array(", ta); emit_boxed(c, inner, b);
+            buf_printf(b, "); SP_GC_ROOT(_t%d); _t%d && sp_PolyArray_include(_t%d, ", ta, ta, ta);
+            { char st[24]; snprintf(st, sizeof st, "_t%d", t);
+              if (pt == TY_POLY) buf_puts(b, st); else emit_boxed_text(c, pt, st, b); }
+            buf_puts(b, "); })");
           }
           else if (at == TY_POLY_ARRAY) {
             buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, inner, b);
