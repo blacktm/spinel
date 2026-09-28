@@ -34647,6 +34647,18 @@ else {
         buf_puts(b, "; })");
         return;
       }
+      /* a user object the class table cannot decide answers as the same
+         object boxed does: a user exception by its class chain
+         (StandardError === e), a builtin class it does not descend from
+         false (String === obj), where the call fell through to NoMethodError */
+      if (ty_is_object(at2)) {
+        int tv = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b); buf_printf(b, "; ");
+        char v[32]; snprintf(v, sizeof v, "_t%d", tv);
+        if (!emit_poly_isa_test(c, cn, v, 0, b)) buf_printf(b, "((void)_t%d, 0)", tv);
+        buf_puts(b, "; })");
+        return;
+      }
     }
   }
 
