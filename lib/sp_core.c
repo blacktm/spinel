@@ -131,7 +131,9 @@ static const char *sp_int_head(const char *p, sp_int *base, int *neg) {
       if (n == 'x' || n == 'X') *base = 16;
       else if (n == 'b' || n == 'B') *base = 2;
       else if (n == 'o' || n == 'O') *base = 8;
-      else if (n >= '0' && n <= '7') *base = 8;
+      /* a leading 0 before any digit is octal, so an 8 or a 9 after it is
+         no digit of the number, as CRuby reads "08" */
+      else if (n >= '0' && n <= '9') *base = 8;
     }
   }
   if (*p == '0' && p[1] != 0) {

@@ -1,0 +1,10 @@
+[ArgumentError, "invalid value for Integer(): \"08\""]
+[ArgumentError, "invalid value for Integer(): \"-09\""]
+8
+15
+8
+0
+1
+8
+0
+31
