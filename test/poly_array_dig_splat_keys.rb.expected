@@ -1,0 +1,9 @@
+2
+[2, 3]
+5
+4
+3
+nil
+[TypeError, "Integer does not have #dig method"]
+[2, 3]
+[:r, :k]
