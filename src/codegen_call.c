@@ -26337,13 +26337,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       nt_ref(nt, id, "block") < 0 &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
        sp_streq(name, "errno") ||
-       sp_streq(name, "key") || sp_streq(name, "receiver"))) {
+       sp_streq(name, "key") || sp_streq(name, "receiver") ||
+       sp_streq(name, "args") || sp_streq(name, "private_call?") ||
+       sp_streq(name, "reason"))) {
     int pu = 0;
     for (int k = 0; k < c->nclasses && !pu; k++)
       if (comp_method_in_class(c, k, name) >= 0 ||
           comp_reader_in_chain(c, k, name, NULL)) pu = 1;
     if (!pu) {
-      if (sp_streq(name, "name")) g_uses_symbols = 1;  /* may intern a recovered name */
+      if (sp_streq(name, "name") || sp_streq(name, "reason")) g_uses_symbols = 1;  /* may intern a recovered name */
       /* message infers TY_STRING: unwrap the boxed accessor result */
       if (sp_streq(name, "message")) buf_puts(b, "sp_poly_to_s(");
       buf_printf(b, "sp_poly_exc_acc(");

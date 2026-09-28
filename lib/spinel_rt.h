@@ -11009,6 +11009,7 @@ static sp_RbVal sp_exc_sym_slot(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) return sp_box_sym(sp_sym_intern(v.v.s));
   return v;
 }
+static sp_RbVal sp_exc_reason_acc(sp_Exception *e);   /* defined below */
 static sp_RbVal sp_poly_exc_acc(sp_RbVal v, const char *which) {
   if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_EXCEPTION && v.v.p))
     sp_raise_cls("NoMethodError",
@@ -11020,6 +11021,9 @@ static sp_RbVal sp_poly_exc_acc(sp_RbVal v, const char *which) {
   if (!strcmp(which, "key"))     return sp_exc_key_acc(e);
   if (!strcmp(which, "receiver")) return sp_exc_receiver_acc(e);
   if (!strcmp(which, "name"))    return sp_exc_name_acc(e);
+  if (!strcmp(which, "args"))    return sp_exc_args_acc(e);
+  if (!strcmp(which, "private_call?")) return sp_box_bool(sp_exc_private_call_acc(e));
+  if (!strcmp(which, "reason"))  return sp_exc_reason_acc(e);
   return sp_box_nil();
 }
 static sp_RbVal sp_exc_reason_acc(sp_Exception *e) {

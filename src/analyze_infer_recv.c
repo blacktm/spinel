@@ -1854,7 +1854,9 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       !an_user_defines_method(c, name) &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
        sp_streq(name, "errno") ||
-       sp_streq(name, "key") || sp_streq(name, "receiver")))
+       sp_streq(name, "key") || sp_streq(name, "receiver") ||
+       sp_streq(name, "args") || sp_streq(name, "private_call?") ||
+       sp_streq(name, "reason")))
     { *out = sp_streq(name, "message") ? TY_STRING : TY_POLY; return 1; }
   /* Integer / Time accessors, Proc#arity on a poly value read out of a
      container: an int-returning builtin the poly-builtin dispatch handles at

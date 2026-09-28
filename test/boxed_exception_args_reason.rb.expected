@@ -1,0 +1,6 @@
+[1, 2]
+false
+[[3], true]
+:noreason
+"undefined method 'args' for an instance of RuntimeError"
+"undefined method 'reason' for an instance of RuntimeError"
