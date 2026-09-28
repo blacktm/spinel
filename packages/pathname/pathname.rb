@@ -453,6 +453,10 @@ class Pathname
     File.rename(@path, "#{to}")
   end
 
+  def truncate(length)
+    File.truncate(@path, length)
+  end
+
   # ---- string helpers, shared by the pure-path methods ----
 
   # The name components of a path, with separators, "" and "." removed.
