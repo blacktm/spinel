@@ -34059,7 +34059,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       /* a user object, a boxed value that may hold one, or a Float (NaN and
          Infinity are nil, CRuby's FloatDomainError swallowed) converts
          through the runtime's Kernel#Integer path, nil for every failure */
-      if (ty_is_object(at0) || at0 == TY_POLY || (at0 == TY_FLOAT && ac == 1)) {
+      if (ty_is_object(at0) || at0 == TY_POLY || at0 == TY_FLOAT) {
         emit_kconv_call(c, id, av, ac, 0, b);
         return;
       }
@@ -34089,8 +34089,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       /* A nullable Integer or Float holding its sentinel is nil, and nil does
          not convert: CRuby's TypeError, where the sentinel passed through as
          a number (or, as a Float, raised FloatDomainError on its NaN). */
-      /* Under --int-overflow=promote the call answers a box (a Float past
-         sp_int is a Bignum), and the guard boxes its answer the same way. */
+      /* A Float constructor result may be a Bignum in every overflow mode. */
       TyKind rt9 = comp_ntype(c, id);
       if ((at == TY_INT || at == TY_FLOAT) && (rt9 == TY_INT || rt9 == TY_POLY) &&
           call_returns_nullable_int(c, av[0])) {
@@ -34116,6 +34115,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                         : "; sp_poly_flo_domain_ck(_t%d); sp_float_fit_i(_t%d); })", tf, tf);
       }
       else if (at == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_raise_cls(\"TypeError\", \"can't convert nil into Integer\"), (sp_int)0)"); }  /* #2514 */
+      /* a boxed argument that may hold a Float answers a box: a Float past
+         sp_int is a Bignum */
+      else if (at == TY_POLY && rt9 == TY_POLY) { emit_kconv_call(c, id, av, ac, 1, b); }
       else if (at == TY_POLY) { buf_puts(b, "sp_poly_Integer("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
       else if (at == TY_INT || at == TY_UNKNOWN) { buf_puts(b, "("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
       /* Kernel#Integer converts anything answering #to_int, and a Rational or

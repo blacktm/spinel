@@ -9,7 +9,7 @@ ceil direct: RangeError
 round direct: RangeError
 truncate direct: RangeError
 to_i direct: RangeError
-Integer(): RangeError
+1180591620717411303424
 floor(-1): RangeError
 round(runtime -1): RangeError
 div: RangeError

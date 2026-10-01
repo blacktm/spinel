@@ -1724,9 +1724,25 @@ static int kconv_noraise_kw(Compiler *c, int argc, const int *argv) {
    RangeError at run time: typing it as a Bignum would refuse to build every
    site that needs an Integer, a Range bound for one. The `exception: false`
    form of such a call is boxed already, so it carries the answer. */
+/* Whether a Kernel#Integer argument may hold a Float. A boxed `a || b`
+   or `a && b` (`Integer(ARGV[0] || 100)`) may only when an operand may;
+   any other boxed value is taken to. */
+static int kconv_may_be_float(Compiler *c, int arg) {
+  const NodeTable *nt = c->nt;
+  TyKind at = infer_type(c, arg);
+  if (at == TY_FLOAT) return 1;
+  if (at != TY_POLY) return 0;
+  NodeKind k = nt_kind(nt, arg);
+  if (k == NK_OrNode || k == NK_AndNode)
+    return kconv_may_be_float(c, nt_ref(nt, arg, "left")) ||
+           kconv_may_be_float(c, nt_ref(nt, arg, "right"));
+  return 1;
+}
 static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
   static const char *const names[] = { "to_int", "to_i" };
   TyKind at = infer_type(c, arg);
+  /* A Float converts to an Integer of any width, in every overflow mode. */
+  if (kconv_may_be_float(c, arg)) return TY_POLY;
   /* promote mode reads a String too wide for sp_int as a Bignum
      (sp_str_to_i_promote) */
   if (g_promote_mode && at == TY_STRING) return TY_POLY;
