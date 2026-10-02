@@ -25838,8 +25838,13 @@ static void emit_kconv_call(Compiler *c, int id, const int *av, int ac, int rais
   const char *fn = kt == TY_BIGINT ? "sp_poly_Integer_big"
                  : kt == TY_POLY   ? "sp_kernel_Integer_val" : "sp_poly_Integer_ex";
   if (ac < 2) {
-    buf_printf(b, "%s(", fn); emit_boxed(c, av[0], b);
-    buf_printf(b, ", 0, %d)", raise);
+    if (!raise && kt == TY_POLY) {
+      buf_puts(b, "sp_kernel_Integer_lenient_val("); emit_boxed(c, av[0], b); buf_puts(b, ")");
+    }
+    else {
+      buf_printf(b, "%s(", fn); emit_boxed(c, av[0], b);
+      buf_printf(b, ", 0, %d)", raise);
+    }
     return;
   }
   int tv = ++g_tmp;
@@ -34489,7 +34494,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       /* a user object, a boxed value that may hold one, or a Float (NaN and
          Infinity are nil, CRuby's FloatDomainError swallowed) converts
          through the runtime's Kernel#Integer path, nil for every failure */
-      if (ty_is_object(at0) || at0 == TY_POLY || (at0 == TY_FLOAT && ac == 1)) {
+      if (ty_is_object(at0) || at0 == TY_POLY || at0 == TY_RATIONAL || (at0 == TY_FLOAT && ac == 1)) {
         emit_kconv_call(c, id, av, ac, 0, b);
         return;
       }
@@ -34501,7 +34506,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       if (at0 == TY_STRING) { buf_puts(b, "sp_str_to_f_lenient("); emit_expr(c, av[0], b); buf_puts(b, ")"); return; }
       if (at0 == TY_INT) { buf_puts(b, "((sp_float)("); emit_expr(c, av[0], b); buf_puts(b, "))"); return; }
       if (at0 == TY_FLOAT) { emit_expr(c, av[0], b); return; }
-      if (ty_is_object(at0) || at0 == TY_POLY) {
+      if (ty_is_object(at0) || at0 == TY_POLY || at0 == TY_RATIONAL) {
         buf_puts(b, "sp_poly_Float_ex("); emit_boxed(c, av[0], b); buf_puts(b, ", 0)");
         return;
       }

@@ -1756,6 +1756,8 @@ static int kconv_noraise_kw(Compiler *c, int argc, const int *argv) {
 static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
   static const char *const names[] = { "to_int", "to_i" };
   TyKind at = infer_type(c, arg);
+  /* A lenient Rational conversion can carry an exact Bignum quotient. */
+  if (noraise && (at == TY_RATIONAL || at == TY_POLY)) return TY_POLY;
   /* promote mode reads a String too wide for sp_int as a Bignum
      (sp_str_to_i_promote) */
   if (g_promote_mode && at == TY_STRING) return TY_POLY;

@@ -15681,6 +15681,14 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
    Bignum: the one a boxed object's conversion answers is the value when it
    fits, and a loud RangeError otherwise (nil under `exception: false`) --
    never a truncated number in silence. */
+/* The no-base exception:false constructor retains an exact Rational quotient. */
+static sp_RbVal sp_kernel_Integer_lenient_val(sp_RbVal v) {
+  if (sp_poly_is_rat_kind(v)) {
+    SP_GC_ROOT_RBVAL(v);
+    return sp_poly_to_i_meth_v(v);
+  }
+  return sp_kernel_Integer_val(v, 0, 0);
+}
 static sp_int sp_poly_Integer_ex(sp_RbVal v, sp_int base, int raise) {
   sp_RbVal r = sp_kernel_Integer_val(v, base, raise);
   if (r.tag == SP_TAG_NIL) return SP_INT_NIL;
@@ -15705,6 +15713,7 @@ static sp_float sp_poly_Float_ex(sp_RbVal v, int raise) {
   if (v.tag == SP_TAG_FLT) return v.v.f;
   if (v.tag == SP_TAG_INT) return (sp_float)v.v.i;
   if (v.tag == SP_TAG_BIGINT) return sp_poly_to_f(v);
+  if (sp_poly_is_rat_kind(v)) return sp_poly_to_f_with_rational(v);
   if (v.tag == SP_TAG_STR) return sp_str_to_f_lenient(v.v.s ? v.v.s : sp_str_empty);
   return sp_float_nil();
 }
