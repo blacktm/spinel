@@ -3054,6 +3054,10 @@ sp_RbVal sp_Enumerator_size(sp_Enumerator *e) {SP_GC_ROOT(e);
   if (e->gen_label) return sp_box_nil();
   /* an argless cycle is endless unless there is nothing to repeat */
   if (e->endless) return (e->items && e->items->len > 0) ? sp_box_float(1.0 / 0.0) : sp_box_int(0);
+  /* a permutation given a nil count enumerates the whole receiver, but
+     CRuby's size function converts that count strictly */
+  if (e->meth && strcmp(e->meth, "permutation(nil)") == 0)
+    sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
   /* the index searches stop at their first hit, so CRuby gives their
      Enumerator no size; nor gsub's or gsub!'s */
   if (e->meth && (strcmp(e->meth, "index") == 0 || strcmp(e->meth, "rindex") == 0 ||

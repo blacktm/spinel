@@ -17,10 +17,57 @@ static const char *arr_kind(TyKind rt) {
 }
 
 /* The inspect label of a blockless combinator's Enumerator, CRuby's
-   `combination(2)` or an argless `permutation`; `tn` holds the count. */
-static void emit_combinator_enum_label(const char *name, int argc, int tn, Buf *b) {
-  if (argc == 1) buf_printf(b, "sp_sprintf(\"%s(%%lld)\", (long long)_t%d)", name, tn);
+   `combination(2)` or an argless `permutation`; `tn` holds the count, and
+   `nil_flag`, when nonzero, the sp_bool set when a permutation's count was
+   nil: its label is CRuby's `permutation(nil)`, which sp_Enumerator_size
+   refuses as CRuby's size function does. */
+static void emit_combinator_enum_label(const char *name, int argc, int tn, int nil_flag, Buf *b) {
+  if (argc == 1 && nil_flag)
+    buf_printf(b, "(_t%d ? SPL(\"%s(nil)\") : sp_sprintf(\"%s(%%lld)\", (long long)_t%d))",
+               nil_flag, name, name, tn);
+  else if (argc == 1) buf_printf(b, "sp_sprintf(\"%s(%%lld)\", (long long)_t%d)", name, tn);
   else buf_printf(b, "SPL(\"%s\")", name);
+}
+
+/* CRuby's permutation takes a nil count as an omitted one, the receiver's
+   full length; combination and the repeated forms convert their count
+   strictly, so `combination(nil)` raises. A count that cannot be nil, and a
+   splat, keep the caller's conversion. */
+int permutation_count_nilable(Compiler *c, const char *name, int node) {
+  if (!sp_streq(name, "permutation") || node < 0) return 0;
+  if (nt_kind(c->nt, node) == NK_SplatNode) return 0;
+  TyKind t = comp_ntype(c, node);
+  return t == TY_NIL || t == TY_POLY || (t == TY_INT && nullable_int_value(c, node));
+}
+
+/* The count of such a permutation: `len` (the receiver's length, already
+   held by the caller) when it is nil, setting the sp_bool _t<nil_flag> when
+   nil_flag is nonzero; otherwise the Integer, converted strictly. */
+static void emit_permutation_count(Compiler *c, int node, const char *len, int nil_flag, Buf *b) {
+  char none[160];
+  if (nil_flag) snprintf(none, sizeof none, "(_t%d = 1, (%s))", nil_flag, len);
+  else snprintf(none, sizeof none, "(%s)", len);
+  if (comp_ntype(c, node) == TY_POLY) {
+    int tv = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, node, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_NIL ? (sp_int)%s"
+                  " : sp_poly_arg_int_chk(_t%d); })", tv, tv, none, tv);
+    return;
+  }
+  emit_int_expr_bound(c, node, none, b);
+}
+
+/* A combinator's count over the receiver in _t<ta>: an argless permutation's
+   is the receiver's length, a nil one's too (setting _t<nil_flag> when that
+   is nonzero); any other is converted strictly when `strict`, else emitted
+   as it is. */
+void emit_combinator_count(Compiler *c, const char *name, int argc, const int *argv, int ta,
+                           int nil_flag, int strict, Buf *b) {
+  char len[64]; snprintf(len, sizeof len, "_t%d ? _t%d->len : 0", ta, ta);
+  if (argc == 1 && permutation_count_nilable(c, name, argv[0])) emit_permutation_count(c, argv[0], len, nil_flag, b);
+  else if (argc == 1 && strict) emit_int_expr(c, argv[0], b);
+  else if (argc == 1) emit_expr(c, argv[0], b);
+  else buf_puts(b, len);
 }
 
 /* shift(n) / pop(n): the removed subarray, via the slice! splice (pop takes
@@ -973,8 +1020,7 @@ int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b) {
          here would reach chain sites that read the array directly */
       buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, recv, b);
       buf_printf(b, "; SP_GC_ROOT(_t%d); %s(_t%d, ", ta, combfn, ta);
-      if (argc == 1) emit_expr(c, argv[0], b);
-      else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);
+      emit_combinator_count(c, name, argc, argv, ta, 0, 0, b);
       buf_puts(b, "); })");
       return 1;
     }
@@ -989,10 +1035,11 @@ int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b) {
                        : "sp_IntArray_repeated_combination";
     int ta = ++g_tmp, tc = ++g_tmp, tout = ++g_tmp, ti = ++g_tmp;
     int tn = ++g_tmp, te = ++g_tmp;
+    int tz = argc == 1 && permutation_count_nilable(c, name, argv[0]) ? ++g_tmp : 0;
     buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+    if (tz) buf_printf(b, "sp_bool _t%d = 0; ", tz);
     buf_printf(b, "sp_int _t%d = ", tn);
-    if (argc == 1) emit_int_expr(c, argv[0], b);
-    else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);   /* argless permutation: full length */
+    emit_combinator_count(c, name, argc, argv, ta, tz, 1, b);
     buf_printf(b, "; sp_PtrArray *_t%d = %s(_t%d, _t%d", tc, combfn, ta, tn);
     /* the combinations are only in this temp until the loop below boxes
        them, and the array it boxes them into allocates first */
@@ -1003,7 +1050,7 @@ int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b) {
     /* blockless: an Enumerator over those tuples (#3614) */
     buf_printf(b, " sp_Enumerator *_t%d = sp_Enumerator_new_from(sp_box_poly_array(_t%d)); SP_GC_ROOT(_t%d);", te, tout, te);
     buf_printf(b, " sp_enum_with_src(_t%d, sp_box_int_array(_t%d), ", te, ta);
-    emit_combinator_enum_label(name, argc, tn, b);
+    emit_combinator_enum_label(name, argc, tn, tz, b);
     buf_puts(b, "); })");
     return 1;
   }
@@ -1016,17 +1063,19 @@ int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b) {
                        : sp_streq(name, "repeated_permutation") ? "sp_PolyArray_repeated_permutation"
                        : "sp_PolyArray_repeated_combination";
     int ta = ++g_tmp, ts = ++g_tmp, tn = ++g_tmp, te = ++g_tmp;
+    int tz = argc == 1 && permutation_count_nilable(c, name, argv[0]) ? ++g_tmp : 0;
     buf_printf(b, "({ sp_RbVal _t%d = ", ts);
     emit_boxed(c, recv, b);
-    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_PolyArray *_t%d = sp_poly_to_poly_array(_t%d); SP_GC_ROOT(_t%d); sp_int _t%d = ", ts, ta, ts, ta, tn);
-    if (argc == 1) emit_expr(c, argv[0], b);
-    else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_PolyArray *_t%d = sp_poly_to_poly_array(_t%d); SP_GC_ROOT(_t%d); ", ts, ta, ts, ta);
+    if (tz) buf_printf(b, "sp_bool _t%d = 0; ", tz);
+    buf_printf(b, "sp_int _t%d = ", tn);
+    emit_combinator_count(c, name, argc, argv, ta, tz, 0, b);
     buf_printf(b, "; sp_Enumerator *_t%d = ", te);
     buf_puts(b, "sp_Enumerator_new_from(sp_box_poly_array(");
     buf_printf(b, "%s(_t%d, _t%d", combfn, ta, tn);
     buf_puts(b, ")))");
     buf_printf(b, "; SP_GC_ROOT(_t%d); sp_enum_with_src(_t%d, _t%d, ", te, te, ts);
-    emit_combinator_enum_label(name, argc, tn, b);
+    emit_combinator_enum_label(name, argc, tn, tz, b);
     buf_puts(b, ")");
     buf_puts(b, "; })");
     return 1;

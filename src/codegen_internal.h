@@ -1743,6 +1743,10 @@ void conv_hold_end(int tmp);
    nil/true/false TypeError arm -- see emit_nilbool_conv_raise in codegen.c */
 void emit_int_expr_nilable(Compiler *c, int node, Buf *b);
 void emit_int_expr_bound(Compiler *c, int node, const char *none, Buf *b);
+/* a combinator's count over the receiver in _t<ta> (codegen_call_array.c) */
+int permutation_count_nilable(Compiler *c, const char *name, int node);
+void emit_combinator_count(Compiler *c, const char *name, int argc, const int *argv, int ta,
+                           int nil_flag, int strict, Buf *b);
 void emit_str_expr_nilable(Compiler *c, int node, Buf *b);
 void emit_str_expr_sep(Compiler *c, int node, Buf *b);
 /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */

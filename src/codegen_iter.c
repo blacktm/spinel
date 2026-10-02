@@ -5136,9 +5136,10 @@ static int iter_combination_cons_arms(Compiler *c, int id, Buf *b, int indent, c
     if (ac != 1 && !(is_perm && ac == 0)) return 0;
     int ta = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
-    emit_indent(b, indent); buf_printf(b, "{ sp_IntArray *_t%d = ", ta); buf_puts(b, rb.p ? rb.p : ""); buf_puts(b, ";\n"); free(rb.p);
+    /* rooted across the count, which can allocate, as the PolyArray arm below roots its receiver */
+    emit_indent(b, indent); buf_printf(b, "{ sp_IntArray *_t%d = ", ta); buf_puts(b, rb.p ? rb.p : ""); buf_printf(b, "; SP_GC_ROOT(_t%d);\n", ta); free(rb.p);
     emit_indent(b, indent + 1); buf_printf(b, "sp_PtrArray *_t%d = %s(_t%d, ", tc, genfn, ta);
-    if (ac == 1) emit_int_expr(c, av[0], b); else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);
+    emit_combinator_count(c, name, ac, av, ta, 0, 1, b);
     buf_puts(b, "); SP_GC_ROOT(_t"); buf_printf(b, "%d);\n", tc);
     emit_indent(b, indent + 1); buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tc, ti);
     if (p0) {
@@ -5174,7 +5175,7 @@ static int iter_combination_cons_arms(Compiler *c, int id, Buf *b, int indent, c
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(b, indent); buf_printf(b, "{ sp_PolyArray *_t%d = ", ta); buf_puts(b, rb.p ? rb.p : ""); buf_printf(b, "; SP_GC_ROOT(_t%d);\n", ta); free(rb.p);
     emit_indent(b, indent + 1); buf_printf(b, "sp_PolyArray *_t%d = %s(_t%d, ", tc, genfn, ta);
-    if (ac == 1) emit_int_expr(c, av[0], b); else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);
+    emit_combinator_count(c, name, ac, av, ta, 0, 1, b);
     buf_puts(b, "); SP_GC_ROOT(_t"); buf_printf(b, "%d);\n", tc);
     emit_indent(b, indent + 1); buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tc, ti);
     if (p0) {
@@ -5213,7 +5214,7 @@ static int iter_combination_cons_arms(Compiler *c, int id, Buf *b, int indent, c
     buf_printf(b, "{ sp_PolyArray *_t%d = sp_poly_to_poly_array(%s); SP_GC_ROOT(_t%d);\n", ta, rb.p ? rb.p : "sp_box_nil()", ta);
     free(rb.p);
     emit_indent(b, indent + 1); buf_printf(b, "sp_PolyArray *_t%d = %s(_t%d, ", tc, genfn, ta);
-    if (ac == 1) emit_int_expr(c, av[0], b); else buf_printf(b, "_t%d ? _t%d->len : 0", ta, ta);
+    emit_combinator_count(c, name, ac, av, ta, 0, 1, b);
     buf_puts(b, "); SP_GC_ROOT(_t"); buf_printf(b, "%d);\n", tc);
     emit_indent(b, indent + 1); buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tc, ti);
     if (p0) {

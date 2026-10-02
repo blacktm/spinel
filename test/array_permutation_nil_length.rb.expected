@@ -1,0 +1,21 @@
+[[1, 2], [2, 1]]
+[["a", "b"], ["b", "a"]]
+[[1.5, 2.5], [2.5, 1.5]]
+[[1, "a"], ["a", 1]]
+[[]]
+#<Enumerator: [1, 2, 3]:permutation(nil)>
+[1, 2, 3]
+6
+[TypeError, "no implicit conversion from nil to integer"]
+[[1, 2], [2, 1]]
+[[1.5, 2.5], [2.5, 1.5]]
+[[1, "a"], ["a", 1]]
+N[[1, 2], [2, 1]]
+N[[1], [2]]
+N[[1, "a"], ["a", 1]]
+N[TypeError, "no implicit conversion of String into Integer"]
+6
+[[1, 2], [2, 1]]
+[[1], [2]]
+[TypeError, "no implicit conversion from nil to integer"]
+[TypeError, "no implicit conversion from nil to integer"]
