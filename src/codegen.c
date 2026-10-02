@@ -11455,20 +11455,23 @@ static void emit_user_coerce_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "  *handled = TRUE;\n  return _rv;\n}\n");
 }
 
+/* A user hash is also called by Array#hash, independently of eql?. */
+static int class_has_hash(Compiler *c, int k) {
+  if (!c->classes[k].instantiated) return 0;
+  int mi = comp_method_in_chain(c, k, "hash", NULL);
+  if (mi < 0) return 0;
+  Scope *m = &c->scopes[mi];
+  return m->nparams == 0 && (m->ret == TY_INT || m->ret == TY_POLY);
+}
+
 /* 1 if instantiated class k defines both #hash and #eql? with emittable shapes --
-   the Ruby idiom for a custom Hash key. Validates BOTH signatures here so the two
-   hooks are generated all-or-nothing: a class that passes gets both a hash arm and
-   an eql arm, one that fails gets neither and falls through to pointer identity.
+   the Ruby idiom for a custom Hash key. The eql hook still requires both methods.
    #eql?'s typed-object param must be class k itself (the hook only ever compares
    two keys of the same cls_id), so the arg cast is never to an unrelated struct. */
 static int class_is_hashkey(Compiler *c, int k) {
-  if (!c->classes[k].instantiated) return 0;
-  int h_mi = comp_method_in_chain(c, k, "hash", NULL);
+  if (!class_has_hash(c, k)) return 0;
   int e_mi = comp_method_in_chain(c, k, "eql?", NULL);
-  if (h_mi < 0 || e_mi < 0) return 0;
-
-  Scope *h_m = &c->scopes[h_mi];
-  if (h_m->nparams > 0 || (h_m->ret != TY_INT && h_m->ret != TY_POLY)) return 0;
+  if (e_mi < 0) return 0;
 
   Scope *e_m = &c->scopes[e_mi];
   if (e_m->nparams < 1 || e_m->rest_idx >= 0 || (e_m->ret != TY_BOOL && e_m->ret != TY_POLY)) return 0;
@@ -11492,20 +11495,19 @@ static int class_is_valuekey(Compiler *c, int k) {
 
 /* Generate sp_gen_obj_hash / sp_gen_obj_eql: cls_id switches calling each such
    class's user #hash / #eql?, installed as sp_obj_hash_hook / sp_obj_eql_hook so
-   the PolyPolyHash key machinery honors value semantics for user objects (two
-   value-equal keys collide and compare equal). A class whose methods have an
-   unusable shape omits its arm and falls through to pointer identity (the
-   Object#hash / equal? default). The eql hook is only reached for two keys of
+   Array hashing and the PolyPolyHash key machinery honor user methods. A class
+   whose methods have an unusable shape omits its arm and falls through to
+   pointer identity (the Object#hash / equal? default). The eql hook is only reached for two keys of
    the same cls_id (the runtime pre-filters), so both pointers are that class. */
 static void emit_obj_hashkey_dispatch(Compiler *c, Buf *b) {
   /* Emission uses mc(m->name) throughout: `alias eql? ==` resolves to the
      target method's scope, whose C symbol carries the target's name. */
   buf_puts(b, "static sp_int sp_gen_obj_hash(int cls_id, void *p) {\n  switch (cls_id) {\n");
   for (int k = 0; k < c->nclasses; k++) {
-    if (!class_is_hashkey(c, k)) continue;
+    if (!class_has_hash(c, k)) continue;
     int defcls = -1;
     int mi = comp_method_in_chain(c, k, "hash", &defcls);
-    Scope *m = &c->scopes[mi];   /* signature validated in class_is_hashkey */
+    Scope *m = &c->scopes[mi];   /* signature validated in class_has_hash */
     const char *dcn = c->classes[defcls].c_name;
     const char *slf = c->classes[defcls].is_value_type ? "*" : "";
     buf_printf(b, "    case %d: ", comp_class_index(c, c->classes[k].name));
@@ -15436,7 +15438,7 @@ char *codegen_program(const NodeTable *nt) {
   }
   g_gen_obj_hashkey = 0;
   for (int k = 0; k < c->nclasses; k++)
-    if (class_is_hashkey(c, k) || class_is_valuekey(c, k)) { g_gen_obj_hashkey = 1; break; }
+    if (class_has_hash(c, k) || class_is_valuekey(c, k)) { g_gen_obj_hashkey = 1; break; }
   g_gen_obj_valeq = 0;
   for (int k = 0; k < c->nclasses; k++) {
     if (!c->classes[k].instantiated) continue;
