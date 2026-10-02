@@ -11254,7 +11254,7 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^",
     /* the comparisons too: a boxed receiver reached sp_poly_cmp, which knows
        nothing of a user `<`, and answered ArgumentError (#3501) */
-    "<", ">", "<=", ">=", "<=>", "==",
+    "<", ">", "<=", ">=", "<=>", "==", "eql?",
     /* and the element read, which a boxed `r[k] ||= v` / `r[k] += v` reads
        through sp_poly_index_poly */
     "[]", NULL };
@@ -11278,7 +11278,9 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
       if (!m->reachable || m->yields || scope_is_shadowed(c, mi) ||
           m->is_transplanted_source) continue;
       if (m->nparams < 1 || m->rest_idx >= 0) continue;
-      if (sp_streq(uops[u], "[]") && m->nparams != 1) continue;
+      /* the arm passes one argument: an eql? with an optional or keyword
+         parameter has no C call of that shape */
+      if ((sp_streq(uops[u], "[]") || sp_streq(uops[u], "eql?")) && m->nparams != 1) continue;
       const char *dcn = c->classes[defcls].c_name;
       int self_vt = c->classes[defcls].is_value_type;
       char argbuf[160], gb[96];
@@ -15387,7 +15389,7 @@ char *codegen_program(const NodeTable *nt) {
   g_has_user_binop = 0;
   {
     static const char *const uops[] = {
-      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", NULL };
+      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "eql?", "[]", NULL };
     /* A class that defines a #coerce needs the table for its COMPARISONS too:
        the protocol routes `5 < obj` to the boxed entry, which reaches the
        class through this hook. Only for such a class, though -- an ordinary

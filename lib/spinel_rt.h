@@ -9924,6 +9924,14 @@ static inline sp_bool sp_poly_frozen(sp_RbVal v) {
    1.eql?(1.0) is false while 1 == 1.0 is true. Every other type answers as ==.
    Backs the universal `x.should.eql?(y)` matcher on a poly receiver. */
 static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
+  /* A member's eql? accepts any Ruby value and need not have a custom hash.
+     Preserve the existing same-object shortcut before method dispatch. */
+  if (sp_poly_is_user_obj(a)) {
+    if (b.tag == SP_TAG_OBJ && a.cls_id == b.cls_id && a.v.p == b.v.p) return TRUE;
+    SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b);
+    sp_RbVal result;
+    if (sp_poly_user_cmp("eql?", a, b, &result)) return sp_poly_truthy(result);
+  }
   int a_int = (a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT);
   int b_int = (b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT);
   if ((a_int && b.tag == SP_TAG_FLT) || (a.tag == SP_TAG_FLT && b_int)) return FALSE;
