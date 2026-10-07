@@ -929,7 +929,7 @@ int emit_op_array_flatten(Compiler *c, const BopCtx *x, Buf *b) {
   }
   if (sp_streq(name, "flatten") && argc == 0) {
     /* a scalar-element array can't nest: flatten is identity, as
-       to_a / to_ary / entries / deconstruct are (builtin-op rows) */
+       to_a / to_ary / deconstruct are (builtin-op rows) */
     emit_expr(c, recv, b); return 1;
   }
   if ((sp_streq(name, "flatten!") || sp_streq(name, "flatten")) && argc == 1) {

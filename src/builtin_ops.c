@@ -2190,7 +2190,7 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_ARRAY, "inspect",               0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_$AArray_inspect($r)" },
   { BOP_ANY_ARRAY, "to_a",                  0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF_EXACT },
   { BOP_ANY_ARRAY, "to_ary",                0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF },
-  { BOP_ANY_ARRAY, "entries",               0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r" },
+  { BOP_ANY_ARRAY, "entries",               0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "sp_$AArray_dup($r)" },  /* a new Array, where to_a answers the receiver */
   { BOP_ANY_ARRAY, "deconstruct",           0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF },
   { BOP_ANY_ARRAY, "dup",                   0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "sp_$AArray_dup($r)", 0, 0, BOPF_COPY_CLASS },
   { BOP_ANY_ARRAY, "clone",                 0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "({ sp_$AArray *_t$t = $r; sp_$AArray *_t$u = sp_$AArray_dup(_t$t); _t$u->frozen = _t$t ? _t$t->frozen : 0; _t$u; })", 0, 0, BOPF_COPY_CLASS },  /* the frozen flag carries over */
