@@ -2,8 +2,8 @@
 # sp_int. The bare cast is C UB, and not the harmless kind: it saturated at
 # -O0 and, from -O1, the optimizer took the UB as a promise and deleted the
 # statement around it -- `p (2.0**70).floor` printed NOTHING and exited 0.
-# Every route raises now. CRuby answers the Bignum; that promotion is a
-# separate matter, but a loud error is not an undefined value.
+# Narrow method routes still raise. Kernel Integer now carries the exact
+# Bignum result independently of the arithmetic overflow mode.
 big = 2.0**70
 def poly(x) = x
 
@@ -20,7 +20,7 @@ begin; big.ceil;       rescue => e; puts "ceil direct: #{e.class}"; end
 begin; big.round;      rescue => e; puts "round direct: #{e.class}"; end
 begin; big.truncate;   rescue => e; puts "truncate direct: #{e.class}"; end
 begin; big.to_i;       rescue => e; puts "to_i direct: #{e.class}"; end
-begin; Integer(big);   rescue => e; puts "Integer(): #{e.class}"; end
+p Integer(big)
 begin; big.floor(-1);  rescue => e; puts "floor(-1): #{e.class}"; end
 n = -1
 begin; big.round(n);   rescue => e; puts "round(runtime -1): #{e.class}"; end

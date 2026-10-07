@@ -17050,6 +17050,10 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
      strict arm below a Bignum would be cut to 64 bits before the slot's own
      check could refuse it */
   if (!base && (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT)) return v;
+  if (!base && v.tag == SP_TAG_FLT) {
+    if (!raise && !isfinite(v.v.f)) return sp_box_nil();
+    return sp_box_f_to_int(v.v.f);
+  }
   if (raise && !base) return sp_box_int(sp_poly_Integer(v));
   /* with a base only a String converts (a plain one or a shared handle) */
   if (base) {
@@ -17058,7 +17062,6 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
     return sp_box_nil();
   }
   if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v;
-  if (v.tag == SP_TAG_FLT) return isnan(v.v.f) || isinf(v.v.f) ? sp_box_nil() : sp_box_int((sp_int)v.v.f);
   if (v.tag == SP_TAG_STR) return sp_obj_conv_str_Integer(v.v.s ? v.v.s : sp_str_empty, 0, 0);
   return sp_box_nil();
 }

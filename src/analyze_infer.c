@@ -2000,9 +2000,11 @@ static int kconv_noraise_kw(Compiler *c, int argc, const int *argv) {
    RangeError at run time: typing it as a Bignum would refuse to build every
    site that needs an Integer, a Range bound for one. The `exception: false`
    form of such a call is boxed already, so it carries the answer. */
-static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
+static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise, int has_base) {
   static const char *const names[] = { "to_int", "to_i" };
   TyKind at = infer_type(c, arg);
+  /* A bare Float conversion can yield an arbitrary-width Integer. */
+  if (at == TY_FLOAT && !has_base) return TY_POLY;
   /* promote mode reads a String too wide for sp_int as a Bignum
      (sp_str_to_i_promote) */
   if (g_promote_mode && at == TY_STRING) return TY_POLY;
@@ -4798,7 +4800,7 @@ static int infer_receiverless_call(Compiler *c, int id, const NodeTable *nt, con
         /* a Float argument converts to an Integer that promote mode lets be a
            Bignum, as Float#to_i does there (#4688) */
         if (g_promote_mode && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_POLY; return 1; }
-        { *out = kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv)); return 1; }
+        { *out = kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv), kw_argc == 2); return 1; }
       }
       if (sp_streq(name, "Rational")) { *out = TY_RATIONAL; return 1; }
       if (sp_streq(name, "Complex"))  { *out = TY_COMPLEX; return 1; }
@@ -4837,7 +4839,7 @@ static int infer_receiverless_call(Compiler *c, int id, const NodeTable *nt, con
     /* Kernel conversions */
     if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) {
       if (g_promote_mode && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_POLY; return 1; }   /* see above (#4688) */
-      { *out = kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv)); return 1; }
+      { *out = kconv_integer_kind(c, argv[0], kw_argc < argc && kconv_noraise_kw(c, argc, argv), kw_argc == 2); return 1; }
     }
     if (sp_streq(name, "Float") && kw_argc == 1) { *out = TY_FLOAT; return 1; }
     if (sp_streq(name, "String") && argc == 1) { *out = TY_STRING; return 1; }
