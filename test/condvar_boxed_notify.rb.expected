@@ -1,0 +1,5 @@
+[true, true, Thread::ConditionVariable]
+[Symbol, Symbol, false, false]
+[Thread::ConditionVariable, Thread::ConditionVariable, true, true]
+7
+[9, 9]

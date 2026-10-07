@@ -181,6 +181,22 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     }
   }
 
+  /* ConditionVariable#signal and #broadcast on a boxed ConditionVariable:
+     each answers the receiver (sp_poly_condvar_notify), anything else raises
+     NoMethodError there. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      (sp_streq(name, "signal") || sp_streq(name, "broadcast")) &&
+      !poly_name_user_claimed(c, name, argc)) {
+    Buf cv; memset(&cv, 0, sizeof cv);
+    buf_puts(&cv, "sp_poly_condvar_notify("); emit_boxed(c, recv, &cv);
+    buf_printf(&cv, ", \"%s\")", name);
+    Repr wr = repr_of(c, id);
+    if (wr.kind == RK_BOXED) buf_puts(b, cv.p);
+    else emit_unbox_text(c, wr.as_ty, cv.p, b);
+    free(cv.p);
+    return 1;
+  }
+
   /* The Queue names no other builtin answers, on a boxed Queue (one taken
      out of an Array or an ivar): #enq, #deq and #num_waiting. Anything else
      in the slot raises NoMethodError at run time. */

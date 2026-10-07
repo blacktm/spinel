@@ -2789,6 +2789,10 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
       if ((sp_streq(name, "deq") && argc <= 1) || (sp_streq(name, "enq") && (argc == 1 || argc == 2)))
         { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
       if (sp_streq(name, "num_waiting") && argc == 0) { *out = an_poly_concrete(c, name, TY_INT); return 1; }
+      /* a boxed ConditionVariable's signal and broadcast answer it */
+      if (argc == 0 && nt_ref(nt, id, "block") < 0 &&
+          (sp_streq(name, "signal") || sp_streq(name, "broadcast")))
+        { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
       if (sp_streq(name, "alive?") || sp_streq(name, "dead?") || sp_streq(name, "closed?") ||
           (sp_streq(name, "blocking?") && argc == 0) ||
           sp_streq(name, "eof?") || sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
