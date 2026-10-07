@@ -7186,10 +7186,12 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   /* the desugared ENV snapshot (#2742) */
   if (recv < 0 && sp_streq(name, "__env_to_h") && argc == 0) return TY_STR_STR_HASH;
   /* Exception-suppressed String or nullable conversion can answer nil, so it
-     cannot use the unboxed numeric value type (#3893). */
+     cannot use the unboxed numeric value type (#3893). Complex of a Boolean
+     answers nil under `exception: false` too. */
   if (recv < 0 && (sp_streq(name, "Complex") || sp_streq(name, "Rational")) &&
       argc == 2 && (infer_type(c, argv[0]) == TY_STRING ||
                     ((infer_type(c, argv[0]) == TY_NIL || infer_type(c, argv[0]) == TY_POLY ||
+                      (infer_type(c, argv[0]) == TY_BOOL && sp_streq(name, "Complex")) ||
                       ((infer_type(c, argv[0]) == TY_INT || infer_type(c, argv[0]) == TY_FLOAT) &&
                        nullable_int_value(c, argv[0]))) &&
                      nt_kind(nt, argv[1]) == NK_KeywordHashNode)) &&
