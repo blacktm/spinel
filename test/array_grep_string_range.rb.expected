@@ -1,0 +1,8 @@
+["abc"]
+true
+["abc"]
+["a", "abc", "z", "abc"]
+["a", "abc", "abc"]
+["zz", 1, nil]
+true
+["A", "ABC", "Z", "ABC"]
