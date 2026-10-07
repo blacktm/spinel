@@ -1,0 +1,13 @@
+[:alive?, TrueClass, true]
+[:kill, TrueClass, true]
+[:raise, RuntimeError, "boom"]
+:ready
+ensure
+[true, true, false]
+[true, false]
+true
+[Thread, true]
+false
+Symbol
+Fiber
+Thread
