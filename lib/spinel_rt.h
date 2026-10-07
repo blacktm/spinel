@@ -4133,6 +4133,11 @@ static SP_UNUSED sp_PolyArray *sp_range_minmax_poly(sp_Range r) {
 static SP_UNUSED sp_Range sp_range_new_pend(sp_oint f, sp_RbVal e, sp_int x) {
   e = sp_range_num_end(e);
   if (e.tag == SP_TAG_FLT) { sp_Range r = sp_range_new_fend(f.nil ? SP_RANGE_NO_BEGIN : f.v, e.v.f, x); r.nobeg = f.nil; return r; }
+  /* an Integer Range holds an sp_int end: a Bignum one is CRuby's Range of
+     that size, which this representation cannot hold. Say so rather than
+     narrow it to its low word. */
+  if (e.tag == SP_TAG_BIGINT && e.v.p && !sp_bigint_fits_int((sp_Bigint *)e.v.p))
+    sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return sp_range_new_o(f, e.tag == SP_TAG_NIL ? sp_oint_nil() : sp_oint_of(sp_poly_to_i(e)), x);
 }
 /* A boxed begin of an Integer-represented Range: a Float there would make it
@@ -19792,6 +19797,10 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
      strict arm below a Bignum would be cut to 64 bits before the slot's own
      check could refuse it */
   if (!base && (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT)) return v;
+  if (!base && v.tag == SP_TAG_FLT) {
+    if (!raise && !isfinite(v.v.f)) return sp_box_nil();
+    return sp_box_f_to_int(v.v.f);
+  }
   if (raise && !base) return sp_box_int(sp_poly_Integer(v));
   /* with a base only a String converts (a plain one or a shared handle) */
   if (base) {
@@ -19800,7 +19809,6 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
     return sp_box_nil();
   }
   if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v;
-  if (v.tag == SP_TAG_FLT) return isnan(v.v.f) || isinf(v.v.f) ? sp_box_nil() : sp_box_int((sp_int)v.v.f);
   if (v.tag == SP_TAG_STR) return sp_obj_conv_str_Integer(v.v.s ? v.v.s : sp_str_empty, 0, 0);
   return sp_box_nil();
 }
