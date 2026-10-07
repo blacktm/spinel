@@ -1107,22 +1107,32 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
         { *out = TY_POLY; return 1; }
     }
     if (sp_streq(name, "to_h") && argc == 0 && block < 0) {
-      /* Infer hash type from the first pair element of an array literal */
-      if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ArrayNode")) {
+      /* A specialized hash layout is safe only when every literal pair has
+         the same key/value kind. Extraction reads the boxed union directly,
+         so differing kinds must stay boxed rather than undergo promotion. */
+      if (recv >= 0 && nt_kind(nt, recv) == NK_ArrayNode) {
         int en = 0; const int *els = nt_arr(nt, recv, "elements", &en);
-        if (en > 0 && nt_type(nt, els[0]) && sp_streq(nt_type(nt, els[0]), "ArrayNode")) {
-          int en2 = 0; const int *els2 = nt_arr(nt, els[0], "elements", &en2);
-          if (en2 >= 2) {
-            TyKind kt = infer_type(c, els2[0]);
-            TyKind vt = infer_type(c, els2[1]);
-            if (kt == TY_SYMBOL) { *out = TY_SYM_POLY_HASH; return 1; }
-            if (kt == TY_STRING) {
-              TyKind h = ty_hash_of(TY_STRING, vt);
-              { *out = h != TY_UNKNOWN ? h : TY_STR_POLY_HASH; return 1; }
-            }
-            TyKind h = ty_hash_of(kt, vt);
-            if (h != TY_UNKNOWN) { *out = h; return 1; }
+        TyKind kt = TY_UNKNOWN, vt = TY_UNKNOWN;
+        int all_pairs = en > 0;
+        for (int i = 0; i < en && all_pairs; i++) {
+          if (nt_kind(nt, els[i]) != NK_ArrayNode) { all_pairs = 0; break; }
+          int pn = 0; const int *pair = nt_arr(nt, els[i], "elements", &pn);
+          if (pn != 2) { all_pairs = 0; break; }
+          TyKind pk = infer_type(c, pair[0]), pv = infer_type(c, pair[1]);
+          if (i == 0) { kt = pk; vt = pv; }
+          else {
+            if (kt != pk) kt = TY_POLY;
+            if (vt != pv) vt = TY_POLY;
           }
+        }
+        if (all_pairs) {
+          if (kt == TY_SYMBOL) { *out = TY_SYM_POLY_HASH; return 1; }
+          if (kt == TY_STRING) {
+            TyKind h = ty_hash_of(TY_STRING, vt);
+            { *out = h != TY_UNKNOWN ? h : TY_STR_POLY_HASH; return 1; }
+          }
+          TyKind h = ty_hash_of(kt, vt);
+          if (h != TY_UNKNOWN) { *out = h; return 1; }
         }
       }
       /* Non-literal receiver: the pair element types are not statically known
