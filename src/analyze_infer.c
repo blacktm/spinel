@@ -2698,6 +2698,23 @@ int object_reopen_answers(Compiler *c, const char *cls, int call_id, TyKind *out
   return 1;
 }
 
+/* Does the program name ConditionVariable (or Thread::ConditionVariable)
+   anywhere? Only then can a boxed value be one, so only then do the boxed
+   signal and broadcast rows answer: a program with its own `signal` and no
+   ConditionVariable keeps the inference it had (a user Integer stays typed). */
+int an_program_names_condvar(Compiler *c) {
+  static const NodeTable *memo_nt = NULL; static int memo_count = -1, memo = 0;
+  if (memo_nt == c->nt && memo_count == c->nt->count) return memo;
+  memo_nt = c->nt; memo_count = c->nt->count; memo = 0;
+  for (int i = 0; i < c->nt->count && !memo; i++) {
+    const char *ty = nt_type(c->nt, i);
+    if (!ty || (!sp_streq(ty, "ConstantReadNode") && !sp_streq(ty, "ConstantPathNode"))) continue;
+    const char *nm = nt_str(c->nt, i, "name");
+    if (nm && sp_streq(nm, "ConditionVariable")) memo = 1;
+  }
+  return memo;
+}
+
 /* The analyze twin of codegen's poly_name_user_claimed, readers included: an
    attr_reader is an arm of the dispatch like a def. */
 static int an_user_poly_arm(Compiler *c, const char *name, int argc) {
@@ -3550,6 +3567,13 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
         if (sp_streq(name, "lock") || sp_streq(name, "unlock")) { *out = TY_POLY; return 1; }
         if (sp_streq(name, "try_lock") || sp_streq(name, "locked?")) { *out = TY_BOOL; return 1; }
       }
+      /* a boxed ConditionVariable's signal and broadcast answer it, in a
+         program that names ConditionVariable (an_program_names_condvar) and
+         defines no method of the name: one keeps its own result type */
+      if (argc == 0 && nt_ref(nt, id, "block") < 0 && an_program_names_condvar(c) &&
+          !an_user_recv_defines_method(c, name) &&
+          (sp_streq(name, "signal") || sp_streq(name, "broadcast")))
+        { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
       if (sp_streq(name, "alive?") || sp_streq(name, "dead?") || sp_streq(name, "closed?") ||
           (sp_streq(name, "blocking?") && argc == 0) ||
           sp_streq(name, "eof?") || sp_streq(name, "tty?") || sp_streq(name, "isatty") ||

@@ -10,6 +10,17 @@
 #include "codegen_call_arms.h"
 #include "repr.h"
 
+/* Does the program define `name` anywhere a poly receiver could reach: an
+   instance method or reader (poly_name_user_claimed), or a class
+   method (a Class in the slot)? Then the general dispatch, with its arms
+   for them, is kept; its builtin default arm reaches the helper below. */
+static int poly_name_user_owned(Compiler *c, const char *name) {
+  int ncm = 0;
+  if (an_user_recv_defines_method(c, name)) return 1;
+  (void)comp_cmethod_candidates(c, name, &ncm);
+  return ncm > 0;
+}
+
 /* builtin methods on a poly receiver the runtime answers by the value it holds: inject / reduce(:op), the Array reductions and slices, values_at, Fiber's resume / transfer / raise, Queue's enq / deq */
 int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* Array-reduction methods on a boxed array element of a poly array (e.g.
@@ -205,6 +216,25 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
         return 1;
       }
     }
+  }
+
+  /* ConditionVariable#signal and #broadcast on a boxed ConditionVariable, in
+     a program that names ConditionVariable: each answers the receiver
+     (sp_poly_condvar_notify), anything else raises NoMethodError there. A
+     program that owns either name keeps the general dispatch, whose builtin
+     default arm (g_poly_builtin_arm) reaches this helper. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      (sp_streq(name, "signal") || sp_streq(name, "broadcast")) &&
+      an_program_names_condvar(c) && !poly_name_user_claimed(c, name, argc) &&
+      (g_poly_builtin_arm || !poly_name_user_owned(c, name))) {
+    Buf cv; memset(&cv, 0, sizeof cv);
+    buf_puts(&cv, "sp_poly_condvar_notify("); emit_boxed(c, recv, &cv);
+    buf_printf(&cv, ", \"%s\")", name);
+    Repr wr = repr_of(c, id);
+    if (wr.kind == RK_BOXED) buf_puts(b, cv.p);
+    else emit_unbox_text(c, wr.as_ty, cv.p, b);
+    free(cv.p);
+    return 1;
   }
 
   /* The Queue names no other builtin answers, on a boxed Queue (one taken

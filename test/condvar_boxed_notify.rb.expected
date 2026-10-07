@@ -1,0 +1,7 @@
+[true, true, Thread::ConditionVariable]
+[Symbol, Symbol, false, false]
+[Thread::ConditionVariable, Thread::ConditionVariable, true, true]
+7
+[9, 9]
+[:class_signal, :cv]
+["undefined method 'signal' for an instance of Integer", []]
