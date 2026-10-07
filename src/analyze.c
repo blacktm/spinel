@@ -28980,7 +28980,7 @@ static int splat_builtin_range(const char *name, int *lo, int *hi, int *variadic
   static const struct { const char *name; int lo, hi, variadic; } tab[] = {
     { "fetch", 1, 2, 0 }, { "store", 2, 2, 0 }, { "delete", 1, 8, 1 }, { "insert", 1, 8, 1 },
     { "sub", 2, 2, 0 }, { "sub!", 2, 2, 0 }, { "gsub", 1, 2, 0 }, { "gsub!", 1, 2, 0 },
-    { "[]", 1, 2, 0 }, { "[]=", 2, 3, 0 },
+    { "[]", 1, 2, 0 }, { "[]=", 2, 3, 0 }, { "slice!", 1, 2, 0 },
     { "key?", 1, 1, 0 }, { "has_key?", 1, 1, 0 }, { "include?", 1, 1, 0 },
     { "member?", 1, 1, 0 }, { "value?", 1, 1, 0 }, { "has_value?", 1, 1, 0 },
     { "index", 0, 2, 0 }, { "rindex", 0, 2, 0 }, { "count", 0, 8, 1 },
