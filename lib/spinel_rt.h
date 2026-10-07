@@ -16461,6 +16461,15 @@ static sp_RbVal sp_poly_thread_status(sp_RbVal v) {
   sp_raise_nomethod(sp_nomethod_msg("status", v));
   return sp_box_nil();
 }
+/* The ConditionVariable names no other builtin has, on a boxed receiver:
+   signal and broadcast answer the receiver; anything else raises NoMethodError. */
+static sp_condvar *sp_poly_as_condvar(sp_RbVal v, const char *name) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_CONDVAR && v.v.p) return (sp_condvar *)v.v.p;
+  sp_raise_nomethod(sp_nomethod_msg_args(name, v, 0, NULL));
+  return NULL;
+}
+static sp_RbVal sp_poly_condvar_signal(sp_RbVal v) { SP_GC_ROOT_RBVAL(v); sp_CondVar_signal(sp_poly_as_condvar(v, "signal")); return v; }
+static sp_RbVal sp_poly_condvar_broadcast(sp_RbVal v) { SP_GC_ROOT_RBVAL(v); sp_CondVar_broadcast(sp_poly_as_condvar(v, "broadcast")); return v; }
 /* A typed Time compared against a boxed operand: a Time in the box
    compares, anything else is Comparable's failure (#4465). */
 static int sp_polyv_time_cmp_arg(sp_Time a, sp_RbVal b) {

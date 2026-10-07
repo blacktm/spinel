@@ -21,6 +21,7 @@ int is_bind_call(const char *n);  /* bind_call: an UnboundMethod bound and calle
 int is_kind_query(const char *n);     /* is_a? kind_of? instance_of? */
 int is_instance_of_query(const char *n);   /* instance_of? */
 int is_case_eq(const char *n);        /* === */
+int is_condvar_notify(const char *n); /* signal broadcast: a ConditionVariable's wake-ups */
 int is_round_family(const char *n);   /* round ceil floor truncate */
 int is_push_alias(const char *n);     /* push << append */
 int fresh_array_builtin_name(const char *nm);   /* map sort split divmod ...: a new Array where it answers one */

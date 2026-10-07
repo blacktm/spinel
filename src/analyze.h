@@ -1249,6 +1249,7 @@ int an_program_makes_bsearch_enum(Compiler *c);   /* Array#bsearch without a blo
 int an_program_makes_io(Compiler *c);   /* a boxed value may be an IO (a syntactic test) */
 int an_zero_arg_builtin_shadowed(Compiler *c, const char *name, int argc);
 int an_user_recv_defines_method(Compiler *c, const char *name);
+int an_program_names_condvar(Compiler *c);   /* the program names ConditionVariable somewhere */
 /* obj.methods / public_methods / singleton_methods on an instance of `cid`
    fold to a static symbol list */
 int an_object_methods_listable(Compiler *c, int cid, const char *name);

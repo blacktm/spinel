@@ -90,6 +90,7 @@ int is_kind_query(const char *n) {
 
 int is_instance_of_query(const char *n) { return n && sp_streq(n, "instance_of?"); }
 int is_case_eq(const char *n) { return n && sp_streq(n, "==="); }
+int is_condvar_notify(const char *n) { return n && (sp_streq(n, "signal") || sp_streq(n, "broadcast")); }
 
 
 int is_round_family(const char *n) {

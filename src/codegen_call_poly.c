@@ -230,6 +230,32 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     }
   }
 
+  /* ConditionVariable#signal and #broadcast on a boxed ConditionVariable, in
+     a program that names ConditionVariable: each answers the receiver
+     (sp_poly_condvar_signal, _broadcast), anything else raises NoMethodError
+     there. A program that owns the called name as an instance method or
+     reader keeps the general dispatch, whose builtin default arm
+     (g_poly_builtin_arm) reaches these helpers; one with a class method of the
+     name defined with def, or a singleton-class accessor of it
+     (cls_value_sg_accessor_named),
+     keeps the class-value dispatch, whose non-Class side (g_cls_tag_skip)
+     comes back here. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      is_condvar_notify(name) &&
+      an_program_names_condvar(c) && !poly_name_user_claimed(c, name, argc) &&
+      (g_poly_builtin_arm || (!an_user_recv_defines_method(c, name) &&
+                              (g_cls_tag_skip == id || (!cplan_boxed_cmethod(c, id, name) &&
+                                                        !cls_value_sg_accessor_named(c, name, argc)))))) {
+    Buf cv; memset(&cv, 0, sizeof cv);
+    buf_printf(&cv, "sp_poly_condvar_%s(", name); emit_boxed(c, recv, &cv);
+    buf_puts(&cv, ")");
+    Repr wr = repr_of(c, id);
+    if (wr.kind == RK_BOXED) buf_puts(b, cv.p);
+    else emit_unbox_text(c, wr.as_ty, cv.p, b);
+    free(cv.p);
+    return 1;
+  }
+
   /* The Queue names no other builtin answers, on a boxed Queue (one taken
      out of an Array or an ivar): #enq, #deq and #num_waiting. Anything else
      in the slot raises NoMethodError at run time. */
