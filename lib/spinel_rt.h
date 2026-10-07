@@ -16947,8 +16947,8 @@ static const char *sp_obj_conv_str_of(sp_RbVal a) {
   if (sp_poly_is_strbuf(a)) return sp_String_cstr((sp_String *)a.v.p);
   return NULL;
 }
-/* promote mode's String#to_i and Integer(s[, base]): a value past sp_int is
-   a Bignum, as CRuby's is, rather than the RangeError raise mode answers.
+/* String#to_i in promote mode and Integer(s[, base]) in every mode:
+   a value past sp_int is a Bignum, as CRuby's is.
    `mode` 0 is #to_i (reads a leading integer, 0 when there is none; `base`
    -1 is the call with no base), 1 is
    Integer() (the whole string, ArgumentError otherwise), 2 is Integer()
@@ -16983,10 +16983,7 @@ static sp_RbVal sp_str_to_i_promote(const char *s, sp_int base, int mode) {
 /* Integer("...") on a String: strict, or nil-answering for the
    `exception: false` form. `base` 0 is the bare form. */
 static sp_RbVal sp_obj_conv_str_Integer(const char *s, sp_int base, int raise) {
-  sp_int r;
-  if (raise) return sp_box_int(base ? sp_str_to_i_strict_base(s, base) : sp_str_to_i_strict(s));
-  r = sp_str_to_i_lenient_base(s, base);
-  return r == SP_INT_NIL ? sp_box_nil() : sp_box_int(r);
+  return sp_str_to_i_promote(s, base, raise ? 1 : 2);
 }
 static sp_RbVal sp_obj_Integer_val(sp_RbVal v, sp_int base, int raise) {
   sp_RbVal a = sp_box_nil();
@@ -17050,6 +17047,8 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
      strict arm below a Bignum would be cut to 64 bits before the slot's own
      check could refuse it */
   if (!base && (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT)) return v;
+  if (!base && v.tag == SP_TAG_STR)
+    return sp_obj_conv_str_Integer(v.v.s ? v.v.s : sp_str_empty, 0, raise);
   if (raise && !base) return sp_box_int(sp_poly_Integer(v));
   /* with a base only a String converts (a plain one or a shared handle) */
   if (base) {
@@ -17059,7 +17058,6 @@ static sp_RbVal sp_kernel_Integer_val(sp_RbVal v, sp_int base, int raise) {
   }
   if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v;
   if (v.tag == SP_TAG_FLT) return isnan(v.v.f) || isinf(v.v.f) ? sp_box_nil() : sp_box_int((sp_int)v.v.f);
-  if (v.tag == SP_TAG_STR) return sp_obj_conv_str_Integer(v.v.s ? v.v.s : sp_str_empty, 0, 0);
   return sp_box_nil();
 }
 /* The entry points the Kernel#Integer / Kernel#Float emits call, one per

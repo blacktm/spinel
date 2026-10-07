@@ -2003,9 +2003,8 @@ static int kconv_noraise_kw(Compiler *c, int argc, const int *argv) {
 static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
   static const char *const names[] = { "to_int", "to_i" };
   TyKind at = infer_type(c, arg);
-  /* promote mode reads a String too wide for sp_int as a Bignum
-     (sp_str_to_i_promote) */
-  if (g_promote_mode && at == TY_STRING) return TY_POLY;
+  /* String parsing and a boxed Integer conversion can answer a Bignum. */
+  if (at == TY_STRING || at == TY_POLY) return TY_POLY;
   if (!ty_is_object(at)) return TY_INT;
   for (int k = 0; k < 2; k++) {
     int mi = comp_method_in_chain(c, ty_object_class(at), names[k], NULL);
@@ -2015,6 +2014,11 @@ static TyKind kconv_integer_kind(Compiler *c, int arg, int noraise) {
     if (c->scopes[mi].ret == TY_BIGINT) return noraise ? TY_POLY : TY_BIGINT;
     if (c->scopes[mi].ret == TY_POLY && noraise) return TY_POLY;
   }
+  /* A supported #to_str bridge can supply an arbitrary-width String. */
+  int mi = comp_method_in_chain(c, ty_object_class(at), "to_str", NULL);
+  if (mi >= 0 && c->scopes[mi].nparams == 0 && !c->scopes[mi].yields &&
+      (c->scopes[mi].ret == TY_STRING || c->scopes[mi].ret == TY_STRBUF ||
+       c->scopes[mi].ret == TY_POLY)) return TY_POLY;
   return TY_INT;
 }
 

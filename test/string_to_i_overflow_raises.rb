@@ -1,7 +1,5 @@
-# String#to_i / Integer() on input exceeding int64 raises
-# RangeError rather than saturating silently. spinel's int model
-# is int64-only, so the CRuby Bignum promotion path lowers to a
-# user-catchable RangeError.
+# Narrow String#to_i results exceeding int64 retain a loud RangeError.
+# Kernel Integer carries the full Bignum result in every overflow mode.
 
 begin
   "99999999999999999999".to_i
@@ -17,12 +15,7 @@ rescue RangeError
   puts "to_i(16) raised RangeError"
 end
 
-begin
-  Integer("99999999999999999999")
-  puts "no exception"
-rescue RangeError
-  puts "Integer raised RangeError"
-end
+puts Integer("99999999999999999999")
 
 # In-range values still work.
 puts "42".to_i
