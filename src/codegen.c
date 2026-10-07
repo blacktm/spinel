@@ -15207,8 +15207,15 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char 
         *isa_ext = eb.p;
         *isa_ext_at = b->len;
       } }
-    buf_puts(b,
-      "  return sp_class_le(sp_poly_get_class(obj),klass);\n}\n");
+    /* A boxed String carries the builtin class ID, but a String reopening in
+       this program has a registry ID with the modules the reopening
+       includes: a builtin String is an instance of those too. */
+    int string_ci = comp_class_index(c, "String");
+    buf_puts(b, "  sp_Class actual = sp_poly_get_class(obj);\n");
+    if (string_ci >= 0)
+      buf_printf(b, "  if (actual.cls_id == %d && sp_class_le(((sp_Class){%d}), klass)) return 1;\n",
+                 builtin_class_id("String"), string_ci);
+    buf_puts(b, "  return sp_class_le(actual,klass);\n}\n");
     /* Module#< / <= / > / >= / <=> where an operand is boxed: the tri-state
        answer of sp_class_lt3 and friends, TypeError for a non-class operand
        (nil for <=>), and the ordinary poly comparison when the receiver turns
