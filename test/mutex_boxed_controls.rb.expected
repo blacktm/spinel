@@ -1,0 +1,11 @@
+[:lock, Thread::Mutex, true]
+[:try_lock, TrueClass, true]
+[:locked?, FalseClass, false]
+[:owned?, FalseClass, false]
+[true, true, true, false]
+true
+[false, false]
+[Symbol, :custom]
+[Thread::Mutex, true]
+true
+false

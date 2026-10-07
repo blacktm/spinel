@@ -184,8 +184,12 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           ConditionVariable#wait shares the name. */
        ((is_io_wait(name)) && argc <= 1) ||
        /* File::Stat's predicates: a stat read out of a container is the
-          same boxed handle. Not where a class method may own the name. */
-       (argc == 0 && boxed_stat_pred(name) >= 0 && !class_method_named(c, name)))) {
+          same boxed handle. Not where a class method may own the name.
+          owned? is also Mutex's: sp_poly_mutex_control answers it for
+          either receiver (codegen_call_poly.c), where this arm would raise
+          NoMethodError for a Mutex. */
+       (argc == 0 && boxed_stat_pred(name) >= 0 && !sp_streq(name, "owned?") &&
+        !class_method_named(c, name)))) {
     int iocand = 0;
     for (int k = 0; k < c->nclasses && !iocand; k++) {
       /* a native class's methods are its declared bindings, which is the

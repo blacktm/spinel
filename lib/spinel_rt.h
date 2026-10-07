@@ -16775,6 +16775,26 @@ int sp_exc_protect(void (*fn)(void *), void *ctx) {
   return 1;
 }
 #endif
+/* Blockless Mutex controls through a container-held receiver. owned? also
+   answers on the File::Stat handle used by the existing boxed IO path. */
+static sp_RbVal sp_poly_mutex_control(sp_RbVal v, const char *name) {
+  SP_GC_ROOT_RBVAL(v);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MUTEX && v.v.p) {
+    sp_mutex *m = (sp_mutex *)v.v.p;
+    if (!strcmp(name, "lock")) { sp_Mutex_lock(m); return v; }
+    if (!strcmp(name, "unlock")) { sp_Mutex_unlock(m); return v; }
+    if (!strcmp(name, "try_lock")) return sp_box_bool(sp_Mutex_try_lock(m));
+    if (!strcmp(name, "locked?")) return sp_box_bool(sp_Mutex_locked(m));
+    if (!strcmp(name, "owned?")) return sp_box_bool(sp_Mutex_owned(m));
+  }
+  if (!strcmp(name, "owned?")) {
+    sp_File *f = sp_poly_as_io(v, name);
+    if (!(f->mode && (!strcmp(f->mode, "stat") || !strcmp(f->mode, "lstat"))))
+      sp_raise_poly_nomethod(name, sp_box_obj(f, SP_BUILTIN_IO));
+    return sp_box_bool(sp_stat_type_pred(f, 3));
+  }
+  sp_raise_poly_nomethod(name, v);
+}
 /* ---- Mutex#synchronize on a boxed receiver ----
    The receiver of `LOCKS[i].synchronize { ... }` is a poly value: the static
    arm in codegen (a TY_MUTEX receiver) cannot see it, and the generated

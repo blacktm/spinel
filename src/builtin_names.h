@@ -52,6 +52,7 @@ int is_quantifier_or_count(const char *n);  /* all? any? none? one? count: is_qu
 int is_push_unshift(const char *n);   /* << push append unshift: is_push_alias's names and unshift */
 int is_identity_query(const char *n); /* equal? object_id __id__ frozen?: tells an object from its copy */
 int is_len_alias(const char *n);      /* length size */
+int is_mutex_control(const char *n);  /* lock unlock try_lock locked? owned?: Mutex's blockless controls */
 int is_str_each_iter(const char *n);  /* each_char each_line each_byte each_codepoint: String's element iterators */
 int is_str_string_yield(const char *n); /* each_char each_line upto chars lines split scrub: String methods whose block takes a String */
 int is_unpack_name(const char *n); /* unpack: a String decoded into values, which a block takes one by one */

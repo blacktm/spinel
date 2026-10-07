@@ -10,7 +10,7 @@
 #include "codegen_call_arms.h"
 #include "repr.h"
 
-/* builtin methods on a poly receiver the runtime answers by the value it holds: inject / reduce(:op), the Array reductions and slices, values_at, Fiber's resume / transfer / raise, Queue's enq / deq */
+/* builtin methods on a poly receiver the runtime answers by the value it holds: inject / reduce(:op), the Array reductions and slices, values_at, Fiber's resume / transfer / raise, Queue's enq / deq, Mutex's lock / unlock and predicates */
 int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* Array-reduction methods on a boxed array element of a poly array (e.g.
      `runs.map { |r| r.sum }` over chunk_while runs). The runtime helper switches
@@ -212,6 +212,21 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       free(qv.p);
       return 1;
     }
+  }
+
+  /* Mutex's blockless controls on a boxed Mutex (one taken out of an Array
+     or an ivar): lock and unlock answer the Mutex, the predicates a Boolean.
+     owned? is also File::Stat's, which sp_poly_mutex_control answers too. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      is_mutex_control(name) && !poly_name_user_claimed(c, name, argc)) {
+    Buf mv; memset(&mv, 0, sizeof mv);
+    buf_puts(&mv, "sp_poly_mutex_control("); emit_boxed(c, recv, &mv);
+    buf_printf(&mv, ", \"%s\")", name);
+    Repr wr = repr_of(c, id);
+    if (wr.kind == RK_BOXED) buf_puts(b, mv.p);
+    else emit_unbox_text(c, wr.as_ty, mv.p, b);
+    free(mv.p);
+    return 1;
   }
   return 0;
 }

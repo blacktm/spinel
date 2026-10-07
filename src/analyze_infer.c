@@ -2780,6 +2780,10 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
           (sp_streq(name, "sum") || sp_streq(name, "min") || sp_streq(name, "max") ||
            sp_streq(name, "first") || sp_streq(name, "last") || sp_streq(name, "sample")))
         { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
+      /* a boxed Mutex's blockless controls: lock and unlock answer the Mutex,
+         try_lock and the predicates a Boolean (sp_poly_mutex_control) */
+      if (argc == 0 && nt_ref(nt, id, "block") < 0 && is_mutex_control(name))
+        { *out = an_poly_concrete(c, name, sp_streq(name, "lock") || sp_streq(name, "unlock") ? TY_POLY : TY_BOOL); return 1; }
       /* Fiber/Thread/IO/File instance methods: fallback when no user class defines `name`. */
       if (sp_streq(name, "resume") || sp_streq(name, "value") || sp_streq(name, "join") ||
           sp_streq(name, "status") || sp_streq(name, "transfer") ||
