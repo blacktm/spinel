@@ -2971,6 +2971,37 @@ static inline sp_RbVal sp_poly_literal_identity(sp_RbVal v) {
 static inline const void *sp_poly_identity_ptr(sp_RbVal v) {
   return sp_poly_literal_identity(v).v.p;
 }
+/* #object_id of an Integer: CRuby's 2n+1 where it holds n as a Fixnum.
+   Past +-2**62 CRuby holds a Bignum, whose id no Fixnum shares: answer an
+   even id, 2n offset by 2**62 in unsigned arithmetic (2n+1 would overflow
+   there and give 2**62 and -2**62 one id). The offset puts the few of these
+   that meet a pointer's or a Symbol's id at 3 * 2**61, not at INT64_MIN.
+   The test reads n as 64 bits and the arithmetic is unsigned, so a 32-bit
+   sp_int takes the first arm, its 2n+1 wrapping as before. */
+static inline sp_int sp_int_object_id(sp_int n) {
+  int64_t w = (int64_t)n;
+  if (w >= -((int64_t)1 << 62) && w < ((int64_t)1 << 62)) return (sp_int)(((uint64_t)w << 1) | 1);
+  return (sp_int)(((uint64_t)w << 1) + ((uint64_t)1 << 62));
+}
+/* #object_id of a Symbol: 2 more than a multiple of 8, so even (no
+   Fixnum's) and never 0, 4 or 20 (false's, nil's and true's ids). Twice
+   the interned index gave the first Symbol false's id. */
+static inline sp_int sp_sym_object_id(sp_sym s) {
+  return (sp_int)s * 8 + 2;
+}
+/* #object_id of a boxed value: an immediate answers the id its unboxed
+   form does (sp_int_object_id, sp_sym_object_id, nil, true and false their
+   fixed ids), so a boxed copy of one compares equal to it; any other value
+   is its payload's identity. */
+static inline sp_int sp_poly_object_id(sp_RbVal v) {
+  switch (v.tag) {
+  case SP_TAG_INT: return sp_int_object_id(v.v.i);
+  case SP_TAG_SYM: return sp_sym_object_id((sp_sym)v.v.i);
+  case SP_TAG_NIL: return SP_NIL_OBJECT_ID;
+  case SP_TAG_BOOL: return v.v.i ? SP_TRUE_OBJECT_ID : SP_FALSE_OBJECT_ID;
+  default: return (sp_int)(uintptr_t)v.v.p;
+  }
+}
 /* --share-strings: a String Array moved into a boxed Array with each
    element as the handle a change through another name reaches. A
    handle's own bytes box that handle (sp_poly_literal_identity), a frozen

@@ -298,9 +298,10 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     }
   }
 
-  /* object_id: a stable integer id. Int uses MRI's 2n+1; pointer-backed
-     values use the pointer bit pattern; a symbol uses its interned id.
-     The immediates have fixed ids: nil is 4, false is 0, true is 20. */
+  /* object_id: a stable integer id. An Integer and a Symbol answer
+     sp_int_object_id and sp_sym_object_id, typed or boxed; pointer-backed
+     values use the pointer bit pattern. The immediates have fixed ids: nil
+     is 4, false is 0, true is 20. */
   if ((sp_streq(name, "object_id") || sp_streq(name, "__id__")) && recv >= 0 && argc == 0 &&
       /* a generated READER of this name owns it on a concrete object, as in
          CRuby (which warns and defines it): fall through to the member read,
@@ -313,11 +314,11 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       char ref[24];
       buf_puts(b, "({ "); emit_sentinel_bind(c, rt, recv, ref, sizeof ref, b);
       emit_slot_truthy(rt, ref, b);
-      if (rt == TY_INT) buf_printf(b, " ? 2*%s.v+1 : SP_NIL_OBJECT_ID; })", ref);
+      if (rt == TY_INT) buf_printf(b, " ? sp_int_object_id(%s.v) : SP_NIL_OBJECT_ID; })", ref);
       else buf_printf(b, " ? sp_rbval_hash_key(sp_box_float(%s.v)) : SP_NIL_OBJECT_ID; })", ref);
     }
-    else if (rt == TY_INT) { buf_puts(b, "(2*("); emit_expr(c, recv, b); buf_puts(b, ")+1)"); }
-    else if (rt == TY_SYMBOL) { buf_puts(b, "((sp_int)("); emit_expr(c, recv, b); buf_puts(b, ")*2)"); }
+    else if (rt == TY_INT) { buf_puts(b, "sp_int_object_id("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+    else if (rt == TY_SYMBOL) { buf_puts(b, "sp_sym_object_id("); emit_expr(c, recv, b); buf_puts(b, ")"); }
     else if (rt == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), SP_NIL_OBJECT_ID)"); }
     else if (rt == TY_BOOL) { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") ? SP_TRUE_OBJECT_ID : SP_FALSE_OBJECT_ID)"); }
     /* a class value: the identity its box carries (its id, or the name a
@@ -328,11 +329,12 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       emit_expr(c, recv, b);
       buf_puts(b, repr_share_rule(c) ? ")))" : ")).v.p)");
     }
-    /* a boxed value: its identity is the boxed payload (heap pointer / int) */
+    /* a boxed value: an immediate's id is its typed form's, anything
+       else's the boxed payload's identity (sp_poly_object_id) */
     else if (rt == TY_POLY) {
-      buf_puts(b, repr_share_rule(c) ? "((sp_int)(uintptr_t)sp_poly_identity_ptr(" : "((sp_int)(uintptr_t)(");
+      buf_puts(b, repr_share_rule(c) ? "sp_poly_object_id(sp_poly_literal_identity(" : "sp_poly_object_id((");
       emit_expr(c, recv, b);
-      buf_puts(b, repr_share_rule(c) ? "))" : ").v.p)");
+      buf_puts(b, "))");
     }
     /* a String: a mutable one held as its shared sp_String has that
        handle's identity, the one a box of it carries (its text is a fresh
