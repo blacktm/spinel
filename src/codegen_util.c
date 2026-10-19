@@ -5623,8 +5623,8 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
     buf_puts(b, "sp_sym_to_s("); emit_expr(c, id, b); buf_puts(b, ")");
     return 0;
   }
-  if (ty_is_object(t)) {
-    /* a non-symbol object tag matches by identity: carry its pointer. An
+  if (ty_is_object(t) || t == TY_BIGINT) {
+    /* a non-symbol object tag (including Bignum) matches by identity: carry its pointer. An
        object that is nil (a NULL pointer) is the nil tag, so it meets a nil
        held in a boxed value */
     int tp = ++g_tmp;
@@ -5659,10 +5659,8 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
     buf_puts(b, ") ? (const char *)&sp_catch_true_tag : (const char *)&sp_catch_false_tag)");
     return 1;
   }
-  /* A Float/Bignum tag would emit a non-pointer (or a struct) into the
-     const char* tag slot -- invalid C. These are vanishingly rare as
-     catch/throw tags; reject loudly rather than miscompile. */
-  unsupported(c, id, "catch/throw with a Float or Bignum tag (use a Symbol, String, Integer, nil, boolean, or object tag)");
+  /* A Float tag cannot be represented by the current pointer identity slot. */
+  unsupported(c, id, "catch/throw with a Float tag (use a Symbol, String, Integer, nil, boolean, or object tag)");
   return 0;
 }
 /* A key whose static kind can never be in a typed hash's table: a String
