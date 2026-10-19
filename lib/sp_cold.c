@@ -410,6 +410,9 @@ static void sp_str_to_c_zero_den(const char *dp, double d) {
     sp_raise_cls("ZeroDivisionError", "divided by 0");
   }
 }
+static int sp_str_to_c_imag_suffix(char c) {
+  return c == 'i' || c == 'I' || c == 'j' || c == 'J';
+}
 static sp_Complex sp_str_to_c_impl(const char *s, int strict) {
   double re = 0, im = 0;
   int parsed = 0;
@@ -423,22 +426,22 @@ static sp_Complex sp_str_to_c_impl(const char *s, int strict) {
       parsed = 1;
       /* rational-syntax component "n/d" */
       if (*end == '/') { const char *dp = end + 1; char *de = NULL; double d = strtod(dp, &de); if (de != dp) { sp_str_to_c_zero_den(dp, d); a /= d; end = de; } }
-      if (*end == 'i') { im = a; fin = end + 1; }
+      if (sp_str_to_c_imag_suffix(*end)) { im = a; fin = end + 1; }
       else {
         re = a;
         const char *q = end;
         double b2 = strtod(q, &end);
         if (end != q) {
           if (*end == '/') { const char *dp = end + 1; char *de = NULL; double d = strtod(dp, &de); if (de != dp) { sp_str_to_c_zero_den(dp, d); b2 /= d; end = de; } }
-          if (*end == 'i') { im = b2; fin = end + 1; }
-          else fin = q;   /* an imaginary number without the 'i' suffix ("1+2") is invalid */
+          if (sp_str_to_c_imag_suffix(*end)) { im = b2; fin = end + 1; }
+          else fin = q;   /* an imaginary number without a unit suffix ("1+2") is invalid */
         }
-        else if ((*q == '+' || *q == '-') && q[1] == 'i') { im = (*q == '-') ? -1.0 : 1.0; fin = q + 2; }
+        else if ((*q == '+' || *q == '-') && sp_str_to_c_imag_suffix(q[1])) { im = (*q == '-') ? -1.0 : 1.0; fin = q + 2; }
         else fin = q;        /* "1+" and other incomplete forms leave the operator unconsumed */
       }
     }
-    else if (*p == 'i') { im = 1; parsed = 1; fin = p + 1; }
-    else if ((*p == '+' || *p == '-') && p[1] == 'i') { im = (*p == '-') ? -1.0 : 1.0; parsed = 1; fin = p + 2; }
+    else if (sp_str_to_c_imag_suffix(*p)) { im = 1; parsed = 1; fin = p + 1; }
+    else if ((*p == '+' || *p == '-') && sp_str_to_c_imag_suffix(p[1])) { im = (*p == '-') ? -1.0 : 1.0; parsed = 1; fin = p + 2; }
   }
   /* Kernel#Complex(str) must consume the whole string (only trailing
      whitespace allowed): an incomplete form like "1+" is invalid, not silently
