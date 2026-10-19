@@ -3087,6 +3087,15 @@ static inline sp_bool sp_poly_tower_p(sp_RbVal v) {
          (v.cls_id == SP_BUILTIN_RATIONAL || v.cls_id == SP_BUILTIN_BIG_RATIONAL ||
           v.cls_id == SP_BUILTIN_COMPLEX);
 }
+/* A Complex.rectangular / .polar argument that is not a number: CRuby
+   raises TypeError "not a real" for it (nil, a String, an Array, ...); a
+   number becomes re+0i, a Complex itself, for sp_complex_real_chk. An
+   instance of a program's class (a Numeric subclass is a real) converts
+   as before. */
+static sp_Complex sp_complex_real_arg(sp_RbVal v) {
+  if (!sp_poly_tower_p(v) && !(v.tag == SP_TAG_OBJ && v.cls_id >= 0)) sp_raise_cls("TypeError", "not a real");
+  return sp_poly_as_complex(v);
+}
 /* The tower kinds that OWN an arm: a Bignum, Rational, BigRational or Complex
    on EITHER side sends the pair to that arm, which converts the other side
    with sp_poly_as_bigint / as_rational / as_complex -- and those read a

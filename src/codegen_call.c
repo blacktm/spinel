@@ -2912,28 +2912,49 @@ void emit_complex_coerce(Compiler *c, int node, Buf *b) {
   buf_printf(b, "), 0, %d})", comp_ntype(c, node) == TY_FLOAT ? 1 : 0);
 }
 
-/* Complex.rectangular / .polar with a Complex argument: CRuby takes each
-   argument's real part when its imaginary part is zero (0 or 0.0) and raises
-   TypeError "not a real" otherwise, once both are evaluated. The float casts
-   of the plain arms met the struct and the C did not build. Declines (0)
-   when no argument is statically a Complex. */
+/* Complex.rectangular / .polar with an argument that is not statically a
+   real number: CRuby takes each argument's real part when it is a number,
+   or a Complex whose imaginary part is zero (0 or 0.0), and raises TypeError
+   "not a real" otherwise (a Complex with an imaginary part, nil, a String,
+   anything else that is not Numeric), once both are evaluated. The float
+   casts of the plain arms met a Complex struct and the C did not build, and
+   refused or misconverted the other kinds. A Complex converts here; any other
+   kind is boxed, held rooted while the next argument runs, and checked by
+   sp_complex_real_arg. Declines (0) when every argument is statically an
+   Integer, Float or Rational that cannot be nil, and leaves a Bignum or an
+   instance of a program's class (a Numeric subclass is a real) to the plain
+   arms. A nullable Integer or Float is boxed too, so a nil there is checked
+   after both arguments run. */
 int emit_complex_real_args(Compiler *c, const int *argv, int argc, int polar, Buf *b) {
   int any = 0;
   for (int k = 0; k < argc && k < 2; k++) {
     TyKind t = comp_ntype(c, argv[k]);
-    if (t == TY_COMPLEX) any = 1;
-    else if (t != TY_INT && t != TY_FLOAT && t != TY_RATIONAL) return 0;
+    if (t == TY_BIGINT || ty_is_object(t)) return 0;
+    if ((t != TY_INT && t != TY_FLOAT && t != TY_RATIONAL) || node_is_oint(c, argv[k])) any = 1;
   }
   if (!any) return 0;
-  int ta = ++g_tmp, tb = ++g_tmp;
-  buf_printf(b, "({ sp_Complex _t%d = ", ta); emit_complex_coerce(c, argv[0], b);
-  buf_printf(b, "; sp_Complex _t%d = ", tb);
-  if (argc >= 2) emit_complex_coerce(c, argv[1], b); else buf_puts(b, "((sp_Complex){0, 0, 0})");
-  buf_printf(b, "; sp_complex_real_chk(_t%d); sp_complex_real_chk(_t%d); ", ta, tb);
-  if (polar) buf_printf(b, "sp_complex_polar(_t%d.re, _t%d.re, _t%d.fl & SP_CPLX_RE_F); })", ta, tb, ta);
+  int tv[2], uv[2] = { 0, 0 };
+  for (int k = 0; k < 2; k++) tv[k] = ++g_tmp;
+  buf_puts(b, "({ ");
+  for (int k = 0; k < 2; k++) {
+    TyKind t = k < argc ? comp_ntype(c, argv[k]) : TY_INT;
+    if (k >= argc) buf_printf(b, "sp_Complex _t%d = ((sp_Complex){0, 0, 0}); ", tv[k]);
+    else if ((t == TY_INT || t == TY_FLOAT || t == TY_RATIONAL || t == TY_COMPLEX) && !node_is_oint(c, argv[k])) {
+      buf_printf(b, "sp_Complex _t%d = ", tv[k]); emit_complex_coerce(c, argv[k], b); buf_puts(b, "; ");
+    }
+    else {
+      uv[k] = ++g_tmp;
+      buf_printf(b, "sp_RbVal _t%d = ", uv[k]); emit_boxed(c, argv[k], b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", uv[k]);
+    }
+  }
+  for (int k = 0; k < 2; k++)
+    if (uv[k]) buf_printf(b, "sp_Complex _t%d = sp_complex_real_arg(_t%d); ", tv[k], uv[k]);
+  buf_printf(b, "sp_complex_real_chk(_t%d); sp_complex_real_chk(_t%d); ", tv[0], tv[1]);
+  if (polar) buf_printf(b, "sp_complex_polar(_t%d.re, _t%d.re, _t%d.fl & SP_CPLX_RE_F); })", tv[0], tv[1], tv[0]);
   else buf_printf(b, "(sp_Complex){_t%d.re, _t%d.re,"
                      " (unsigned char)((_t%d.fl & SP_CPLX_RE_F) | ((_t%d.fl & SP_CPLX_RE_F) << 1))}; })",
-                  ta, tb, ta, tb);
+                  tv[0], tv[1], tv[0], tv[1]);
   return 1;
 }
 
