@@ -1,0 +1,10 @@
+unborn: TypeError: exception class/object expected
+suspended: TypeError: exception class/object expected
+finished: TypeError: exception class/object expected
+boxed nil: TypeError: exception class/object expected
+nullable nil: TypeError: exception class/object expected
+no argument: FiberError: cannot raise exception on unborn fiber
+thread: TypeError: exception class/object expected
+thread boxed nil: TypeError: exception class/object expected
+:done
+nil

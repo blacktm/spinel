@@ -971,6 +971,8 @@ const char*sp_Fiber_inspect(sp_Fiber*f){
    (or body entry) raises it. An unhandled raise propagates to this caller via
    sp_Fiber_resume's re-raise, exactly like an exception raised by the body. */
 sp_RbVal sp_Fiber_raise(sp_Fiber*f,const char*cls,const char*msg,void*obj){SP_GC_ROOT(f);SP_GC_ROOT_STR(msg);
+  /* An explicit nil exception is invalid before the receiver's state is checked. */
+  if(!cls)sp_raise_cls("TypeError","exception class/object expected");
   if(f->state==3){sp_raise_cls("FiberError","dead fiber called");}
   /* Never resumed: there is no fiber context to deliver into, so CRuby refuses
      rather than raising the exception somewhere. Delivering it in the CALLER

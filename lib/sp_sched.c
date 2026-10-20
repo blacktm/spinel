@@ -5033,6 +5033,9 @@ sp_thread *sp_Thread_kill(sp_thread *t) {
   return t;
 }
 sp_thread *sp_Thread_raise(sp_thread *t, const char *cls, const char *msg, void *obj) {SP_GC_ROOT_STR(msg);
+  /* an explicit nil is no exception: TypeError, unless the thread is dead,
+     which CRuby checks first (the raise is then a no-op) */
+  if (!cls && !(t && SP_TH_STATE(t) == SP_TH_DEAD)) sp_raise_cls("TypeError", "exception class/object expected");
   sp_thread_deliver(t, 0, cls, msg, obj);
   return t;
 }

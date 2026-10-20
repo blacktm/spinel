@@ -107,7 +107,8 @@ sp_RbVal sp_Fiber_transfer(sp_Fiber *f, sp_RbVal val);
 sp_RbVal sp_Fiber_transfer_catch(sp_Fiber *f, sp_Fiber *at, sp_RbVal val, int *out_raised,
                                  const char **out_cls, const char **out_msg, void **out_obj);
 /* Fiber#raise: inject an exception at the fiber's suspension point (or at entry
-   for an unstarted fiber). cls/msg describe a class+message; obj, when non-NULL,
+   for an unstarted fiber). NULL cls denotes an explicit nil exception argument,
+   rejected before fiber-state validation. Otherwise cls/msg describe a class+message; obj, when non-NULL,
    is a pre-built exception object to raise instead. Returns the next yielded
    value, or re-raises in the caller if the fiber does not handle it. */
 sp_RbVal sp_Fiber_raise(sp_Fiber *f, const char *cls, const char *msg, void *obj);

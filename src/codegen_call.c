@@ -4737,12 +4737,18 @@ void emit_concurrency_raise(Compiler *c, const char *rtext, int argc, const int 
   }
   /* a boxed first argument names the class when it holds one (`klass ||
      Default`), else it is the message, as CRuby reads it at run time */
-  if (argc >= 1 && !arg0_const && a0t == TY_POLY) {
+  /* a nil argument, literal or held, is the TypeError CRuby raises before
+     it looks at the thread or fiber: it goes through the boxed arm, whose
+     nil reaches the runtime as no class */
+  if (argc >= 1 && !arg0_const && (a0t == TY_POLY || a0t == TY_NIL || repr_of(c, argv[0]).may_nil)) {
     int t = ++g_tmp;
-    buf_printf(b, "({ sp_RbVal _ca%d = ", t); emit_boxed(c, argv[0], b);
+    char held_recv[48];
+    buf_printf(b, "({ %s *_cr%d = %s; SP_GC_ROOT(_cr%d); sp_RbVal _ca%d = ", ctype, t, rtext, t, t);
+    snprintf(held_recv, sizeof held_recv, "_cr%d", t); rtext = held_recv;
+    emit_boxed(c, argv[0], b);
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_ca%d); int _cc%d = _ca%d.tag == SP_TAG_CLASS; ", t, t, t);
-    buf_printf(b, "%s(%s, _cc%d ? sp_class_to_s(sp_unbox_class(_ca%d)) : \"RuntimeError\", _cc%d ? ",
-               fn, rtext, t, t, t);
+    buf_printf(b, "%s(%s, _cc%d ? sp_class_to_s(sp_unbox_class(_ca%d)) : (_ca%d.tag == SP_TAG_NIL ? NULL : \"RuntimeError\"), _cc%d ? ",
+               fn, rtext, t, t, t, t);
     if (argc >= 2) emit_exc_msg_arg(c, argv[1], b); else buf_puts(b, "(&(\"\\xff\")[1])");
     buf_printf(b, " : sp_poly_to_s(_ca%d), NULL); })", t);
     return;
