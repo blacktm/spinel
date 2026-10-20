@@ -6746,6 +6746,10 @@ static sp_float sp_poly_fdiv(sp_RbVal a, sp_RbVal b) {
      very next line knows how to divide one (sp_poly_to_f_with_rational). */
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rat_kind(a)) sp_raise_poly_nomethod("fdiv", a);
   sp_poly_div_operand(&a, &b, NULL);
+  if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) &&
+      (a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT) &&
+      (b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT))
+    return sp_bigint_fdiv(sp_poly_as_bigint(a), sp_poly_as_bigint(b));
   return sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b);
 }
 static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {

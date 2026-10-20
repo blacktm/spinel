@@ -1691,6 +1691,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_INT,   "chr",         0,   0, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_int_chr($r)" },
   { TY_INT,   "chr",         0, 127, BF_ANY,      TY_STRING,      BOPE_NONE },
   { TY_INT,   "[]",          1,   2, BF_ANY,      TY_INT,         BOPE_NONE },  /* a bit, or a bit-range field */
+  { TY_INT,   "fdiv",        1,   1, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "sp_poly_fdiv(sp_box_int($r), $b0)", BOP_K(TY_BIGINT) },
   { TY_INT,   "fdiv",        1,   1, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "((sp_float)($r) / ($f0))" },
   { TY_INT,   "div",         1,   1, BF_ANY,      TY_INT,         BOPE_NONE },
   { TY_INT,   "modulo",      1,   1, BF_ANY,      TY_INT,         BOPE_NONE },

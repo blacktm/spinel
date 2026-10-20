@@ -1273,6 +1273,7 @@ int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);
 char *sp_str_alloc_ext(size_t len);   /* non-inline sp_str_alloc; see sp_alloc.c */
 const char *sp_bigint_to_s(sp_Bigint *b);
 double sp_bigint_to_double(sp_Bigint *b);
+double sp_bigint_fdiv(sp_Bigint *a, sp_Bigint *b);
 void sp_brat_scan(void *p);
 sp_RbVal sp_box_brat(sp_Bigint *num, sp_Bigint *den);
 sp_RbVal sp_box_brat_norm(sp_Bigint *num, sp_Bigint *den);   /* promote: small when it fits */

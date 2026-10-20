@@ -12849,6 +12849,17 @@ int desugar_builtin_scalar_calls(Compiler *c) {
     }
     const char *name = nt_str(nt, id, "name");
     TyKind rt = infer_type(c, recv);
+    if (bx == SP_BX_INTEGER && name && sp_streq(name, "fdiv")) {
+      /* Keep integer pairs with a Bignum on the numeric emitter: the Ruby
+         self.to_f / other implementation loses overflowing operands. */
+      int an = nt_ref(nt, id, "arguments"), na = 0;
+      const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &na) : NULL;
+      TyKind at = na == 1 ? infer_type(c, av[0]) : TY_UNKNOWN;
+      int ci = comp_class_index(c, "Integer");
+      if ((ci < 0 || comp_method_in_chain(c, ci, name, NULL) < 0) &&
+          (rt == TY_BIGINT || at == TY_BIGINT) &&
+          (rt == TY_INT || rt == TY_BIGINT) && (at == TY_INT || at == TY_BIGINT)) continue;
+    }
     /* Only a CONCRETE receiver is rewritten (Integer: TY_INT/TY_BIGINT,
        Float: TY_FLOAT, Comparable: as below). A run-time-typed (poly)
        receiver is deliberately left on the existing dispatch (the

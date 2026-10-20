@@ -312,9 +312,16 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     if (sp_streq(name, "fdiv") && argc == 1) {
       Repr ar = repr_of(c, argv[0]);
       TyKind at = ar.as_ty;
+      if (ar.big) {
+        buf_printf(b, "sp_bigint_fdiv(%s, ", r); emit_expr(c, argv[0], b);
+        buf_puts(b, ")"); free(rs.p); return 1;
+      }
+      if (at == TY_INT) {
+        buf_puts(b, "sp_poly_fdiv("); emit_boxed(c, recv, b); buf_puts(b, ", ");
+        emit_boxed(c, argv[0], b); buf_puts(b, ")"); free(rs.p); return 1;
+      }
       buf_printf(b, "(sp_bigint_to_double(%s) / ", r);
-      if (ar.big) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-      else if (at == TY_FLOAT) { buf_puts(b, "("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      if (at == TY_FLOAT) { buf_puts(b, "("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else { buf_puts(b, "(double)("); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
       buf_puts(b, ")"); free(rs.p); return 1;
     }

@@ -12,6 +12,8 @@
 
 
 #include <string.h>
+#include <float.h>
+#include <limits.h>
 #include <math.h>      /* isinf: early-exit once a limb fold overflows to Infinity */
 #include "sp_bigint.h"
 
@@ -5733,6 +5735,29 @@ sp_Bigint *sp_bigint_abs_v(sp_Bigint *b) {
   if (!b) return sp_bigint_new_int(0);
   if (sp_bigint_sign(b) >= 0) return b;
   return sp_bigint_sub(sp_bigint_new_int(0), b);
+}
+
+/* Integer#fdiv keeps an integer quotient with guard bits when conversion
+   of either operand would overflow. All temporary bigints use the existing
+   no-collect allocator, like the other nested bigint operations. */
+double sp_bigint_fdiv(sp_Bigint *a, sp_Bigint *b) {
+  if (!a) sp_raise_cls("NoMethodError", "undefined method 'fdiv' for nil");
+  if (!b) sp_raise_cls("TypeError", "nil can't be coerced into Integer");
+  double x = sp_bigint_to_double(a), y = sp_bigint_to_double(b);
+  if ((!isinf(x) && !isinf(y)) || !a->mpz.sn || !b->mpz.sn) return x / y;
+  int negative = (a->mpz.sn < 0) != (b->mpz.sn < 0);
+  sp_Bigint *n = sp_bigint_abs_v(a), *d = sp_bigint_abs_v(b);
+  intptr_t guard = ((DBL_MANT_DIG + DIG_SIZE) / DIG_SIZE) * DIG_SIZE;
+  intptr_t ey = sp_bigint_bit_length(d) - guard;
+  intptr_t ex = sp_bigint_bit_length(n) - 2 * guard;
+  if (ex > DIG_SIZE) ex -= DIG_SIZE;
+  else if (ex > 0) ex = 0;
+  n = ex > 0 ? sp_bigint_shr(n, ex) : sp_bigint_shl(n, -ex);
+  d = ey > 0 ? sp_bigint_shr(d, ey) : sp_bigint_shl(d, -ey);
+  double q = sp_bigint_to_double(sp_bigint_div(n, d));
+  intptr_t scale = ex - ey;
+  double result = scale > INT_MAX ? HUGE_VAL : scale < INT_MIN ? 0.0 : ldexp(q, (int)scale);
+  return negative ? -result : result;
 }
 
 sp_Bigint *sp_bigint_gcd(sp_Bigint *a, sp_Bigint *b) {
