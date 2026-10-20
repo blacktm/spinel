@@ -572,6 +572,15 @@ still works.
   preserving its returned String's identity. Use a literal block. Literal blocks,
   symbol-to-proc forms that desugar to one, and user-owned methods still compile.
 
+- **IO iterators without a block** -- no-argument `each_line` (`each`),
+  `each_byte`, `each_char` and `each_codepoint` return streaming Enumerators.
+  Creating one does not read; iteration uses the stream's current position,
+  and rewind seeks its source and resets its line number. Blockless line
+  separator/limit/keyword forms retain their existing restrictions, and a
+  block-taking Enumerable call chained on the iterator call itself
+  (`r.each_line.map { }`, `select`, `find`, `with_index`, ...) is refused at
+  compile time; through a local it answers as CRuby.
+
 - **Frozen literals** -- explicit `.freeze` then mutation raises `FrozenError`,
   including `delete`, `clear`, and `[]=` on a Hash read from a mixed container,
   matching CRuby.

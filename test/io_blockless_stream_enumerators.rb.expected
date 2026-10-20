@@ -1,0 +1,35 @@
+["a\n", "b\n"]
+[Enumerator, nil]
+[97, 98]
+[Enumerator, nil, "a\n", "a\n", "a\n", "b\n"]
+[StopIteration, true]
+[StopIteration, true]
+"a\n"
+"b\n"
+["c\n"]
+true
+[Enumerator, nil]
+[IOError, "closed stream"]
+Enumerator
+[IOError, "closed stream"]
+[0, 65, 255]
+["a\u0000b\n"]
+["a\n", "b\n"]
+[]
+["é", "\n"]
+[233, 10]
+[["a\n", 0], ["b\n", 1]]
+true
+true
+"a\n"
+[Errno::ESPIPE, "Illegal seek"]
+"a\n"
+1
+true
+0
+"a\n"
+"a\n"
+"b\n"
+File
+"undefined method 'each_byte' for an instance of File::Stat"
+"undefined method 'each_line' for an instance of File::Stat"

@@ -3405,7 +3405,9 @@ sp_Enumerator *sp_enum_as_gen(sp_Enumerator *e) {
 }
 /* Recognize the annotated materialized walks in the existing return
    dispatch; an inspect label must not turn a supported walk into an error. */
+static void sp_io_enum_gen(sp_Fiber *f);
 static int sp_enum_returns_source(sp_Enumerator *e) {
+  if (e->gen == sp_io_enum_gen) return 1;
   const char *m = e->meth;
   return m && (strcmp(m, "each") == 0 || strcmp(m, "each_with_index") == 0 ||
                strncmp(m, "cycle(", 6) == 0 || strncmp(m, "combination(", 12) == 0 ||
@@ -3650,6 +3652,49 @@ sp_Enumerator *sp_loop_enum(void) {
   return e;
 }
 
+/* A stream capture owns its handle; all reads happen when a run resumes. */
+typedef struct { sp_File *io; int kind; } sp_IOEnumCap;
+static void sp_io_enum_scan(void *p) {
+  sp_IOEnumCap *cap = (sp_IOEnumCap *)p;
+  sp_gc_mark(cap->io);
+}
+static void sp_io_enum_gen(sp_Fiber *f) {
+  sp_IOEnumCap *cap = (sp_IOEnumCap *)f->user_data; SP_GC_ROOT(cap);
+  const char *line = NULL; SP_GC_ROOT_STR(line);
+  for (;;) {
+    if (cap->kind == 1) {
+      sp_oint byte = sp_File_getbyte(cap->io);
+      if (byte.nil) break;
+      sp_Fiber_yield(sp_box_int(byte.v));
+    }
+    else {
+      line = cap->kind == 0 ? sp_File_gets_sep(cap->io, SPL("\n"), 0, FALSE)
+                            : sp_File_getc(cap->io);
+      if (!line) break;
+      sp_Fiber_yield(cap->kind == 3 ? sp_box_int(sp_str_ord(line)) : sp_box_str(line));
+    }
+  }
+  sp_gc_wb((void *)f);
+  f->yielded_value = sp_box_obj(cap->io, SP_BUILTIN_IO);
+}
+sp_Enumerator *sp_io_enumerator(sp_File *io, int kind, const char *meth) {SP_GC_ROOT(io);SP_GC_ROOT_STR(meth);
+  if (!io) sp_nil_recv(meth);
+  /* a File::Stat handle is typed as an IO, but has no stream to walk */
+  if (io->mode && (strcmp(io->mode, "stat") == 0 || strcmp(io->mode, "lstat") == 0))
+    sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for an instance of File::Stat", meth));
+  sp_IOEnumCap *cap = (sp_IOEnumCap *)sp_gc_alloc(sizeof *cap, NULL, sp_io_enum_scan);
+  SP_GC_ROOT(cap); cap->io = io; cap->kind = kind;
+  sp_Enumerator *e = sp_Enumerator_new_gen(sp_io_enum_gen, cap, sp_box_nil());
+  return sp_enum_with_src(e, sp_box_obj(io, SP_BUILTIN_IO), meth);
+}
+static void sp_io_enum_rewind(sp_Enumerator *e) {SP_GC_ROOT(e);
+  sp_File *io = ((sp_IOEnumCap *)e->gen_cap)->io;
+  SP_IO_OPEN(io);
+  if (fseeko(io->fp, 0, SEEK_SET) != 0)
+    sp_raise_cls(sp_errno_class_name(errno), strerror(errno));
+  clearerr(io->fp); io->lineno = 0;
+}
+
 /* IO.copy_stream(src_path, dst_path): stream one file to another, byte count. */
 sp_int sp_io_copy_stream(const char *src, const char *dst) {SP_GC_ROOT_STR(src);SP_GC_ROOT_STR(dst);
   FILE *in = fopen(src ? src : "", "rb");
@@ -3765,6 +3810,7 @@ sp_PolyArray *sp_Enumerator_next_values(sp_Enumerator *e) {SP_GC_ROOT(e); return
 sp_PolyArray *sp_Enumerator_peek_values(sp_Enumerator *e) {SP_GC_ROOT(e); return sp_enum_values_wrap(sp_Enumerator_peek(e)); }
 sp_Enumerator *sp_Enumerator_rewind(sp_Enumerator *e) { sp_gc_wb((void*)e);
   if (!e) return NULL;
+  if (e->gen == sp_io_enum_gen) sp_io_enum_rewind(e);
   if (e->gen) { e->fib = NULL; e->peeked = FALSE; e->gen_result = sp_box_nil(); }
   else { e->cursor = 0; if (SP_UNLIKELY(e->live)) sp_enum_live_rewind(e); }
   if (e->is_bsearch) { e->bsearch_lo = 0; e->bsearch_hi = e->items ? e->items->len - 1 : -1; e->bsearch_mid = -1; e->bsearch_waiting = FALSE; e->bsearch_result = sp_box_nil(); e->peeked = FALSE; }

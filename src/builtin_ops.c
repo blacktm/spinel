@@ -1295,8 +1295,14 @@ static const BuiltinOp bop_rows[] = {
   /* IO / File (sp_File *, NULL is nil): the calls typed by name and arity.
      sync= (its argument), the socket and io/console methods (features),
      the *_nonblock family (exception: false) and the each_* iterators
-     (they type the block parameter) stay in infer_call_inner; a name with
-     no rule there is poly. */
+     with a block (they type the block parameter) stay in infer_call_inner;
+     a name with no rule there is poly. Without a block or an argument, an
+     each_* walk is a generator over the stream that reads as it is pulled. */
+  { TY_IO, "each_line",      0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_enumerator($r, 0, SPL(\"each_line\"))", TY_UNKNOWN },
+  { TY_IO, "each",           0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_enumerator($r, 0, SPL(\"each\"))", TY_UNKNOWN },
+  { TY_IO, "each_byte",      0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_enumerator($r, 1, SPL(\"each_byte\"))", TY_UNKNOWN },
+  { TY_IO, "each_char",      0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_enumerator($r, 2, SPL(\"each_char\"))", TY_UNKNOWN },
+  { TY_IO, "each_codepoint", 0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_enumerator($r, 3, SPL(\"each_codepoint\"))", TY_UNKNOWN },
   { TY_IO, "respond_to?",    0, 127, BF_ANY, TY_BOOL,     BOPE_NONE },  /* true or false whatever the name */
   { TY_IO, "timeout",        0, 127, BF_ANY, TY_POLY,     BOPE_NONE },
   { TY_IO, "timeout=",       0, 127, BF_ANY, TY_UNKNOWN,  BOPE_NONE },
