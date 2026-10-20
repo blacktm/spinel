@@ -4824,9 +4824,15 @@ static int emit_nullable_numeric_convert(Compiler *c, int id, const int *argv, i
                   " if (_t%d.v.b) sp_complex_reject_bool(_t%d, sp_box_int(0), 1);"
                   " _out = sp_box_nil(); }\n", tv, te, tv);
   buf_puts(b, "else { _out = ");
-  /* Preserve the existing non-nil single-argument conversion paths. */
-  if (sp_streq(klass, "Rational"))
-    buf_printf(b, "sp_box_rational(sp_poly_kernel_rational(_t%d))", tv);
+  /* a String parses strictly, its failure nil under exception: false (the
+     parser's soft mode), as the typed String arm answers */
+  if (sp_streq(klass, "Rational")) {
+    int tr = ++g_tmp;
+    buf_printf(b, "(sp_rbval_str(_t%d).tag == SP_TAG_STR ? ({ sp_convert_soft = !_t%d.v.b; sp_convert_failed = 0;"
+                  " sp_Rational _t%d = sp_str_to_r_strict(sp_rbval_str(_t%d).v.s); sp_convert_soft = 0;"
+                  " sp_convert_failed ? sp_box_nil() : sp_box_rational(_t%d); })"
+                  " : sp_box_rational(sp_poly_kernel_rational(_t%d)))", tv, te, tr, tv, tr, tv);
+  }
   else {
     /* the one-argument form's conversion: a boxed Complex keeps its
        imaginary part */
@@ -5128,12 +5134,18 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
     if (soft_convert_r && emit_nullable_numeric_convert(c, id, argv, exception_node, "Rational", b)) return 1;
     /* Rational(str, exception: false): nil rather than a raise (#3893) */
     if (soft_convert_r && argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
-      int tr9 = ++g_tmp;
-      buf_printf(b, "({ sp_convert_soft = 1; sp_convert_failed = 0;"
-                    " sp_Rational _t%d = sp_str_to_r_strict(", tr9);
+      /* the String, then the keyword's value; soft only for `false` (true is
+         the strict parse), a value that is neither CRuby's ArgumentError */
+      int tr9 = ++g_tmp, ts9 = ++g_tmp, te9 = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = sp_box_str(", ts9);
       emit_expr(c, argv[0], b);
-      buf_printf(b, "); sp_convert_soft = 0;"
-                    " sp_convert_failed ? sp_box_nil() : sp_box_rational(_t%d); })", tr9);
+      buf_printf(b, "); SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", ts9, te9);
+      emit_boxed(c, exception_node, b);
+      buf_printf(b, "; if (_t%d.tag != SP_TAG_BOOL) sp_raise_cls(\"ArgumentError\","
+                    " sp_str_concat(SPL(\"expected true or false as exception: \"), sp_poly_inspect(_t%d)));"
+                    " sp_convert_soft = !_t%d.v.b; sp_convert_failed = 0;"
+                    " sp_Rational _t%d = sp_str_to_r_strict(_t%d.v.s); sp_convert_soft = 0;"
+                    " sp_convert_failed ? sp_box_nil() : sp_box_rational(_t%d); })", te9, te9, te9, tr9, ts9, tr9);
       return 1;
     }
     /* Rational(String): parse "n", "n/d", or "n.d" like String#to_r rather than

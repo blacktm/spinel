@@ -1,0 +1,24 @@
+nil
+nil
+nil
+nil
+nil
+nil
+(1/2)
+(3/1)
+(5/2)
+(10/3)
+nil
+nil
+(3/4)
+(3/1)
+raise zero: ZeroDivisionError
+raise text: ArgumentError
+boxed raise: ZeroDivisionError
+to_r: ZeroDivisionError
+true zero: ZeroDivisionError
+true text: ArgumentError
+(2/1)
+(1/2000)
+nil
+not a boolean: ArgumentError

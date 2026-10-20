@@ -216,9 +216,18 @@ static sp_Rational sp_str_to_r_strict_wide(const char *s) {
   if (t != buf) free(t);
   return r;
 }
+/* A Kernel#Rational(String) failure: under `exception: false` (sp_convert_soft)
+   the caller answers nil, whatever the parse found wrong -- no digits, an
+   empty or zero denominator, text after the number -- as CRuby does;
+   otherwise the raise. */
+static sp_Rational sp_rstrict_fail(const char *cls, const char *msg) {
+  if (sp_convert_soft) { sp_convert_failed = 1; return sp_rational_new(0, 1); }
+  sp_raise_cls(cls, msg);
+  return sp_rational_new(0, 1);
+}
 sp_Rational sp_str_to_r_strict(const char *s) {SP_GC_ROOT_STR(s);
   const char *p = s;
-  if (!p) sp_raise_cls("TypeError", "can't convert nil into Rational");
+  if (!p) { sp_convert_soft = 0; sp_raise_cls("TypeError", "can't convert nil into Rational"); }
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f' || *p == '\v') p++;
   sp_int sign = 1;
   if (*p == '+') p++;
@@ -239,10 +248,7 @@ sp_Rational sp_str_to_r_strict(const char *s) {SP_GC_ROOT_STR(s);
       p++;
     }
   }
-  if (!any) {
-    if (sp_convert_soft) { sp_convert_failed = 1; return sp_rational_new(0, 1); }
-    sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
-  }
+  if (!any) return sp_rstrict_fail("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
   if (*p == 'e' || *p == 'E') {
     const char *q = p + 1;
     sp_int esign = 1;
@@ -254,20 +260,43 @@ sp_Rational sp_str_to_r_strict(const char *s) {SP_GC_ROOT_STR(s);
       p = q;
     }
   }
+  /* the denominator takes the numerator's syntax, a fraction and an exponent
+     too ("1/0.5" is 2, "1/2e3" is 1/2000): its value dn/dd divides */
   if (*p == '/') {
     p++;
-    sp_int d2 = 0; int anyd = 0, z = 1;
+    sp_int dn = 0, dd = 1; int anyd = 0, z = 1;
     while ((*p >= '0' && *p <= '9') || *p == '_') {
-      if (*p != '_') { ovf |= !ovf && sp_rstrict_mul_add(&d2, 10, *p - '0'); z &= *p == '0'; anyd = 1; }
+      if (*p != '_') { ovf |= !ovf && sp_rstrict_mul_add(&dn, 10, *p - '0'); z &= *p == '0'; anyd = 1; }
       p++;
     }
-    if (!anyd) sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
-    if (z) sp_raise_cls("ZeroDivisionError", "divided by 0");
-    if (!ovf && sp_rstrict_mul_add(&den, d2, 0)) ovf = 1;
+    if (anyd && *p == '.' && p[1] >= '0' && p[1] <= '9') {
+      p++;
+      while ((*p >= '0' && *p <= '9') || *p == '_') {
+        if (*p != '_') {
+          ovf |= !ovf && (sp_rstrict_mul_add(&dn, 10, *p - '0') || sp_rstrict_mul_add(&dd, 10, 0));
+          z &= *p == '0';
+        }
+        p++;
+      }
+    }
+    if (anyd && (*p == 'e' || *p == 'E')) {
+      const char *q = p + 1;
+      sp_int esign = 1, ev = 0; int anye = 0;
+      if (*q == '+') q++; else if (*q == '-') { esign = -1; q++; }
+      while (*q >= '0' && *q <= '9') { ovf |= !ovf && sp_rstrict_mul_add(&ev, 10, *q - '0'); q++; anye = 1; }
+      if (anye) {
+        for (sp_int k = 0; k < ev && !ovf; k++) ovf = sp_rstrict_mul_add(esign > 0 ? &dn : &dd, 10, 0);
+        p = q;
+      }
+    }
+    if (!anyd) return sp_rstrict_fail("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
+    if (z) return sp_rstrict_fail("ZeroDivisionError", "divided by 0");
+    if (!ovf && (sp_rstrict_mul_add(&den, dn, 0) || sp_rstrict_mul_add(&num, dd, 0))) ovf = 1;
   }
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f' || *p == '\v') p++;
-  if (*p) sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
-  if (ovf) return sp_str_to_r_strict_wide(s);
+  if (*p) return sp_rstrict_fail("ArgumentError", sp_sprintf("invalid value for Rational(): \"%s\"", s));
+  /* the wide reader can raise (RangeError): the soft flag must not outlive it */
+  if (ovf) { sp_convert_soft = 0; return sp_str_to_r_strict_wide(s); }
   return sp_rational_new(sign * num, den);
 }
 /* The products of two sp_int fit a 128-bit integer on the 64-bit build and a
