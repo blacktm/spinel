@@ -703,6 +703,32 @@ static void narrow_memo_put(long key, int val) {
   g_nmemo[slot].gen = g_narrow_gen; g_nmemo[slot].key = key; g_nmemo[slot].val = (signed char)val;
 }
 
+/* A bare break bound to an instance_eval/exec splice answers nil. Its result
+   carrier must hold nil as well as the ordinary tail; nested loops own theirs. */
+int ie_block_has_bare_break(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_BreakNode) {
+    int a = nt_ref(nt, node, "arguments"), n = 0;
+    if (a >= 0) nt_arr(nt, a, "arguments", &n);
+    return n == 0;
+  }
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode ||
+      k == NK_BlockNode || k == NK_LambdaNode || k == NK_DefNode ||
+      k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++)
+    if (ie_block_has_bare_break(c, nt_ref_at(nt, node, i))) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++)
+      if (ie_block_has_bare_break(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
 /* Unify the value type of every splice-bound break/next in `node` (break/next
    inside a nested loop or block bind there, not to the splice). TY_UNKNOWN if
    none carry a value. Mirrors codegen's ie_splice_value_ty so the inferred
@@ -7297,6 +7323,7 @@ static int infer_block_kernel_call(Compiler *c, int id, const NodeTable *nt, con
         { *out = TY_POLY; return 1; }
       }
       int body = nt_ref(nt, blk, "body");
+      if (ie_block_has_bare_break(c, body)) { *out = TY_POLY; return 1; }
       int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
       if (bn > 0) {
         TyKind bt = infer_type(c, bb[bn - 1]);

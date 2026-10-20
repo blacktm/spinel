@@ -861,6 +861,10 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       int ohandle = repr_share_rule(c) && comp_ntype(c, id) == TY_STRBUF &&
                     (body_ty == TY_STRING || body_ty == TY_STRBUF);
       if (ohandle) body_ty = TY_STRBUF;
+      /* a bare break bound to the splice answers nil: the carrier is boxed,
+         set to nil before the body runs */
+      int bare_break = ie_block_has_bare_break(c, blk_body);
+      if (bare_break) { body_ty = TY_POLY; ohandle = 0; }
       int scalar_res = is_scalar_ret(body_ty) && body_ty != TY_VOID && body_ty != TY_NIL && body_ty != TY_UNKNOWN;
       /* a number result that can be nil (the tail's own form: a nil-bit
          ivar write, a nullable read) is held as its oint, which the call
@@ -900,7 +904,9 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       }
       else if (scalar_res) {
         emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
-        buf_printf(g_pre, " _t%d;\n", tres);
+        buf_printf(g_pre, " _t%d%s;", tres, bare_break ? " = sp_box_nil()" : "");
+        if (bare_break) emit_gc_root_tmp(c, body_ty, tres, g_pre);
+        buf_puts(g_pre, "\n");
       }
       /* The arguments are the caller's, so a value that reads self runs
          here, before self switches, into a temp the binds below read:
