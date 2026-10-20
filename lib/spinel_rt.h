@@ -18949,6 +18949,14 @@ static sp_Enumerator *sp_poly_cycle(sp_RbVal v) SP_UNUSED;
 sp_Enumerator *sp_Enumerator_cycle_gen(sp_Enumerator *e);
 static sp_Enumerator *sp_poly_cycle(sp_RbVal v) {
   sp_poly_cycle_recv_chk(v);
+  /* An endless Range never completes its first round: walk it on demand. */
+  if (v.cls_id == SP_BUILTIN_RANGE && ((sp_Range *)v.v.p)->noend &&
+      !((sp_Range *)v.v.p)->fe && ((sp_Range *)v.v.p)->first != INTPTR_MIN) {
+    sp_Enumerator *e = sp_Enumerator_new_from(v);
+    e->meth = SPL("cycle"); e->size = sp_box_float(INFINITY);
+    e->has_src = TRUE;   /* it inspects as the Range's own */
+    return e;
+  }
   /* a generator or endless Enumerator is cycled as it is pulled: draining
      it first never returns for an endless one */
   if (v.cls_id == SP_BUILTIN_ENUMERATOR &&

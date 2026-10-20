@@ -160,6 +160,10 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (object_reopen_answers(c, "Range", id, out)) return 1;
     { *out = TY_UNKNOWN; return 1; }
   }
+  /* An endless Integer Range cycles as it is read, without an Array hop. */
+  if (rt == TY_RANGE && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      sp_streq(name, "cycle") && range_lit_endless(c, recv))
+    { *out = TY_ENUMERATOR; return 1; }
   /* endless literal range: size is the Float infinity; take/first with a
      count materialize just the counted prefix (nothing else can) */
   /* (1..5.5): the end readers answer the Float the caller wrote; the integer
