@@ -1363,6 +1363,8 @@ static const BuiltinOp bop_rows[] = {
   { TY_IO, "==",             0, 127, BF_ANY, TY_BOOL,     BOPE_NONE },
   { TY_IO, "equal?",         0, 127, BF_ANY, TY_BOOL,     BOPE_NONE },
   { TY_IO, "eql?",           0, 127, BF_ANY, TY_BOOL,     BOPE_NONE },
+  { TY_IO, "external_encoding", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE, "sp_File_external_encoding($r)", TY_UNKNOWN },
+  { TY_IO, "external_encoding", 0, 127, BF_ANY, TY_POLY, BOPE_NONE },
   { TY_IO, "binmode?",       0,   0, BF_ANY, TY_BOOL,     BOPE_TEMPLATE, "sp_File_binmode_p($r)", TY_UNKNOWN },
   { TY_IO, "binmode?",       0, 127, BF_ANY, TY_BOOL,     BOPE_NONE },
   { TY_IO, "close_on_exec?", 0,   0, BF_ANY, TY_BOOL,     BOPE_TEMPLATE, "sp_File_close_on_exec_p($r)", TY_UNKNOWN },

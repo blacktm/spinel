@@ -1644,3 +1644,26 @@ else {
   buf[out] = 0;
   char *r = sp_str_alloc(out); memcpy(r, buf, out); free(buf); return r;
 }
+/* IO encoding metadata survives close. An unspecified writable stream has
+   no external encoding; after close it uses the default, as CRuby does. */
+sp_RbVal sp_File_external_encoding(sp_File *f) {SP_GC_ROOT(f);
+  if (!f) sp_nil_recv("external_encoding");
+  const char *mode = f->mode ? f->mode : "r";
+  if (strcmp(mode, "stat") == 0 || strcmp(mode, "lstat") == 0)
+    sp_raise_poly_nomethod("external_encoding", sp_box_obj(f, SP_BUILTIN_IO));
+  /* #set_encoding's choice first: 1 UTF-8, 2 ASCII-8BIT (sp_io.h) */
+  if (f->ext_enc) return sp_box_encoding(f->ext_enc == 2 ? sp_encoding_binary() : sp_encoding_utf8());
+  if (f->bin_flag || f->is_sock) return sp_box_encoding(sp_encoding_binary());
+  const char *enc = strchr(mode, ':');
+  if (enc && enc[1]) {
+    if (strncasecmp(enc + 1, "BOM|", 4) == 0) enc += 4;
+    const char *end = strchr(enc + 1, ':');
+    const char *name = sp_str_from_bytes(enc + 1, end ? (size_t)(end - enc - 1) : strlen(enc + 1));
+    SP_GC_ROOT_STR(name);
+    return sp_encoding_find(sp_box_str(name));
+  }
+  if (strchr(mode, 'b')) return sp_box_encoding(sp_encoding_binary());
+  if (!f->closed && (mode[0] == 'w' || mode[0] == 'a' || strchr(mode, '+')))
+    return sp_box_nil();
+  return sp_box_encoding(sp_encoding_utf8());
+}

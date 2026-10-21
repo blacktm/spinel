@@ -572,6 +572,13 @@ still works.
   preserving its returned String's identity. Use a literal block. Literal blocks,
   symbol-to-proc forms that desugar to one, and user-owned methods still compile.
 
+- **IO external encoding** -- no-argument `external_encoding` on typed
+  fd-backed IO/File handles returns a boxed Encoding (or nil for an open
+  writable stream with no explicit encoding). It uses the existing binary
+  flag and open-mode metadata, including explicit external encoding names,
+  and remains callable after close. Existing global Encoding default and
+  transcoding restrictions are unchanged.
+
 - **Frozen literals** -- explicit `.freeze` then mutation raises `FrozenError`,
   including `delete`, `clear`, and `[]=` on a Hash read from a mixed container,
   matching CRuby.

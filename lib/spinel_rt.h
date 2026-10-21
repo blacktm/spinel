@@ -1273,6 +1273,7 @@ sp_StrArray *sp_file_readlines_sep(const char *path, const char *sep, sp_bool ch
 const char *sp_File_readline_sep(sp_File *f, const char *sep, sp_int limit, sp_bool chomp);
 /* IO#getc: one (UTF-8) character, nil (NULL) at EOF */
 const char *sp_File_getc(sp_File *f);
+sp_RbVal sp_File_external_encoding(sp_File *f);
 const char *sp_File_readchar(sp_File *f);
 sp_oint sp_File_getbyte(sp_File *f);   /* IO#getbyte: nil at EOF */
 /* IO#ungetc: push back the (first byte of the) argument */
@@ -2162,7 +2163,7 @@ static sp_bool sp_io_responds(sp_File *f, const char *m, int typed) {
     NULL };
   static const char *const iom_t[] = { "autoclose=", "autoclose?", "binmode",
     "binmode?", "close_on_exec=", "close_on_exec?", "close_read", "close_write",
-    "each_byte", "each_char", "each_codepoint", "each_line", "eof", "getbyte",
+    "each_byte", "each_char", "each_codepoint", "each_line", "eof", "external_encoding", "getbyte",
     "getc", "lineno", "lineno=", "pid", "readbyte", "readchar", "reopen", "sysread",
     "syswrite", "to_io", "ungetbyte", "ungetc", "wait", NULL };
   static const char *const iom_b[] = { "collect_concat", "count", "detect",
