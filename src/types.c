@@ -49,8 +49,9 @@ static const PolyFace ty_poly_face_tbl[] = {
   {"step", PF_INT | PF_FLOAT, 0, 0, 0},
   /* A Range of each kind owns step and bsearch with a block: unboxed to its
      own by-value struct, the typed emitter walks it. A blockless step(n)
-     takes the row above; blockless bsearch answers an Enumerator no typed
-     emitter builds.
+     takes the row above; blockless bsearch answers an Enumerator, which an
+     Integer Range's typed emitter builds (its TY_RANGE row) and this boxed
+     dispatch does not.
      An Array owns bsearch too: a row for the name decides every receiver
      kind, so leaving it out made a boxed Array's bsearch a NoMethodError.
      A String Range's bsearch is its TypeError, raised by its own row. */

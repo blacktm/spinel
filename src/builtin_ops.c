@@ -822,6 +822,8 @@ static const BuiltinOp bop_rows[] = {
   { TY_RANGE, "clone", 0, 0, BF_ANY, TY_RANGE, BOPE_TEMPLATE, "$r", 0, 0, 0, 1 },
   { TY_RANGE, "clone", 1, 1, BF_ANY, TY_RANGE, BOPE_RANGE_CLONE, NULL, 0, 0, 0, 1 },
   { TY_RANGE, "freeze", 0, 0, BF_ANY, TY_RANGE, BOPE_RANGE_FREEZE, NULL, 0, 0, 0, 1 },
+  /* without a block, the search waits for its predicate in an Enumerator */
+  { TY_RANGE, "bsearch", 0, 0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_range_bsearch_enum(sp_box_range($r))", 0, 0, 0, 3 },  /* stage 3: emit_blockless_enumerator */
 
   /* String range ("a".."e"): the endpoints answer natively (with a count,
      the materialized prefix); every traversal rides the element array

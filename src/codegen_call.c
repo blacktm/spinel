@@ -20756,11 +20756,12 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
     if (csl) buf_puts(b, "; })");
     return 1;
   }
-  /* arr.cycle with no count and no block, and arr.slice_before(pat) /
-     slice_after(pat) with no block: stage-3 builtin-op rows (builtin_ops.c).
+  /* arr.cycle with no count and no block, arr.slice_before(pat) /
+     slice_after(pat) with no block, and an Integer Range's blockless
+     bsearch: stage-3 builtin-op rows (builtin_ops.c).
      A bounded consumer of the cycle (first(n) / take(n)) is served by its own
      arm before this one (#3758). */
-  if (recv >= 0 && ty_is_array(comp_ntype(c, recv)) &&
+  if (recv >= 0 && (ty_is_array(comp_ntype(c, recv)) || comp_ntype(c, recv) == TY_RANGE) &&
       emit_builtin_op_stage(c, id, recv, comp_ntype(c, recv), name, 3, b)) return 1;
   /* arr.cycle(n) with no block -> a materialized Enumerator of the elements
      repeated n times (the unbounded blockless form stays a loud reject). */

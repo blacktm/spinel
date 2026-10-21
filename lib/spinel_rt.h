@@ -18846,6 +18846,45 @@ static sp_RbVal sp_poly_range_endless_step(sp_RbVal v, sp_RbVal step) {
   if (v.cls_id == SP_BUILTIN_RANGE) return sp_range_endless_step_v(sp_box_int(((sp_Range *)v.v.p)->first), step);
   return sp_range_endless_step_v(sp_box_float(((sp_FloatRange *)v.v.p)->first), step);
 }
+/* A Range search is driven by successive yield results, not an Array walk.
+   Keep only its bounds: large intervals need no materialized member Array. */
+typedef struct { int64_t lo, hi; sp_bool floating, empty; } sp_range_bsearch_cap;
+static void sp_range_bsearch_gen(sp_Fiber *f) {
+  sp_range_bsearch_cap *cap = (sp_range_bsearch_cap *)f->user_data;
+  int64_t lo = cap->lo, hi = cap->hi;
+  sp_RbVal found = sp_box_nil(); SP_GC_ROOT_RBVAL(found);
+  while (!cap->empty && lo <= hi) {
+    /* CRuby bisects the open interval (lo - 1, hi + 1). Across zero its
+       midpoint truncates toward zero; otherwise it rounds down. */
+    int64_t mid = (lo & hi) + ((lo ^ hi) >> 1);
+    if (lo <= 0 && hi >= -1 && mid < 0 && ((lo ^ hi) & 1)) mid++;
+    sp_RbVal probe = cap->floating ? sp_box_float(sp_key2f(mid)) : sp_box_int((sp_int)mid);
+    sp_RbVal value = sp_Fiber_yield(probe); SP_GC_ROOT_RBVAL(value);
+    /* the block's answer, read as the blocked bsearch reads it */
+    int smaller = 0, sat = 0;
+    if (sp_bsearch_answer(value, &smaller, &sat)) { found = probe; break; }
+    if (sat) found = probe;
+    sp_bool down = smaller;
+    if (down) { if (mid == INT64_MIN) break; hi = mid - 1; }
+    else { if (mid == INT64_MAX) break; lo = mid + 1; }
+  }
+  f->yielded_value = found;
+}
+static sp_Enumerator *sp_range_bsearch_enum(sp_RbVal source) {
+  SP_GC_ROOT_RBVAL(source);
+  sp_range_bsearch_cap *cap = (sp_range_bsearch_cap *)sp_gc_alloc(sizeof *cap, NULL, NULL);
+  SP_GC_ROOT(cap);
+  sp_Range *r = (sp_Range *)source.v.p;
+  cap->floating = r->fe;
+  cap->lo = r->fe ? sp_f2key((sp_float)r->first) : r->first;
+  cap->hi = r->fe ? sp_f2key(r->fend) : r->last;
+  cap->empty = sp_range_excl_end(*r) && cap->hi == INT64_MIN;
+  if (sp_range_excl_end(*r) && !cap->empty) cap->hi--;
+  sp_Enumerator *e = sp_Enumerator_new_gen(sp_range_bsearch_gen, cap, sp_box_nil()); SP_GC_ROOT(e);
+  sp_enum_with_src(e, source, SPL("bsearch"));   /* inspects as the Range's */
+  e->is_bsearch = TRUE;
+  return e;
+}
 /* Blockless Kernel#loop: an infinite Enumerator yielding nil forever (#3236).
    Defined out-of-line in sp_cold.c (one linked copy, not per generated TU). */
 sp_Enumerator *sp_loop_enum(void);
@@ -20111,6 +20150,22 @@ sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);
 #else
 sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args) { if (!p || !p->fn) return 0; _sp_proc_blk = NULL; if (!args) { sp_int noargs[16] = {0}; return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, 0, noargs); } return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, argc, args); }
 #endif
+/* Range#bsearch's generator takes each predicate result as its next resume. */
+static sp_RbVal sp_range_bsearch_each_proc(sp_Enumerator *e, sp_Proc *blk) {
+  SP_GC_ROOT(e); SP_GC_ROOT(blk);
+  if (!blk) return sp_box_nil();
+  sp_Fiber *f = sp_Fiber_new(e->gen); SP_GC_ROOT(f);
+  sp_gc_wb((void *)f); f->user_data = e->gen_cap;
+  sp_RbVal answer = sp_box_nil(); SP_GC_ROOT_RBVAL(answer);
+  for (;;) {
+    sp_RbVal item = sp_Fiber_resume(f, answer); SP_GC_ROOT_RBVAL(item);
+    if (!sp_Fiber_alive(f)) return item;
+    sp_int slots[16] = {0};
+    _sp_proc_poly_args[0] = item; _sp_proc_poly_ret = sp_box_nil();
+    sp_proc_call(blk, 1, slots);
+    answer = _sp_proc_poly_ret;
+  }
+}
 /* Enumerator#each on Array#bsearch runs the saved search with the consumer's
    block as its predicate, returning the selected element (or nil). */
 /* One step of a bsearch Enumerator's walk, as CRuby's rb_ary_bsearch_index
@@ -20132,6 +20187,7 @@ static SP_UNUSED int sp_enum_bsearch_narrow(sp_int *lo, sp_int *hi, sp_int mid, 
 /* `e.each { }` on a bsearch Enumerator, its block a proc: the element the
    search ends at, or nil */
 static sp_RbVal sp_enum_bsearch_each_proc(sp_Enumerator *e, sp_Proc *blk) {
+  if (e && e->is_bsearch && e->gen) return sp_range_bsearch_each_proc(e, blk);
   SP_GC_ROOT(e); SP_GC_ROOT(blk);
   if (!e || !e->items || !blk) return sp_box_nil();
   sp_int lo = 0, hi = e->items->len;

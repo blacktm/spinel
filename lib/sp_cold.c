@@ -3718,7 +3718,7 @@ static sp_RbVal sp_enum_bsearch_next(sp_Enumerator *e) {
   return e->items->data[e->bsearch_mid];
 }
 sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
-  if (e->is_bsearch) {
+  if (e->is_bsearch && !e->gen) {
     if (e->peeked) { e->peeked = FALSE; e->bsearch_waiting = TRUE; return e->peek_val; }
     return sp_enum_bsearch_next(e);
   }
@@ -3735,7 +3735,7 @@ sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
   return e->items->data[e->cursor++];
 }
 sp_RbVal sp_Enumerator_peek(sp_Enumerator *e) {SP_GC_ROOT(e); sp_gc_wb((void*)e);
-  if (e->is_bsearch) {
+  if (e->is_bsearch && !e->gen) {
     if (!e->peeked) {
       sp_enum_bsearch_advance(e);
       if (e->bsearch_lo > e->bsearch_hi) sp_raise_stop_iteration(e->bsearch_result);

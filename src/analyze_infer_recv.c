@@ -160,6 +160,12 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (object_reopen_answers(c, "Range", id, out)) return 1;
     { *out = TY_UNKNOWN; return 1; }
   }
+  /* the blockless Enumerator rows of an Integer Range (stage 3, which
+     emit_blockless_enumerator emits): blockless bsearch */
+  if (rt == TY_RANGE) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->stage == 3 && op->result != TY_UNKNOWN) { *out = op->result; return 1; }
+  }
   /* endless literal range: size is the Float infinity; take/first with a
      count materialize just the counted prefix (nothing else can) */
   /* (1..5.5): the end readers answer the Float the caller wrote; the integer
