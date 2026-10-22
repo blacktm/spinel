@@ -1326,8 +1326,13 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         if (node_is_oint(c, id)) buf_printf(b, "sp_stat_field(_t%d, %d); })", tio2, k);
         else buf_printf(b, "sp_oint_arg(sp_stat_field(_t%d, %d)); })", tio2, k);
       }
-      else if (is_path_reader(name))
-        buf_printf(b, "sp_File_path(_t%d); })", tio2);
+      /* path / to_path through the TY_IO row, over the unboxed handle */
+      else if (is_path_reader(name)) {
+        char tr[32];
+        snprintf(tr, sizeof tr, "_t%d", tio2);
+        emit_builtin_op_text(c, id, recv, TY_IO, name, tr, b);
+        buf_puts(b, "; })");
+      }
       /* the limit and separator as the typed arm reads them, where they
          were dropped and the whole stream read by lines */
       else if (sp_streq(name, "readlines") && argc > 0 && !io_line_args_spread(nt, argv, argc)) {

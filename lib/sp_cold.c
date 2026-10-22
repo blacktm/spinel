@@ -1753,6 +1753,7 @@ const char *sp_backtick(const char *cmd) {SP_GC_ROOT_STR(cmd);
 }
 
 const char *sp_file_basename(const char *path) {SP_GC_ROOT_STR(path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
   /* CRuby: trailing separators are ignored ("/a/b/" -> "b"); an all-separator
      path is "/" (#2784). */
   size_t end = strlen(path);
@@ -1793,6 +1794,7 @@ const char *sp_file_basename2(const char *path, const char *suffix) {SP_GC_ROOT_
 }
 
 const char *sp_file_extname(const char *path) {SP_GC_ROOT_STR(path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
   /* (the extension is copied out of the path after the copy allocates) */
   const char *base = strrchr(path, '/');
   base = base ? base + 1 : path;
@@ -3212,6 +3214,7 @@ sp_bool sp_file_zero(const char *path) {
   return st.st_size == 0;
 }
 const char *sp_file_dirname(const char *path) {SP_GC_ROOT_STR(path);
+  if (!path) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
   const char *s = strrchr(path, '/');
   if (!s) { char *r = sp_str_alloc(1); r[0] = '.'; r[1] = 0; return r; }
   if (s == path) { char *r = sp_str_alloc(1); r[0] = '/'; r[1] = 0; return r; }

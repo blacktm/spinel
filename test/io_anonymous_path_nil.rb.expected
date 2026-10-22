@@ -1,0 +1,14 @@
+[nil, nil, nil, nil]
+true
+"none"
+[nil, nil]
+nil
+[:basename, "no implicit conversion of nil into String"]
+[:dirname, "no implicit conversion of nil into String"]
+[:extname, "no implicit conversion of nil into String"]
+[:split, "no implicit conversion of nil into String"]
+["<STDOUT>", "<STDIN>"]
+[true, true]
+true
+""
+""

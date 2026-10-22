@@ -1426,6 +1426,14 @@ static inline const char *sp_File_read_n(sp_File *f, sp_int n) {
   return s;
 }
 static inline const char *sp_File_path(sp_File *f) { return f && f->path ? f->path : sp_str_empty; }
+/* IO#path / #to_path: nil for a handle with no path (a pipe, a TCP socket),
+   as CRuby's, where sp_File_path's "" stays for the runtime's own path users.
+   A UNIX-domain socket answers its address, "" when it has none. */
+static inline const char *sp_File_path_or_nil(sp_File *f) {
+  if (!f) return NULL;
+  if (f->path || !f->is_sock || !f->mode || strncmp(f->mode, "unix", 4) != 0) return f->path;
+  return sp_str_empty;
+}
 /* sp_file_join: moved to lib/sp_cold.c */
 const char *sp_file_join(const char **parts, int n);
 static inline sp_StrArray *sp_File_readlines(sp_File *f) {
