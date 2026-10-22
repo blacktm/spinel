@@ -1855,6 +1855,15 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       !an_user_defines_or_reads(c, name))
     { *out = (is_each_window(name))
              ? TY_ENUMERATOR : TY_POLY_ARRAY; return 1; }   /* as the typed array answers */
+  /* transform_keys! / transform_values! without a block on a boxed value:
+     the live Enumerator the Hash row states (emit_hash_transform_enumerator).
+     The row is read, not recorded: a recorded Hash row would send the boxed
+     call to the typed Hash arms. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+      is_hash_bang_transform(name) && !nt_safe_nav(nt, id) && !an_user_defines_or_reads(c, name)) {
+    const BuiltinOp *op = bop_find(BOP_ANY_HASH, name, 0, 0);
+    if (op) { *out = op->result; return 1; }
+  }
   /* A blockless `each` / `each_entry` / `each_with_index` on a boxed receiver
      (an Array read out of a container, a block parameter) is an external
      Enumerator, exactly as it is for a typed receiver. Without a type it

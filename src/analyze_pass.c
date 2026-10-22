@@ -2975,6 +2975,24 @@ static int widen_boxed_ivar_array_sources(Compiler *c, const LWIndex *ivw, int c
   }
   return changed;
 }
+/* A default proc can produce any value, so its hash needs a boxed slot. */
+static int widen_hash_default_proc(Compiler *c, const NodeTable *nt, int recv) {
+  /* installing a default proc needs the poly-valued variant (the proc
+     can return any value, and only those variants carry the dproc
+     slot): widen a typed-value hash local accordingly (#2371). */
+  if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) return 0;
+  const char *dpnm = nt_str(nt, recv, "name");
+  Scope *dpsc = dpnm ? comp_scope_of(c, recv) : NULL;
+  LocalVar *dplv = dpsc ? scope_local(dpsc, dpnm) : NULL;
+  if (dplv && !dplv->is_param && !dplv->is_block_param && ty_is_hash(dplv->type)) {
+    TyKind kt2 = ty_hash_key(dplv->type);
+    TyKind want2 = kt2 == TY_SYMBOL ? TY_SYM_POLY_HASH
+           : kt2 == TY_STRING ? TY_STR_POLY_HASH : TY_POLY_POLY_HASH;
+    if (dplv->type != want2) { lv_set_type(dplv, want2); return 1; }
+  }
+  return 0;
+}
+
 static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb, int *fb, LWIndex lw_ix, LWIndex ivw_ix) {
   int changed = 0;
   /* Fold container usage into the local type so an empty `[]` / `{}` gets
@@ -3073,22 +3091,15 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
            did -- and each stopped compiling. */
         is_push = 1; vt = splice_incoming_elem(c, argv[0]);
       }
+      else if (an == 0 && nt_ref(nt, id, "block") < 0 && recv >= 0 && is_hash_bang_transform(name)) {
+        /* A deferred transform can store any key/value, including nil. Widen
+           the original storage now, rather than mutating a boxed copy later. */
+        changed |= widen_hash_transform_origin(c, recv);
+        changed |= pivs_widen_hash_transform(c, id);
+        continue;
+      }
       else if (name && sp_streq(name, "default_proc=") && an == 1) {
-        /* installing a default proc needs the poly-valued variant (the proc
-           can return any value, and only those variants carry the dproc
-           slot): widen a typed-value hash local accordingly (#2371). */
-        if (recv < 0) continue;
-        const char *dpty = nt_type(nt, recv);
-        if (!dpty || !sp_streq(dpty, "LocalVariableReadNode")) continue;
-        const char *dpnm = nt_str(nt, recv, "name");
-        Scope *dpsc = dpnm ? comp_scope_of(c, recv) : NULL;
-        LocalVar *dplv = dpsc ? scope_local(dpsc, dpnm) : NULL;
-        if (dplv && !dplv->is_param && !dplv->is_block_param && ty_is_hash(dplv->type)) {
-          TyKind kt2 = ty_hash_key(dplv->type);
-          TyKind want2 = kt2 == TY_SYMBOL ? TY_SYM_POLY_HASH
-                       : kt2 == TY_STRING ? TY_STR_POLY_HASH : TY_POLY_POLY_HASH;
-          if (dplv->type != want2) { lv_set_type(dplv, want2); changed = 1; }
-        }
+        changed |= widen_hash_default_proc(c, nt, recv);
         continue;
       }
       else if (name && sp_streq(name, "replace") && an == 1) {
@@ -5575,7 +5586,7 @@ static int bind_dynamic_new_initializers(Compiler *c, int call_id) {
 
 /* Unify a call's argument types into method scope `mi`'s parameters. */
 /* 1 iff `v` builds a new hash: a literal or `Hash.new`. */
-static int is_fresh_hash(Compiler *c, int v) {
+int is_fresh_hash(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
   if (nt_kind(nt, v) == NK_HashNode) return 1;
@@ -5590,6 +5601,12 @@ static int want_poly_hash(Compiler *c, int v) {
   if (c->hash_want[v] == TY_POLY_POLY_HASH) return 0;
   comp_set_hash_want(c, v, TY_POLY_POLY_HASH);
   return 1;
+}
+
+/* A deferred transform needs arbitrary storage even for Hash.new. Its
+   existing hash_want slot makes inference and construction use PolyPoly. */
+int widen_hash_transform_origin(Compiler *c, int v) {
+  return is_fresh_hash(c, v) ? want_poly_hash(c, v) : widen_hash_arg_for_store(c, v, TY_POLY, TY_POLY);
 }
 
 int method_value_leaves(Compiler *c, int mi, int *out, int cap);
@@ -7721,7 +7738,6 @@ static int cext_pin_array_producer(Compiler *c, int v) {
   return 1;
 }
 
-static int is_fresh_hash(Compiler *c, int v);
 /* A local of no type yet that only `{}` / `Hash.new(...)` builds: an empty
    Hash all the same, though its read carries no type (a `Hash.new(default)`
    decides no key type, and nothing in the caller stores into it). */

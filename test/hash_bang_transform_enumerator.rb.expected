@@ -1,0 +1,5 @@
+[Enumerator, 1, [:a], {nil => 1}]
+[Enumerator, 2, {a: 1, b: 2}]
+[true, {a: "1", b: "2"}]
+[:a, {a: 1}]
+[true, {false => 1}]

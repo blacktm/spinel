@@ -9277,16 +9277,20 @@ int poly_ivar_set_class(Compiler *c, int k) {
    method's name. A node is in one list at most, once, so one `next`
    serves. */
 enum { PX_BLOCK_PARAM, PX_SYMBOL, PX_BLOCK_WRITE, PX_SUPER, PX_N };
+/* A query's walk mode (hash_mode): 0 classes, 1 Hash origins, 2 callables,
+   3 a blockless bang transform's Hash origins, which also follow Hash.new
+   and freeze. Each mode has its own memo slot per call. */
+enum { PIVS_CLASSES, PIVS_HASHES, PIVS_CALLABLES, PIVS_TRANSFORM_HASHES, PIVS_MODES };
 typedef struct PivsFacts {
   struct { int ok; char *set; int *cls, ncls; int *hash, nhash, typed, sweep, builtin;
            int walked, has_class; char *cvals; } *memo;
   int *memo_at;             /* per node: its call's memo entry + 1, or 0 */
-                           /* three slots: classes, Hash origins, callables */
+                           /* one slot per walk mode (PIVS_MODES) */
   struct { int call; uint64_t done[4]; } *seen;
   int nmemo, cmemo, memo_n, memo_count;
   unsigned memo_ver;
   int query, sweep, active;  /* active: the memo entry the query fills, -1 for none */
-  int hash_mode;            /* the query's: 0 classes, 1 Hash origins, 2 callables */
+  int hash_mode;            /* the query's walk mode (PIVS_CLASSES ...) */
   int init_args;            /* the query follows an initialize parameter through the arguments
                                of the `K.new` calls that reach it (presence queries) */
   int stores_settled, stores_held, stores_widened;
@@ -9927,6 +9931,11 @@ static int pivs_branches(Compiler *c, int v, char *set, int depth, int elems) {
     }
     case NK_CallNode: {
       if (!c->pivs->hash_mode) return -1;
+      /* a transform's walk follows Hash.new and Object#freeze itself
+         (pivs_value_uncached), with no program-defined method target */
+      const char *name = nt_str(nt, v, "name");
+      if (!elems && c->pivs->hash_mode == PIVS_TRANSFORM_HASHES &&
+          ((sp_streq(name, "freeze") && !an_user_defines_or_reads(c, name)) || is_fresh_hash(c, v))) return -1;
       int ms[CPT_MAX], vals[64], nm = cplan_targets(c, v, ms, CPT_MAX);
       c->pivs->memo[c->pivs->active].typed = 1;
       if (nm <= 0) return nm < 0 ? 0 : -1;
@@ -10023,7 +10032,8 @@ static int pivs_value_uncached(Compiler *c, int v, char *set, int depth) {
   switch (nt_kind(nt, v)) {
     case NK_HashNode:
       pivs_note_builtin(c);
-      if (c->pivs->hash_mode == 1 && !c->pivs->seen[v].done[0]) {
+      if ((c->pivs->hash_mode == PIVS_HASHES || c->pivs->hash_mode == PIVS_TRANSFORM_HASHES) &&
+          !c->pivs->seen[v].done[0]) {
         int m = c->pivs->active, n = c->pivs->memo[m].nhash;
         if (n == 64) return 0;
         c->pivs->memo[m].hash[n] = v; c->pivs->memo[m].nhash++;
@@ -10053,6 +10063,15 @@ static int pivs_value_uncached(Compiler *c, int v, char *set, int depth) {
       if (a >= 0) nt_arr(nt, a, "arguments", &ac);
       if (!un || r < 0) return 0;
       if (sp_streq(un, "new") && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode)) {
+        /* a transform's Hash.new is an origin of its own, as a literal is */
+        if (c->pivs->hash_mode == PIVS_TRANSFORM_HASHES && is_fresh_hash(c, v)) {
+          int hc = comp_class_index(c, "Hash");
+          if (hc >= 0 && comp_cmethod_in_chain(c, hc, "new", NULL) >= 0) return 0;
+          int m = c->pivs->active, n = c->pivs->memo[m].nhash;
+          if (n == 64) return 0;
+          c->pivs->memo[m].hash[n] = v; c->pivs->memo[m].nhash++;
+          return 1;
+        }
         if (c->pivs->hash_mode && sp_streq(nt_str(nt, r, "name"), "Hash")) return 0;
         int ci = comp_class_index(c, nt_str(nt, r, "name"));
         if (ci < 0) {
@@ -10077,7 +10096,8 @@ static int pivs_value_uncached(Compiler *c, int v, char *set, int depth) {
         const int *fa = nt_arr(nt, a, "arguments", &ac);
         return pivs_elems(c, r, set, depth + 1) && pivs_value(c, fa[1], set, depth + 1);
       }
-      if ((sp_streq(un, "itself") || sp_streq(un, "dup") || sp_streq(un, "clone")) && ac == 0)
+      if ((sp_streq(un, "itself") || sp_streq(un, "dup") || sp_streq(un, "clone") ||
+           (c->pivs->hash_mode == PIVS_TRANSFORM_HASHES && sp_streq(un, "freeze"))) && ac == 0)
         return pivs_value(c, r, set, depth + 1);
       return 0;
     }
@@ -10126,7 +10146,7 @@ static PivsFacts *pivs_ready(Compiler *c) {
     free(f->memo_at); free(f->seen);
     f->nmemo = f->query = 0; f->memo_n = c->nclasses; f->memo_count = c->nt->count;
     f->memo_ver = c->nt->version;
-    f->memo_at = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1) * 3, sizeof *f->memo_at);
+    f->memo_at = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1) * PIVS_MODES, sizeof *f->memo_at);
     f->seen = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1), sizeof *f->seen);
     if (!f->memo_at || !f->seen) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   }
@@ -10137,7 +10157,7 @@ static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n,
   PivsFacts *f = pivs_ready(c);
   if (cls) { *cls = NULL; *n = 0; }
   if (call < 0 || call >= f->memo_count) return NULL;
-  int m = f->memo_at[(size_t)call * 3 + hashes] - 1;
+  int m = f->memo_at[(size_t)call * PIVS_MODES + hashes] - 1;
   if (m < 0) {
     if (f->nmemo == f->cmemo) {
       f->cmemo = f->cmemo ? f->cmemo * 2 : 16;
@@ -10146,7 +10166,7 @@ static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n,
       f->memo = nm;
     }
     m = f->nmemo++;
-    f->memo_at[(size_t)call * 3 + hashes] = m + 1;
+    f->memo_at[(size_t)call * PIVS_MODES + hashes] = m + 1;
     memset(&f->memo[m], 0, sizeof f->memo[m]);
     f->memo[m].sweep = -1;
     f->memo[m].set = (char *)calloc((size_t)(c->nclasses > 0 ? c->nclasses : 1), 1);
@@ -10155,7 +10175,7 @@ static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n,
     if (hashes) f->memo[m].hash = malloc(64 * sizeof *f->memo[m].hash);
     if (hashes && !f->memo[m].hash) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   }
-  if (f->memo[m].sweep < 0 || (hashes == 1 && f->memo[m].typed && f->memo[m].sweep != f->sweep)) {
+  if (f->memo[m].sweep < 0 || ((hashes == PIVS_HASHES || hashes == PIVS_TRANSFORM_HASHES) && f->memo[m].typed && f->memo[m].sweep != f->sweep)) {
     f->memo[m].sweep = f->sweep; f->memo[m].nhash = 0; f->memo[m].typed = 0; f->memo[m].builtin = 0;
     f->hash_mode = hashes; f->active = m; f->query++;
     memset(f->memo[m].set, 0, (size_t)(c->nclasses > 0 ? c->nclasses : 1));
@@ -10195,7 +10215,7 @@ int pivs_callables(Compiler *c, int call, int *out, int cap) {
   if (!set) return -1;
   for (int k = 0; k < c->nclasses; k++) if (set[k]) return -1;
   PivsFacts *f = c->pivs;
-  int m = f->memo_at[(size_t)call * 3 + 2] - 1;
+  int m = f->memo_at[(size_t)call * PIVS_MODES + PIVS_CALLABLES] - 1;
   if (f->memo[m].nhash > cap) return -1;
   memcpy(out, f->memo[m].hash, sizeof(int) * (size_t)f->memo[m].nhash);
   return f->memo[m].nhash;
@@ -10251,7 +10271,7 @@ const char *poly_recv_class_values(Compiler *c, int call) {
   if (call < 0 || call >= c->nt->count) return NULL;
   (void)pivs_call_set(c, call, NULL, NULL, 0);
   PivsFacts *f = c->pivs;
-  int m = f->memo_at[(size_t)call * 3] - 1;
+  int m = f->memo_at[(size_t)call * PIVS_MODES] - 1;
   return m >= 0 && f->memo[m].walked ? f->memo[m].cvals : NULL;
 }
 /* See analyze_internal.h. */
@@ -10284,7 +10304,7 @@ int call_reaches_program_method(Compiler *c, int call) {
 int poly_recv_builtin(Compiler *c, int call) {
   if (!pivs_call_set(c, call, NULL, NULL, 0)) return 1;
   PivsFacts *f = c->pivs;
-  return f->memo[f->memo_at[(size_t)call * 3] - 1].builtin;
+  return f->memo[f->memo_at[(size_t)call * PIVS_MODES] - 1].builtin;
 }
 /* See analyze.h. */
 int pivs_value_classes(Compiler *c, int v, int elems, char *set) {
@@ -10777,10 +10797,55 @@ static int infer_hash_aset_call(Compiler *c, int id) {
   PivsFacts *f = pivs_facts(c);
   if (!f->stores_settled) { f->stores_held = 1; return 0; }
   if (!pivs_call_set(c, id, NULL, NULL, 1)) return 0;
-  int m = f->memo_at[(size_t)id * 3 + 1] - 1, changed = 0;
+  int m = f->memo_at[(size_t)id * PIVS_MODES + PIVS_HASHES] - 1, changed = 0;
   for (int i = 0; i < f->memo[m].nhash; i++) changed |= widen_hash_arg_for_store(c, f->memo[m].hash[i], hk, hv);
   f->stores_widened += changed;
   return changed;
+}
+
+/* A blockless bang transform can receive any #feed / block result. Use the
+   same bounded source walk as []= to widen Hashes reached through a box. */
+int pivs_widen_hash_transform(Compiler *c, int call) {
+  int recv = nt_ref(c->nt, call, "receiver");
+  if (recv < 0 || (infer_type(c, recv) != TY_POLY && !ty_is_hash(infer_type(c, recv)))) return 0;
+  PivsFacts *f = pivs_facts(c);
+  if (!f->stores_settled) { f->stores_held = 1; return 0; }
+  if (!pivs_call_set(c, call, NULL, NULL, PIVS_TRANSFORM_HASHES)) return 0;
+  int m = f->memo_at[(size_t)call * PIVS_MODES + PIVS_TRANSFORM_HASHES] - 1, changed = 0;
+  for (int i = 0; i < f->memo[m].nhash; i++)
+    changed |= widen_hash_transform_origin(c, f->memo[m].hash[i]);
+  f->stores_widened += changed;
+  return changed;
+}
+/* 1 iff every Hash a boxed transform receiver can be was traced and widened */
+static int pivs_hash_transform_storage(Compiler *c, int call) {
+  if (!pivs_call_set(c, call, NULL, NULL, PIVS_TRANSFORM_HASHES)) return 0;
+  PivsFacts *f = c->pivs;
+  int m = f->memo_at[(size_t)call * PIVS_MODES + PIVS_TRANSFORM_HASHES] - 1;
+  for (int i = 0; i < f->memo[m].nhash; i++)
+    if (infer_type(c, f->memo[m].hash[i]) != TY_POLY_POLY_HASH) return 0;
+  return 1;
+}
+/* A blockless transform_keys! / transform_values! on a Hash or a boxed
+   value, which analysis typed as the live Enumerator. */
+int an_hash_transform_enum(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver");
+  if (nt_kind(nt, id) != NK_CallNode || recv < 0 || nt_ref(nt, id, "block") >= 0 ||
+      nt_ref(nt, id, "arguments") >= 0 || !is_hash_bang_transform(nt_str(nt, id, "name"))) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  return ty_is_hash(rt) || (rt == TY_POLY && comp_ntype(c, id) == TY_ENUMERATOR);
+}
+/* Each such call whose Hash cannot hold any key and value it may store:
+   a typed receiver that is not PolyPoly, or a boxed one whose Hashes were
+   not all traced and widened. The plan refuses it (feature_limit). */
+void mark_hash_transform_storage(Compiler *c) {
+  NT_FOREACH_KIND(c->nt, NK_CallNode, id) {
+    if (!an_hash_transform_enum(c, id)) continue;
+    TyKind rt = comp_ntype(c, nt_ref(c->nt, id, "receiver"));
+    if (rt == TY_POLY_POLY_HASH || (rt == TY_POLY && pivs_hash_transform_storage(c, id))) continue;
+    nt_node_set_int((NodeTable *)c->nt, id, "hash_transform_unbounded", 1);
+  }
 }
 
 /* From the re-narrow on, Hash stores through a box decide (above). 1 when

@@ -10394,7 +10394,7 @@ static int desugar_enum_named_call(Compiler *c, int id, NodeTable *nt, const cha
         nt_ref(nt, er, "block") < 0 && nt_ref(nt, er, "receiver") >= 0 &&
         infer_type(c, er) == TY_ENUMERATOR) {
       const char *ern = nt_str(nt, er, "name");
-      if (ern && !sp_streq(ern, "lazy")) {
+      if (ern && !sp_streq(ern, "lazy") && !is_hash_bang_transform(ern)) {
         /* a boxed receiver's to_enum (desugar_to_enum) builds the
            Enumerator and takes no block: with one it is the receiver's
            own each, which answers what each answers */
@@ -52993,6 +52993,7 @@ static void an_phase_reconcile_check(Compiler *c) {
   refuse_string_array_element_mutations(c);
   refuse_string_alias_copies(c);
   refuse_set_identity_members(c);
+  mark_hash_transform_storage(c);
 
   /* Last: the capture pass again, on the settled types. a_block_is_lifted asks
      whether the receiver is poly, and a receiver that widened after the

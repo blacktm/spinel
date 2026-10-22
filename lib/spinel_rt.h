@@ -20204,6 +20204,56 @@ static sp_RbVal sp_enum_bsearch_each_proc(sp_Enumerator *e, sp_Proc *blk) {
   e->peeked = FALSE;
   return found;
 }
+/* Hash bang-transform Enumerators retain the original receiver. Their
+   generator yields before each store, so #feed and an internal consumer's
+   block result become the replacement key/value; #to_a resumes with nil. */
+typedef struct { sp_RbVal hash; int keys; } sp_HashTransformEnum;
+static void sp_hash_transform_enum_scan(void *p) {
+  sp_HashTransformEnum *c = (sp_HashTransformEnum *)p;
+  sp_mark_rbval(c->hash);
+}
+static sp_int sp_hash_transform_enum_size(void *p, sp_int argc, sp_int *args) {
+  (void)argc; (void)args;
+  sp_int n = sp_poly_length(((sp_HashTransformEnum *)p)->hash);
+  _sp_proc_poly_ret = sp_box_int(n);
+  return n;
+}
+static void sp_hash_transform_enum_gen(sp_Fiber *f) {
+  sp_HashTransformEnum *c = (sp_HashTransformEnum *)f->user_data;
+  SP_GC_ROOT(c);
+  sp_RbVal recv = c->hash; SP_GC_ROOT_RBVAL(recv);
+  if (sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
+  sp_PolyArray *pairs = sp_enum_items_from(recv); SP_GC_ROOT(pairs);
+  sp_PolyPolyHash *done = sp_PolyPolyHash_new(); SP_GC_ROOT(done);
+  for (sp_int i = 0; i < pairs->len; i++) {
+    sp_RbVal pair = pairs->data[i]; SP_GC_ROOT_RBVAL(pair);
+    sp_RbVal k = sp_poly_arr_get(pair, 0); SP_GC_ROOT_RBVAL(k);
+    sp_RbVal v = sp_poly_arr_get(pair, 1); SP_GC_ROOT_RBVAL(v);
+    if (!c->keys && !sp_poly_has_key(recv, k)) continue;
+    sp_RbVal result = sp_Fiber_yield(c->keys ? k : sp_poly_index_poly(recv, k));
+    SP_GC_ROOT_RBVAL(result);
+    if (sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
+    if (c->keys) {
+      if (!sp_PolyPolyHash_has_key(done, k)) sp_poly_delete_key(recv, k);
+      sp_poly_set_poly(recv, result, v);
+      sp_PolyPolyHash_set(done, result, sp_box_bool(TRUE));
+    }
+    else sp_poly_set_poly(recv, k, result);
+  }
+  f->yielded_value = recv;
+}
+static sp_Enumerator *sp_hash_transform_enum(sp_RbVal recv, int keys) {
+  SP_GC_ROOT_RBVAL(recv);
+  if (recv.tag != SP_TAG_OBJ || !sp_poly_is_hash_kind(recv.cls_id))
+    sp_raise_nomethod(sp_nomethod_msg(keys ? "transform_keys!" : "transform_values!", recv));
+  sp_HashTransformEnum *c = (sp_HashTransformEnum *)sp_gc_alloc(sizeof(*c), NULL, sp_hash_transform_enum_scan);
+  SP_GC_ROOT(c); c->hash = recv; c->keys = keys;
+  sp_Proc *size = sp_proc_new((void *)sp_hash_transform_enum_size, c, sp_hash_transform_enum_scan);
+  SP_GC_ROOT(size);
+  sp_Enumerator *e = sp_Enumerator_new_gen(sp_hash_transform_enum_gen, c, sp_box_proc(size));
+  return sp_enum_with_src(e, recv, keys ? SPL("transform_keys!") : SPL("transform_values!"));
+}
+
 /* sp_proc_call with a block: `pr.call(x) { }` or `pr.call(x, &b)` */
 static inline sp_int sp_proc_call_blk(sp_Proc *p, sp_Proc *blk, sp_int argc, sp_int *args) {
   if (!p || !p->fn) return 0;

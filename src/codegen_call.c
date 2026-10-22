@@ -20585,6 +20585,7 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
   const int *argv = call_args(nt, id, &argc);
   (void)nt; (void)argv; (void)recv;
   if (!name) return 0;
+  if (emit_hash_transform_enumerator(c, id, b)) return 1;
   /* arr.each / arr.reverse_each with no block -> an external Enumerator over a
      snapshot of the array's (boxed) elements. Block-form and chained
      (each.with_index, each.map) uses are matched earlier and never reach here. */

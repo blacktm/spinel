@@ -2202,8 +2202,8 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_HASH, "transform_keys!",  1,   1, BF_ANY,      TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF },  /* by a Hash of new keys */
   { BOP_ANY_HASH, "transform_keys!",  0,   0, BF_REQUIRED, TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF },
   { BOP_ANY_HASH, "transform_values!", 0,   0, BF_REQUIRED, TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF },
-  { BOP_ANY_HASH, "transform_keys!",  0,   0, BF_NONE,     TY_UNKNOWN,     BOPE_NONE },  /* blockless: an Enumerator */
-  { BOP_ANY_HASH, "transform_values!", 0,   0, BF_NONE,     TY_UNKNOWN,     BOPE_NONE },
+  { BOP_ANY_HASH, "transform_keys!",  0,   0, BF_NONE,     TY_ENUMERATOR,  BOPE_NONE },  /* blockless: an Enumerator */
+  { BOP_ANY_HASH, "transform_values!", 0,   0, BF_NONE,     TY_ENUMERATOR,  BOPE_NONE },
   { BOP_ANY_HASH, "transform_keys",   0,   1, BF_ANY,      TY_UNKNOWN,     BOPE_NONE },
   { BOP_ANY_HASH, "transform_values", 0,   0, BF_ANY,      TY_UNKNOWN,     BOPE_NONE },
   { BOP_ANY_HASH, "each",             0,   0, BF_REQUIRED, TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF },  /* the walks answer the receiver */

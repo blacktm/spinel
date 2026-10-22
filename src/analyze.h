@@ -646,4 +646,11 @@ int strh_call_op_in(Compiler *c, int call, TyKind rt, int unknown_ok);
 int strh_literal_held(Compiler *c, int n);   /* an Array literal a variable of any kind is written */
 int strh_var_read(const NodeTable *nt, int n);   /* a variable's read, whatever its kind of variable */
 
+/* Blockless bang transforms store arbitrary keys/values through their source. */
+int is_fresh_hash(Compiler *c, int v);   /* a Hash literal or `Hash.new` */
+int widen_hash_transform_origin(Compiler *c, int v);
+int pivs_widen_hash_transform(Compiler *c, int call);
+int an_hash_transform_enum(Compiler *c, int id);   /* the blockless call answers the live Enumerator */
+void mark_hash_transform_storage(Compiler *c);   /* marks hash_transform_unbounded (feature_limit) */
+
 #endif

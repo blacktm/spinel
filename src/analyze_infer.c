@@ -11007,7 +11007,7 @@ TyKind infer_uncached(Compiler *c, int id) {
       /* a bare `{}` used directly as a hash block-method receiver dispatches as
          the STR_POLY hash (mirrors the empty-array-receiver mark) (#2336). */
       if (c->empty_hash_recv && id < c->node_cap && c->empty_hash_recv[id])
-        return TY_STR_POLY_HASH;
+        return c->hash_want && c->hash_want[id] == TY_POLY_POLY_HASH ? TY_POLY_POLY_HASH : TY_STR_POLY_HASH;
       /* an empty literal whose use context fixes a variant (compared against a
          hash-typed peer) adopts it, so both sides share a representation and
          the comparison is a real content check (#3040). */

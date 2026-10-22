@@ -1268,6 +1268,11 @@ static const char *feature_limit(Compiler *c, int id, int *stop, int *lx, char *
              "name the attributes (see docs/limitations.md)", name);
     return buf;
   }
+  if (nt_int(nt, id, "hash_transform_unbounded", 0) && cplan_reachable(c, id)) {
+    snprintf(buf, cap, "Hash#%s without a block on a Hash the compiler cannot trace to where it is built "
+             "(to hold any key and value the Enumerator stores) is not supported; see docs/limitations.md", name);
+    return buf;
+  }
   if (nt_int(nt, id, "define_method_name", 0) == 2 && cplan_reachable(c, id))
     return "Module#define_method with `&` of a block or Proc that is not a literal (`&block`, a parameter, "
            "a constant, a call's result) is not supported: the defined method's body is known only at run "

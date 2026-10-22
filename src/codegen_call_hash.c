@@ -1251,3 +1251,17 @@ int emit_call_hash_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
   if (emit_or_take_back(c, id, b, emit_hash_call)) return 1;
   return 0;
 }
+
+/* A bang transform without a block is a live, mutating Enumerator. */
+int emit_hash_transform_enumerator(Compiler *c, int id, Buf *b) {
+  if (!an_hash_transform_enum(c, id)) return 0;
+  /* a Hash that cannot hold what the walk stores was refused by the plan
+     (hash_transform_unbounded) */
+  Buf eb; memset(&eb, 0, sizeof eb);
+  buf_puts(&eb, "sp_hash_transform_enum("); emit_boxed(c, nt_ref(c->nt, id, "receiver"), &eb);
+  buf_printf(&eb, ", %d)", sp_streq(nt_str(c->nt, id, "name"), "transform_keys!"));
+  if (repr_of(c, id).kind == RK_BOXED) emit_boxed_text(c, TY_ENUMERATOR, eb.p, b);
+  else buf_puts(b, eb.p);
+  free(eb.p);
+  return 1;
+}

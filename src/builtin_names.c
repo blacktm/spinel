@@ -1607,3 +1607,7 @@ int is_intersect_name(const char *n) { return n && sp_streq(n, "intersect?"); }
 int ostruct_member_name(const char *n) {
   return n && (sp_streq(n, "size") || sp_streq(n, "length") || sp_streq(n, "count") || sp_streq(n, "empty?"));
 }
+
+int is_hash_bang_transform(const char *n) {
+  return n && (sp_streq(n, "transform_keys!") || sp_streq(n, "transform_values!"));
+}

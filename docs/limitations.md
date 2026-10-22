@@ -2020,3 +2020,10 @@ String line iteration with a nil separator yields the receiver itself. A block
 that mutates that String while another name observes it is refused because the
 line iterator cannot bind the receiver handle. Array#fill block results use
 shared handles.
+
+#### Blockless Hash bang transforms
+
+`Hash#transform_keys!` and `Hash#transform_values!` without a block answer an
+Enumerator whose traversal stores each replacement into the original Hash, so
+that Hash is built to hold any key and value. When the compiler cannot trace
+the receiver back to the Hashes it may be, the call is refused at compile time.
