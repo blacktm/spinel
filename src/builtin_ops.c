@@ -1305,6 +1305,9 @@ static const BuiltinOp bop_rows[] = {
   { TY_IO, "gets",           0, 127, BF_ANY, TY_STRING,   BOPE_NONE },
   { TY_IO, "path",           0, 127, BF_ANY, TY_STRING,   BOPE_TEMPLATE, "sp_File_path($r)", TY_UNKNOWN },
   { TY_IO, "to_path",        0, 127, BF_ANY, TY_STRING,   BOPE_TEMPLATE, "sp_File_path($r)", TY_UNKNOWN },
+  /* a blockless character walk is a generator Enumerator that reads only when pulled */
+  { TY_IO, "each_char",      0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_character_enumerator($r, 0, SPL(\"each_char\"))", TY_UNKNOWN },
+  { TY_IO, "each_codepoint", 0,   0, BF_NONE, TY_ENUMERATOR, BOPE_TEMPLATE, "sp_io_character_enumerator($r, 1, SPL(\"each_codepoint\"))", TY_UNKNOWN },
   { TY_IO, "getc",           0, 127, BF_ANY, TY_STRING,   BOPE_NONE },
   { TY_IO, "readchar",       0, 127, BF_ANY, TY_STRING,   BOPE_NONE },
   { TY_IO, "readpartial",    0, 127, BF_ANY, TY_STRING,   BOPE_NONE },

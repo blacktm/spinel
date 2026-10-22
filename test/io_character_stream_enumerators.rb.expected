@@ -1,0 +1,15 @@
+["é", "x"]
+[Enumerator, nil]
+[233, 120]
+#<Enumerator: #<IO:fd N>:each_char>
+#<Enumerator: #<File:PATH>:each_char>
+"a"
+"b\n"
+"c"
+true
+["d", "\n"]
+true
+97
+98
+0
+97
