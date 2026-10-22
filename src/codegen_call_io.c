@@ -2444,6 +2444,12 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
 int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* ARGF pseudo-IO methods: read the ARGV files (or stdin) in sequence. */
   if (recv >= 0 && comp_ntype(c, recv) == TY_ARGF) {
+    if (sp_streq(name, "lineno") && argc == 0) { buf_puts(b, "sp_argf_lineno()"); return 1; }
+    if ((sp_streq(name, "each_line") || sp_streq(name, "each")) &&
+        argc == 0 && nt_ref(nt, id, "block") < 0) {
+      buf_puts(b, "sp_argf_line_enumerator("); emit_str_literal(b, name); buf_puts(b, ")");
+      return 1;
+    }
     if (sp_streq(name, "read")) { buf_puts(b, "sp_argf_read()"); return 1; }
     /* `chomp:` read as IO#gets reads it (emit_gets_sep_args): the flag
        first, then the line, whose ending "\n" or "\r\n" goes when the flag

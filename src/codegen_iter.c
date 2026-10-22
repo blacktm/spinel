@@ -1150,6 +1150,7 @@ static int inline_target_same(const InlineTarget *a, const InlineTarget *b) {
 }
 
 int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
+  refuse_from_plan(c, id, CRF_LIMIT, "refuse-limit");   /* as refuse_prepass_at_emit does */
   if (g_plan_check) ucall_emitted(id);
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");

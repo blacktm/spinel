@@ -18893,6 +18893,7 @@ static sp_RbVal sp_poly_range_endless_step(sp_RbVal v, sp_RbVal step) {
   if (v.cls_id == SP_BUILTIN_RANGE) return sp_range_endless_step_v(sp_box_int(((sp_Range *)v.v.p)->first), step);
   return sp_range_endless_step_v(sp_box_float(((sp_FloatRange *)v.v.p)->first), step);
 }
+sp_Enumerator *sp_argf_line_enumerator(const char *meth);
 /* Blockless Kernel#loop: an infinite Enumerator yielding nil forever (#3236).
    Defined out-of-line in sp_cold.c (one linked copy, not per generated TU). */
 sp_Enumerator *sp_loop_enum(void);

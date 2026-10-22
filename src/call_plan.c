@@ -1233,6 +1233,52 @@ int cplan_define_method_early(Compiler *c, int id) {
   return 0;
 }
 
+/* The program makes ARGF's line Enumerator: a blockless, argument-less
+   ARGF.each_line or ARGF.each (2 and 3), else 1; asked once */
+static int cplan_argf_line_enum(Compiler *c) {
+  if (c->argf_line_enum) return c->argf_line_enum;
+  const NodeTable *nt = c->nt;
+  c->argf_line_enum = 1;
+  for (int k = comp_kind_first(c, NK_CallNode); k >= 0 && c->argf_line_enum == 1; k = comp_kind_next(c, k)) {
+    const char *nm = nt_kind(nt, k) == NK_CallNode ? nt_str(nt, k, "name") : NULL;
+    int r = nm ? nt_ref(nt, k, "receiver") : -1;
+    if (r < 0 || nt_ref(nt, k, "block") >= 0 || nt_ref(nt, k, "arguments") >= 0) continue;
+    if ((sp_streq(nm, "each_line") || sp_streq(nm, "each")) && comp_ntype(c, r) == TY_ARGF)
+      c->argf_line_enum = sp_streq(nm, "each_line") ? 2 : 3;
+  }
+  return c->argf_line_enum;
+}
+/* ARGF's line Enumerator reads ARGF a line per step. Most Enumerator calls
+   (map, select, inject, any?, with_index, each_slice, ...) read all of a
+   generator Enumerator first, which would make ARGF.lineno and ARGF's
+   position differ from CRuby, so in a program that makes one, a call on an
+   Enumerator, or a block call on a boxed value that may hold it, is refused
+   unless it pulls a line per step (is_enum_step_pull_call). Desugar moves
+   such a call onto an `__enum_<name>__N(recv)` copy, or routes it through a
+   `to_a` it made (made_to_a): the call is on the Enumerator behind those. A
+   blockless call on a boxed value is not refused. */
+static int cplan_argf_enum_read_ahead(Compiler *c, int id, char *name, size_t cap) {
+  if (cplan_argf_line_enum(c) == 1) return 0;
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int r = nt_ref(nt, id, "receiver");
+  char base[64];
+  if (r < 0 && enum_copy_call_name(nm, base, sizeof base)) {
+    int args = nt_ref(nt, id, "arguments");
+    int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+    if (ac < 1) return 0;
+    nm = base; r = av[0];
+  }
+  if (!nm || r < 0) return 0;
+  if (nt_kind(nt, r) == NK_CallNode && nt_int(nt, r, "made_to_a", 0)) r = nt_ref(nt, r, "receiver");
+  if (r < 0) return 0;
+  int blk = nt_ref(nt, id, "block") >= 0;
+  if (is_enum_step_pull_call(nm, blk)) return 0;
+  if (comp_ntype(c, r) != TY_ENUMERATOR && !(blk && repr_of(c, r).kind == RK_BOXED)) return 0;
+  snprintf(name, cap, "%s", nm);
+  return 1;
+}
+
 /* the limit the call's shape names, and in *lx how a user method exempts it */
 static const char *feature_limit(Compiler *c, int id, int *stop, int *lx, char *buf, size_t cap) {
   *stop = 1;
@@ -1291,6 +1337,16 @@ static const char *feature_limit(Compiler *c, int id, int *stop, int *lx, char *
     snprintf(buf, cap, "unsupported `%s` that can reach a class whose superclass is an anonymous "
              "class (Class.new, Struct.new or Data.define as the superclass): spinel has no class "
              "object for the anonymous class", anon_reflect == 1 ? "superclass" : "ancestors");
+    return buf;
+  }
+
+  char rname[64];
+  if (cplan_argf_enum_read_ahead(c, id, rname, sizeof rname) && cplan_reachable(c, id)) {
+    snprintf(buf, cap, "unsupported call: `%s` on an Enumerator in a program that makes "
+             "ARGF.%s's Enumerator, which reads ARGF a line per step: this call would read it "
+             "to the end first, so ARGF.lineno and ARGF's position would differ from CRuby; "
+             "pull its lines with next, each or first instead", rname,
+             cplan_argf_line_enum(c) == 2 ? "each_line" : "each");
     return buf;
   }
 

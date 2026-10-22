@@ -1607,3 +1607,30 @@ int is_intersect_name(const char *n) { return n && sp_streq(n, "intersect?"); }
 int ostruct_member_name(const char *n) {
   return n && (sp_streq(n, "size") || sp_streq(n, "length") || sp_streq(n, "count") || sp_streq(n, "empty?"));
 }
+
+/* `__enum_<name>__N`, the copy desugar_builtin_enum_calls moves an Enumerable
+   call onto (its receiver becomes the first argument): <name> into buf, 1
+   for such a name */
+int enum_copy_call_name(const char *nm, char *buf, size_t n) {
+  if (!nm || strncmp(nm, "__enum_", 7) != 0) return 0;
+  const char *sep = strstr(nm + 7, "__");
+  if (!sep || (size_t)(sep - nm - 7) >= n) return 0;
+  memcpy(buf, nm + 7, (size_t)(sep - nm - 7));
+  buf[sep - nm - 7] = 0;
+  return 1;
+}
+
+/* The Enumerator calls that pull one element per step, as CRuby's do, over
+   a generator Enumerator: the first group with or without a block, the
+   second only with one (without, they answer a chained Enumerator) */
+int is_enum_step_pull_call(const char *n, int has_block) {
+  static const char *const any[] = { "next", "peek", "next_values", "peek_values", "rewind",
+    "size", "inspect", "to_s", "class", "each", "first", "take", "include?", "member?",
+    "to_a", "entries", "lazy", NULL };
+  static const char *const with_block[] = { "each_with_index", "each_entry", "find", "detect",
+    "find_index", "take_while", NULL };
+  for (int i = 0; any[i]; i++) if (sp_streq(n, any[i])) return 1;
+  if (!has_block) return 0;
+  for (int i = 0; with_block[i]; i++) if (sp_streq(n, with_block[i])) return 1;
+  return 0;
+}

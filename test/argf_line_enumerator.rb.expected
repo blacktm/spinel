@@ -1,0 +1,14 @@
+[ARGF.class, "-", 0]
+Enumerator
+[nil, 0, 2]
+"hello\n"
+1
+"world\n"
+2
+[0, "hello\n"]
+"world\n"
+"fin\n"
+3
+"hello\nworld\nfin\n"
+3
+true

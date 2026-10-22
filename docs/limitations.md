@@ -593,6 +593,18 @@ still works.
 - **`File::Stat#rdev_major` and `#rdev_minor`** -- refused at compile time
   ("unsupported call") on a typed File::Stat; a boxed one raises NoMethodError.
 
+- **ARGF line Enumerators** -- `ARGF.each_line` and `ARGF.each` without a
+  block answer an Enumerator that reads ARGF a line per step. In a program
+  that makes one, a call on an Enumerator is refused at compile time unless
+  it pulls a line per step as CRuby's does: `next`, `peek`, `rewind`,
+  `size`, `inspect`, `each`, `first`, `take`, `include?`, `to_a`, `lazy`,
+  and with a block `each_with_index`, `each_entry`, `find`, `find_index`
+  and `take_while`. The others (`map`, `select`, `inject`, `any?`,
+  `with_index`, `each_slice`, `zip`, ...) would read all of ARGF first, so
+  `ARGF.lineno` and ARGF's position would differ. A block call on a boxed
+  value is refused the same way. Without a block, a separator, limit or
+  `chomp:` argument is refused, and so are `ARGF.lineno=` and `$.`.
+
 - **Frozen literals** -- explicit `.freeze` then mutation raises `FrozenError`,
   including `delete`, `clear`, and `[]=` on a Hash read from a mixed container,
   matching CRuby.

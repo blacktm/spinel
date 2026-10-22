@@ -4506,11 +4506,16 @@ static int infer_handle_call(Compiler *c, int id, const NodeTable *nt, const cha
 
   /* ARGF pseudo-IO methods */
   if (recv >= 0 && rt == TY_ARGF) {
+    if (sp_streq(name, "lineno") && argc == 0) { *out = TY_INT; return 1; }
     if (sp_streq(name, "read") || sp_streq(name, "gets") || sp_streq(name, "readline") ||
         sp_streq(name, "filename") || sp_streq(name, "path") || sp_streq(name, "to_s")) { *out = TY_STRING; return 1; }
     if (sp_streq(name, "readlines") || sp_streq(name, "to_a")) { *out = TY_STR_ARRAY; return 1; }
     if (sp_streq(name, "eof?") || sp_streq(name, "eof")) { *out = TY_BOOL; return 1; }
     if (sp_streq(name, "each_line") || sp_streq(name, "each_string") || sp_streq(name, "each")) {
+      if (argc == 0 && nt_ref(nt, id, "block") < 0 &&
+          (sp_streq(name, "each_line") || sp_streq(name, "each"))) {
+        *out = TY_ENUMERATOR; return 1;
+      }
       int blk = nt_ref(nt, id, "block");
       if (blk >= 0) {
         const char *bp0 = block_param_name(c, blk, 0);

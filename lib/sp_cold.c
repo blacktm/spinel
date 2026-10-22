@@ -3452,7 +3452,10 @@ sp_Enumerator *sp_enum_as_gen(sp_Enumerator *e) {
 }
 /* Recognize the annotated materialized walks in the existing return
    dispatch; an inspect label must not turn a supported walk into an error. */
+static void sp_argf_enum_gen(sp_Fiber *f);
+static void sp_argf_enum_rewind(void);
 static int sp_enum_returns_source(sp_Enumerator *e) {
+  if (e->gen == sp_argf_enum_gen) return 1;
   const char *m = e->meth;
   return m && (strcmp(m, "each") == 0 || strcmp(m, "each_with_index") == 0 ||
                strncmp(m, "cycle(", 6) == 0 || strncmp(m, "combination(", 12) == 0 ||
@@ -3873,6 +3876,7 @@ sp_PolyArray *sp_Enumerator_next_values(sp_Enumerator *e) {SP_GC_ROOT(e); return
 sp_PolyArray *sp_Enumerator_peek_values(sp_Enumerator *e) {SP_GC_ROOT(e); return sp_enum_values_wrap(sp_Enumerator_peek(e)); }
 sp_Enumerator *sp_Enumerator_rewind(sp_Enumerator *e) { sp_gc_wb((void*)e);
   if (!e) return NULL;
+  if (e->gen == sp_argf_enum_gen) sp_argf_enum_rewind();
   if (e->gen) { e->fib = NULL; e->peeked = FALSE; e->gen_result = sp_box_nil(); }
   else { e->cursor = 0; if (SP_UNLIKELY(e->live)) sp_enum_live_rewind(e); }
   if (e->is_bsearch) { e->bsearch_lo = 0; e->bsearch_hi = e->items ? e->items->len - 1 : -1; e->bsearch_mid = -1; e->bsearch_waiting = FALSE; e->bsearch_result = sp_box_nil(); e->peeked = FALSE; }
@@ -4583,8 +4587,11 @@ sp_StrArray *sp_get_load_path(void) {
    The files are the program's ARGV as it stands when ARGF needs the next
    one, taken off its front as each is opened, as CRuby's ARGF does; a file
    that does not open raises. With ARGV empty before any file, stdin. */
+static sp_int sp_argf_total_lines, sp_argf_file_lines;
+sp_int sp_argf_lineno(void) { return sp_argf_total_lines; }
 int sp_argf_ensure(void) {
   if (sp_argf_obj.cur) return 1;
+  sp_argf_file_lines = 0;
   sp_StrArray *av = sp_get_ARGV();
   if (av->len == 0) {
     if (sp_argf_obj.started) return 0;
@@ -4601,7 +4608,7 @@ int sp_argf_ensure(void) {
   sp_argf_obj.cur = f;
   return 1;
 }
-const char *sp_argf_gets(void) {
+static const char *sp_argf_gets_counted(int count) {
   /* getline answers the line whole, however long, with its byte count: a
      NUL inside the line neither ends it nor drops what follows (#4927) */
   static char *line = NULL;
@@ -4613,16 +4620,18 @@ const char *sp_argf_gets(void) {
       char *r = sp_str_alloc_raw((size_t)n + 1);
       memcpy(r, line, (size_t)n); r[n] = '\0';
       sp_str_set_len(r, (size_t)n);
+      if (count) { sp_argf_total_lines++; sp_argf_file_lines++; }
       return r;
     }
     if (sp_argf_obj.cur && sp_argf_obj.cur != stdin) fclose(sp_argf_obj.cur);
     sp_argf_obj.cur = NULL;  /* EOF on this stream; advance on next ensure */
   }
 }
+const char *sp_argf_gets(void) { return sp_argf_gets_counted(1); }
 const char *sp_argf_read(void) {
   sp_String *s = sp_String_new(""); SP_GC_ROOT(s);
   const char *line;
-  while ((line = sp_argf_gets())) sp_String_append(s, line);
+  while ((line = sp_argf_gets_counted(0))) sp_String_append(s, line);
   return sp_str_dup(s->data);
 }
 sp_StrArray *sp_argf_readlines(void) {
@@ -4637,6 +4646,26 @@ const char *sp_argf_filename(void) {
   return sp_argf_obj.fname ? sp_argf_obj.fname : &("\xff" "-")[1];
 }
 sp_bool sp_argf_eof(void) { return !sp_argf_ensure(); }
+
+/* ARGF has one global cursor; creating an Enumerator leaves it untouched. */
+static void sp_argf_enum_gen(sp_Fiber *f) {
+  const char *line = NULL; SP_GC_ROOT_STR(line);
+  while ((line = sp_argf_gets()) != NULL) sp_Fiber_yield(sp_box_str(line));
+  sp_gc_wb((void *)f);
+  f->yielded_value = sp_box_obj(&sp_argf_obj, SP_BUILTIN_ARGF);
+}
+sp_Enumerator *sp_argf_line_enumerator(const char *meth) {SP_GC_ROOT_STR(meth);
+  sp_Enumerator *e = sp_Enumerator_new_gen(sp_argf_enum_gen, NULL, sp_box_nil());
+  return sp_enum_with_src(e, sp_box_obj(&sp_argf_obj, SP_BUILTIN_ARGF), meth);
+}
+static void sp_argf_enum_rewind(void) {
+  if (!sp_argf_ensure()) sp_raise_cls("ArgumentError", "no stream to rewind");
+  if (fseeko(sp_argf_obj.cur, 0, SEEK_SET) != 0)
+    sp_raise_cls(sp_errno_class_name(errno), strerror(errno));
+  clearerr(sp_argf_obj.cur);
+  sp_argf_total_lines -= sp_argf_file_lines;
+  sp_argf_file_lines = 0;
+}
 
 /* ---- Float/String Range value-type ops -- relocated from spinel_rt.h.
    0 optcarrot uses; reach only sp_range.h + lib-visible sp_float_to_s/

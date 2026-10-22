@@ -4214,6 +4214,11 @@ void refuse_prepass_at_emit(Compiler *c, int id) {
      (desugar_attr_const_splat): refused where it is emitted, so a deferred
      refusal stands at its own statement */
   if (nt_int(c->nt, id, "attr_splat", 0)) diagnose_unsupported_call(c, id);
+  /* a documented limit the plan holds is refused where the call is
+     emitted: an iterator arm, or a call desugar moved onto an Enumerable
+     copy and emitted as a user method's, would otherwise emit it before
+     diagnose_unsupported_call looks */
+  refuse_from_plan(c, id, CRF_LIMIT, "refuse-limit");
   if (!defer_refusals()) return;
   /* an identity Set's call the proof refuses (refuse_set_identity_members),
      whose values are no single one a check could read where it arrives */

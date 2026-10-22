@@ -427,4 +427,8 @@ int is_intersect_name(const char *n); /* intersect? */
 /* size, length, count, empty?: names the containers answer and an
    OpenStruct does not define, so its member (or nil) answers them */
 int ostruct_member_name(const char *n);
+/* __enum_NAME__N: NAME into buf, 1 for such a name */
+int enum_copy_call_name(const char *nm, char *buf, size_t n);
+/* an Enumerator call that pulls one element per step (next, each, first, ...) */
+int is_enum_step_pull_call(const char *n, int has_block);
 #endif
