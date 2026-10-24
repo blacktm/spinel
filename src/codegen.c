@@ -17668,6 +17668,91 @@ static unsigned char *scan_dsl_arg_nodes(Compiler *c) {
   return m;
 }
 
+/* The layouts the hook adapts: a String, the shared String handle, a box */
+static int argf_stdin_line_repr(Repr r) {
+  return r.kind == RK_STRBUF || r.kind == RK_BOXED || r.ty == TY_STRING;
+}
+
+/* Can $stdin hold an instance of class k, read off what the program stores
+   into it? 1 for every class when a store is anything but a plain `=` of a
+   typed object or IO. */
+static int argf_stdin_may_hold(Compiler *c, int k) {
+  static const NodeKind WK[] = { NK_GlobalVariableWriteNode, NK_GlobalVariableOperatorWriteNode,
+                                 NK_GlobalVariableOrWriteNode, NK_GlobalVariableAndWriteNode,
+                                 NK_GlobalVariableTargetNode };
+  int held = 0, open = 0;
+  for (int q = 0; q < 5; q++)
+    NT_FOREACH_KIND(c->nt, WK[q], w) {
+      const char *wn = nt_str(c->nt, w, "name");
+      const char *rn = wn && wn[0] == '$' ? comp_resolve_gvar(c, wn + 1) : NULL;
+      if (!rn || !sp_streq(rn, "stdin")) continue;
+      TyKind t = q == 0 ? comp_ntype(c, nt_ref(c->nt, w, "value")) : TY_UNKNOWN;
+      if (ty_is_object(t)) {
+        int a = ty_object_class(t);
+        held |= a == k || is_descendant(c, k, a);
+      }
+      else if (t != TY_IO) open = 1;
+    }
+  return held || open;
+}
+
+/* Does every gets of a program class the boxed $stdin of the hook's call
+   can hold answer a String or nil? The classes are the call's bounded
+   receiver set, else what the program stores into $stdin. A gets
+   answering a box is taken at its word, as the hook's own boxed answer is. */
+static int argf_stdin_gets_answers_lines(Compiler *c, int call) {
+  int nk = 0;
+  const int *ks = poly_recv_classes(c, call, &nk);
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!c->classes[k].instantiated || is_builtin_reopen(c->classes[k].name)) continue;
+    int held = !ks && argf_stdin_may_hold(c, k);
+    for (int j = 0; j < nk && !held; j++) held = ks[j] == k;
+    int mi = held ? comp_method_in_chain(c, k, "gets", NULL) : -1;
+    Repr r = mi >= 0 ? repr_of_ret(c, &c->scopes[mi]) : (Repr){ .ty = TY_NIL };
+    if (r.ty != TY_NIL && !argf_stdin_line_repr(r)) return 0;
+  }
+  return 1;
+}
+
+/* Adapt the analyzed Ruby stdin reader (c->argf_stdin_scope) to ARGF's
+   nullable String callback, by the layout its value comes back in. No
+   callback is emitted or installed when the analysis made none. */
+static void emit_argf_stdin_hook(Compiler *c, Buf *b, int install) {
+  if (c->argf_stdin_scope < 0) return;
+  Scope *s = &c->scopes[c->argf_stdin_scope];
+  if (install) {
+    buf_puts(b, "    sp_argf_stdin_gets_hook = _sp_argf_stdin_gets;\n");
+    return;
+  }
+  Repr r = repr_of_ret(c, s);
+  int bn = 0;
+  const int *bl = nt_arr(c->nt, s->body, "body", &bn);
+  if (!argf_stdin_line_repr(r) || (r.kind == RK_BOXED && !argf_stdin_gets_answers_lines(c, bl[0]))) {
+    /* reported at the program's (first) `$stdin =` */
+    int at = s->def_node;
+    NT_FOREACH_KIND(c->nt, NK_GlobalVariableWriteNode, w) {
+      const char *wn = nt_str(c->nt, w, "name");
+      if (at == s->def_node && wn && sp_streq(wn, "$stdin")) at = w;
+    }
+    unsupported_feature(c, at, "ARGF reads a reassigned $stdin through its gets, and this "
+                        "$stdin's gets answers something other than a String or nil");
+  }
+  Buf call = {0};
+  emit_method_cname(c, s, &call);
+  buf_puts(&call, "()");
+  buf_puts(b, "static const char *_sp_argf_stdin_gets(void) { ");
+  if (r.kind == RK_STRBUF)
+    buf_printf(b, "sp_String *line = %s; return line ? sp_String_cstr(line) : NULL", call.p);
+  else if (r.kind == RK_BOXED) {
+    buf_puts(b, "return ");
+    emit_unbox_nilable_text(c, TY_STRING, call.p, b);
+  }
+  else
+    buf_printf(b, "return %s", call.p);
+  free(call.p);
+  buf_puts(b, "; }\n");
+}
+
 static void scan_prologue_features(Compiler *c) {
   const NodeTable *nt = c->nt;
   g_uses_symbols = (c->nsymbols > 0);
@@ -21402,6 +21487,7 @@ char *codegen_program(const NodeTable *nt) {
   }
 
   unit_begin("main");
+  emit_argf_stdin_hook(c, body, 0);
   size_t main_frame_ins = 0, main_open = 0;
   int sv_main_cv = g_c_ret_void;
   if (g_ext_init_name) {
@@ -21504,6 +21590,7 @@ char *codegen_program(const NodeTable *nt) {
   /* No PRNG seeding here: the shared Kernel stream (lib/sp_random.c)
      self-seeds lazily on its first draw, so a program that consumes no
      randomness pays nothing and one that does still varies per run. */
+  emit_argf_stdin_hook(c, body, 1);
   /* Register END blocks (atexit runs LIFO, so they execute in reverse registration order) */
   for (int e = 1; e <= end_count; e++)
     buf_printf(body, "    atexit(sp_end_fn_%d);\n", e);

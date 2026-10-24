@@ -81,6 +81,7 @@ Compiler *comp_new(const NodeTable *nt) {
   Compiler *c = calloc(1, sizeof(Compiler));
   if (!c) return NULL;
   c->nt = nt;
+  c->argf_stdin_scope = -1;
   int n = nt->count > 0 ? nt->count : 1;
   c->ntype = calloc((size_t)n, sizeof(TyKind));
   c->norigin = malloc((size_t)n * sizeof(int));

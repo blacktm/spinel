@@ -4734,6 +4734,7 @@ int sp_argf_ensure(void) {
   sp_argf_obj.cur = f;
   return 1;
 }
+const char *(*sp_argf_stdin_gets_hook)(void) = NULL;
 const char *sp_argf_gets(void) {
   /* getline answers the line whole, however long, with its byte count: a
      NUL inside the line neither ends it nor drops what follows (#4927) */
@@ -4741,6 +4742,12 @@ const char *sp_argf_gets(void) {
   static size_t cap = 0;
   for (;;) {
     if (!sp_argf_ensure()) return NULL;
+    if (sp_argf_obj.cur == stdin && sp_argf_stdin_gets_hook) {
+      const char *r = sp_argf_stdin_gets_hook();
+      if (r) return r;
+      sp_argf_obj.cur = NULL;
+      continue;
+    }
     ssize_t n = SP_SIG_BLOCKING(getline(&line, &cap, sp_argf_obj.cur));
     if (n >= 0) {
       char *r = sp_str_alloc_raw((size_t)n + 1);

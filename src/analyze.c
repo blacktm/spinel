@@ -604,7 +604,8 @@ void compute_reachable(Compiler *c, int typed) {
     Scope *sc = &c->scopes[s];
     sc->reachable = 0;
     int is_root = (s == 0 || !sc->name || sp_streq(sc->name, "initialize") ||
-                   method_name_implicitly_invoked(sc->name) || sc->is_ext_entry);
+                   method_name_implicitly_invoked(sc->name) || sc->is_ext_entry ||
+                   sc->is_argf_stdin_hook);
     if (is_root) { sc->reachable = 1; queue[qtail++] = s; }
   }
 
@@ -7312,6 +7313,60 @@ static int struct_has_member(const ClassInfo *cls, const char *nm) {
   return 0;
 }
 
+/* Does the program read ARGF: name the ARGF constant, or call the bare
+   gets / readline that comp_bare_gets_is_argf makes ARGF's? */
+static int program_reads_argf(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  static const NodeKind CK[] = { NK_ConstantReadNode, NK_ConstantPathNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, CK[q], id) {
+      const char *nm = nt_str(nt, id, "name");
+      if (nm && sp_streq(nm, "ARGF")) return 1;
+    }
+  if (!comp_bare_gets_is_argf(c)) return 0;
+  static const char *const reads[] = { "gets", "readline" };
+  for (int q = 0; q < 2; q++)
+    for (int id = an_calls_named_first(c, reads[q]); id >= 0; id = an_calls_named_next(id)) {
+      int args = nt_ref(nt, id, "arguments"), ac = 0;
+      if (args >= 0) nt_arr(nt, args, "arguments", &ac);
+      if (nt_ref(nt, id, "receiver") < 0 && ac == 0) return 1;
+    }
+  return 0;
+}
+
+/* ARGF delegates stdin reads to the live Ruby stream. Analyze its callback
+   as an ordinary method body, so IO and program-class dispatch and GC roots
+   use the same lowering as `$stdin.gets`. Made only for a program that both
+   assigns $stdin and reads ARGF. It has a reserved name, as the other
+   synthesized helpers do, so no test that reads a nameless scope as the top
+   level or a block takes it in (name_is_synth_method hides it from
+   reflection); Scope.is_argf_stdin_hook makes it a reachability root and a
+   method whose value is read, and c->argf_stdin_scope records it for
+   emit_argf_stdin_hook. */
+static void synth_argf_stdin_gets(Compiler *c) {
+  if (!gvar_has_write(c, "stdin") || !program_reads_argf(c)) return;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int recv = nt_new_node(nt, "GlobalVariableReadNode");
+  nt_node_set_str(nt, recv, "name", "$stdin");
+  int call = nt_new_node(nt, "CallNode");
+  nt_node_set_str(nt, call, "name", "gets");
+  nt_node_set_ref(nt, call, "receiver", recv);
+  nt_node_set_ref(nt, call, "arguments", -1);
+  nt_node_set_ref(nt, call, "block", -1);
+  int body = nt_new_node(nt, "StatementsNode");
+  nt_node_set_arr(nt, body, "body", &call, 1);
+  int def = nt_new_node(nt, "DefNode");
+  nt_node_set_str(nt, def, "name", "__sp_argf_stdin_gets");
+  nt_node_set_ref(nt, def, "body", body);
+  Scope *ms = comp_scope_new(c, "__sp_argf_stdin_gets", def);
+  ms->c_name = strdup("_argf_stdin_gets");
+  ms->body = body;
+  ms->is_argf_stdin_hook = 1;
+  c->argf_stdin_scope = c->nscopes - 1;
+  comp_grow_node_arrays(c);
+  walk_scope(c, body, c->nscopes - 1, -1);
+}
+
 static void synth_struct_each(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int ncls0 = c->nclasses;
@@ -13892,10 +13947,11 @@ static void oa_byname_free(OaByName *b) { anh_free(&b->names); free(b->first); f
 /* A method that the runtime can call with no call node of its own: a
    protocol, pattern matching, method_missing, an operator or a setter
    (`sum` calls `+`, `case` calls `===`), an extension entry, a proc form
-   and a lowered yield. sh_settle_reads counts the same methods as read. */
+   and a lowered yield, and ARGF's `$stdin.gets` hook. sh_settle_reads
+   counts the same methods as read. */
 static int oa_entered_unseen(const Scope *sc) {
   const char *nm = sc->name;
-  if (sc->is_ext_entry || sc->is_proc_form || sc->is_lowered_yield) return 1;
+  if (sc->is_ext_entry || sc->is_proc_form || sc->is_lowered_yield || sc->is_argf_stdin_hook) return 1;
   if (method_name_implicitly_invoked(nm) || sp_streq(nm, "method_missing") ||
       sp_streq(nm, "deconstruct") || sp_streq(nm, "deconstruct_keys")) return 1;
   if (!(nm[0] == '_' || (nm[0] >= 'a' && nm[0] <= 'z') || (nm[0] >= 'A' && nm[0] <= 'Z'))) return 1;
@@ -47591,6 +47647,7 @@ static void an_phase_class_structure(Compiler *c) {
     }
   }
 
+  synth_argf_stdin_gets(c);
   synth_struct_each(c);
   synth_enum_to_a(c);
   synth_to_enum_generators(c);

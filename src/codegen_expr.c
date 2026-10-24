@@ -5,6 +5,30 @@
 #include "call_plan.h"
 #include "value_pos.h"
 
+/* A read of $stdin / $stdout / $stderr. A program that REASSIGNS one gets a
+   real global for it (gv_stdin / gv_stdout / gv_stderr, NULL until the
+   assignment runs). Reading the stream has to consult that global, or
+   `$stderr = $stdout` writes to the real stderr anyway and `$stderr ==
+   $stdout` answers false (#3406), and `$stdin = StringIO.new(...)` is not
+   what `$stdin.gets` reads. A program that never assigns has no such global
+   and emits as before. */
+static int emit_standard_stream_read(Compiler *c, const char *nm, Buf *b) {
+  if (!nm || !is_standard_stream_global(nm)) return 0;
+  const char *base = sp_streq(nm, "$stdin") ? "sp_io_stdin()"
+                   : sp_streq(nm, "$stdout") ? "sp_io_stdout()" : "sp_io_stderr()";
+  const char *gv = sp_streq(nm, "$stdin") ? "gv_stdin"
+                 : sp_streq(nm, "$stdout") ? "gv_stdout" : "gv_stderr";
+  LocalVar *sv = comp_gvar(c, nm + 1);
+  if (sv && sv->type == TY_IO) buf_printf(b, "(%s ? %s : %s)", gv, gv, base);
+  /* a slot that can hold a non-IO (`$stdout = StringIO.new`) is boxed;
+     nil there means never assigned, which reads as the stream itself
+     (assigning nil raises TypeError in Ruby) */
+  else if (std_stream_boxed(c, nm))
+    buf_printf(b, "(sp_poly_nil_p(%s) ? sp_box_nullable_obj((void *)(%s), SP_BUILTIN_IO) : %s)", gv, base, gv);
+  else buf_puts(b, base);
+  return 1;
+}
+
 /* defined? support: does this subtree reference a constant the compiler
    cannot resolve? Any such reference makes the whole defined? answer nil
    (CRuby checks every reference without evaluating). */
@@ -3285,25 +3309,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     const char *nm = nt_str(nt, id, "name");
     /* predefined punctuation globals: $/ is the record separator "\n"; $! / $; /
        $, read nil (spinel doesn't honor the split/print-sep defaults) */
-    if (nm && sp_streq(nm, "$stdin")) { buf_puts(b, "sp_io_stdin()"); return 1; }
-    /* A program that REASSIGNS $stdout / $stderr gets a real global for it
-       (gv_stdout / gv_stderr, NULL until the assignment runs). Reading the
-       stream has to consult that global, or `$stderr = $stdout` writes to the
-       real stderr anyway and `$stderr == $stdout` answers false (#3406).
-       A program that never assigns has no such global and emits as before. */
-    if (nm && (is_standard_output_global(nm))) {
-      const char *base = sp_streq(nm, "$stdout") ? "sp_io_stdout()" : "sp_io_stderr()";
-      const char *gv = sp_streq(nm, "$stdout") ? "gv_stdout" : "gv_stderr";
-      LocalVar *sv = comp_gvar(c, nm + 1);
-      if (sv && sv->type == TY_IO) buf_printf(b, "(%s ? %s : %s)", gv, gv, base);
-      /* a slot that can hold a non-IO (`$stdout = StringIO.new`) is boxed;
-         nil there means never assigned, which reads as the stream itself
-         (assigning nil raises TypeError in Ruby) */
-      else if (std_stream_boxed(c, nm))
-        buf_printf(b, "(sp_poly_nil_p(%s) ? sp_box_nullable_obj((void *)(%s), SP_BUILTIN_IO) : %s)", gv, base, gv);
-      else buf_puts(b, base);
-      return 1;
-    }
+    if (emit_standard_stream_read(c, nm, b)) return 1;
     if (nm && sp_streq(nm, "$/")) { emit_str_literal(b, "\n"); return 1; }
     if (nm && sp_streq(nm, "$?")) { buf_puts(b, "sp_last_process_status()"); return 1; }
     if (nm && sp_streq(nm, "$$")) { buf_puts(b, "((sp_int)getpid())"); return 1; }

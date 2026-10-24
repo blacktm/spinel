@@ -4548,7 +4548,7 @@ static void sh_settle_reads(ShareFacts *F, Compiler *c) {
     Scope *m = &c->scopes[mi];
     if (m->def_node < 0 || F->mread[mi]) continue;
     F->mread[mi] = all || !m->name || method_name_implicitly_invoked(m->name) || sh_operator_name(m->name) ||
-                   m->is_ext_entry || m->is_proc_form || m->is_lowered_yield ||
+                   m->is_ext_entry || m->is_proc_form || m->is_lowered_yield || m->is_argf_stdin_hook ||
                    (nn > 0 && bsearch(&m->name, names, (size_t)nn, sizeof *names, sh_str_cmp));
   }
   free(names);

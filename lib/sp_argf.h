@@ -47,6 +47,7 @@ extern sp_StrArray *sp_load_path_cache;
 sp_StrArray *sp_get_load_path(void);
 int sp_argf_ensure(void);
 const char *sp_argf_gets(void);
+extern const char *(*sp_argf_stdin_gets_hook)(void);
 const char *sp_argf_read(void);
 sp_StrArray *sp_argf_readlines(void);
 const char *sp_argf_filename(void);

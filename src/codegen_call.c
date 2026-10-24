@@ -1983,6 +1983,8 @@ const char *call_shown_name(const NodeTable *nt, int id) {
 int name_is_synth_method(Compiler *c, const char *m) {
   if (!m) return 0;
   if (sp_streq(m, "__enum_to_a")) return 1;
+  /* ARGF's `$stdin.gets` hook (synth_argf_stdin_gets) */
+  if (c->argf_stdin_scope >= 0 && sp_streq(c->scopes[c->argf_stdin_scope].name, m)) return 1;
   /* a class's copy of its initialize as a method, for its own calls of it
      (desugar_explicit_initialize_calls) */
   if (sp_streq(m, "__spinel_reinit")) return 1;

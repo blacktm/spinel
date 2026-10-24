@@ -10272,12 +10272,12 @@ int gvar_has_write(Compiler *c, const char *name) {
   return 0;
 }
 
-/* Does the program store something other than an IO into $stdout / $stderr
+/* Does the program store something other than an IO into a standard stream
    (`nm` with its `$`), so the stream's slot is boxed and reads answer what
    it holds? A program that never assigns the stream, or assigns only IOs,
    keeps the direct stream reads. */
 int std_stream_boxed(Compiler *c, const char *nm) {
-  if (!nm || !is_standard_output_global(nm)) return 0;
+  if (!nm || !is_standard_stream_global(nm)) return 0;
   LocalVar *sv = comp_gvar(c, nm + 1);
   return sv && sv->type == TY_POLY && gvar_has_write(c, nm + 1);
 }
@@ -10867,11 +10867,9 @@ TyKind infer_uncached(Compiler *c, int id) {
   }
   if (nk == NK_GlobalVariableReadNode) {
     const char *nm = nt_str(nt, id, "name");
-    /* $stdin is the IO handle over the C stdin stream (gets/read/tty?/... via
-       the TY_IO dispatch). $stdout/$stderr keep their dedicated AST-shape
-       emission arm and stay untyped here. */
-    if (nm && (sp_streq(nm, "$stdin") || sp_streq(nm, "$stdout") ||
-               sp_streq(nm, "$stderr"))) {
+    /* Unassigned standard streams are IO handles; a reassigned stream may
+       instead hold a program object such as StringIO. */
+    if (nm && is_standard_stream_global(nm)) {
       /* a stream the program stores a non-IO into (a StringIO) reads as
          what its slot holds: the standard stream until the first store */
       if (std_stream_boxed(c, nm)) return TY_POLY;

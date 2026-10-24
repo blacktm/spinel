@@ -2043,6 +2043,7 @@ now work on current master:
 | Hash variant inference (a wrong initial guess widens to poly transparently) | correct (a perf cost, not a correctness limit) |
 | A synthesized `attr_writer` inherited by sibling user classes and called through a boxed receiver | works when the candidate classes share one effective attribute family; inherited writer copies use the common ancestor's slot. An explicit writer override and an unrelated same-named attribute stay separate; Spinel does not infer their ivar types from the writer name alone. |
 | `return` and `break` in a literal `Dir.chdir` block | `return` leaves the enclosing method and `break` answers the `Dir.chdir` call (not an outer iterator), and the saved working directory is restored on both exits; a `return` or `break` inside a tail `if`/`else` or ternary, and `retry` in a body that breaks, are still refused at compile time |
+| `$stdin` reassigned to a StringIO or a File, then read by `$stdin.gets` or `ARGF.gets` | works: ARGF reads stdin through the stream `$stdin` holds, and a read before the first assignment reads the real stdin; a program that reads ARGF with a `$stdin` object whose `gets` answers something other than a String or nil is refused at compile time |
 
 There is no Ruby self-host "bootstrap fixpoint" constraint: the C compiler is
 the master implementation.

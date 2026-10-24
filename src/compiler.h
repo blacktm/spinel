@@ -499,6 +499,10 @@ typedef struct {
   int is_ext_entry;    /* designated --ext-entry: emitted non-static, a DCE
                           root, declared in the emitted extension header (#M1
                           of docs/internals/ext-design.md) */
+  int is_argf_stdin_hook; /* the synthesized `$stdin.gets` that ARGF reads
+                          through while its stream is stdin
+                          (synth_argf_stdin_gets): the runtime calls it, so it
+                          is a DCE root and its value is read */
   int ret_rbs_seeded;  /* ret pinned from an --rbs advisory seed: the fixpoint
                           must not recompute it from the body */
   int ret_rbs_box_held; /* a box reached that container seed while the
@@ -1513,6 +1517,10 @@ typedef struct {
      which desugar_splat_view_scalars rewrites once typed (-1 once seen) */
   int *splat_views;
   int nsplat_views;
+  /* the scope of the synthesized `$stdin.gets` ARGF reads through
+     (synth_argf_stdin_gets, Scope.is_argf_stdin_hook); -1 when the program
+     makes none */
+  int argf_stdin_scope;
 } Compiler;
 enum { PRES_UNMARKED = 1, PRES_REMOVED = 2 };
 
