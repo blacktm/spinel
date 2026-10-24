@@ -3876,6 +3876,9 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
           an_nonblock_no_exception(c, id))
         { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
       if (sp_streq(name, "read_nonblock")) { *out = an_poly_concrete(c, name, TY_STRING); return 1; }
+      /* a Dir's children, and its each_child Enumerator */
+      { TyKind dk = an_boxed_dir_children(c, id, name, argc);
+        if (dk != TY_UNKNOWN) { *out = an_poly_concrete(c, name, dk); return 1; } }
       if ((is_io_wait(name)) && argc <= 1)
         { *out = an_poly_concrete(c, name, sp_streq(name, "wait_writable") ? TY_IO : TY_POLY); return 1; }
       if (sp_streq(name, "write_nonblock")) { *out = an_poly_concrete(c, name, TY_INT); return 1; }

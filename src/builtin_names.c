@@ -833,6 +833,10 @@ int is_directory_entries(const char *n) {
   return sp_streq(n, "children") || sp_streq(n, "entries");
 }
 
+int is_dir_children(const char *n) {
+  return sp_streq(n, "children") || sp_streq(n, "each_child");
+}
+
 int is_io_position(const char *n) {
   return sp_streq(n, "tell") || sp_streq(n, "pos");
 }

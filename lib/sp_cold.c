@@ -3854,21 +3854,32 @@ static void sp_io_codepoint_rewind(sp_Enumerator *e) {SP_GC_ROOT(e);
   clearerr(io->fp); io->lineno = 0;
 }
 
-/* A boxed Dir's block walk rewinds the handle, as CRuby's Dir#each does, and
-   reads one entry at a time, so a break leaves the rest unread. */
+/* A boxed Dir's walk rewinds the handle, as CRuby's Dir#each does, and
+   reads one entry at a time, so a break out of `each` leaves the rest
+   unread (the collecting walks, sp_poly_dir_items, read them all first).
+   The children walk (each_child, children) leaves out "." and "..". */
+typedef struct { sp_Dir *dir; int children; } sp_DirEachCap;
+static void sp_dir_each_scan(void *p) {
+  sp_gc_mark(((sp_DirEachCap *)p)->dir);
+}
 static void sp_dir_each_gen(sp_Fiber *f) {
-  sp_Dir *dir = (sp_Dir *)f->user_data; SP_GC_ROOT(dir);
+  sp_DirEachCap *cap = (sp_DirEachCap *)f->user_data; SP_GC_ROOT(cap);
+  sp_Dir *dir = cap->dir; SP_GC_ROOT(dir);
   const char *entry = NULL; SP_GC_ROOT_STR(entry);
   sp_Dir_rewind(dir);
-  while ((entry = sp_Dir_read(dir)) != NULL)
+  while ((entry = sp_Dir_read(dir)) != NULL) {
+    if (cap->children && (strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0)) continue;
     sp_Fiber_yield(sp_box_str(entry));
+  }
   sp_gc_wb((void *)f);
   f->yielded_value = sp_box_obj(dir, SP_BUILTIN_DIR);
 }
-sp_RbVal sp_dir_each_enumerator(sp_Dir *dir) {SP_GC_ROOT(dir);
-  sp_Enumerator *e = sp_Enumerator_new_gen(sp_dir_each_gen, dir, sp_box_nil());
+sp_RbVal sp_dir_each_enumerator(sp_Dir *dir, int children) {SP_GC_ROOT(dir);
+  sp_DirEachCap *cap = (sp_DirEachCap *)sp_gc_alloc(sizeof *cap, NULL, sp_dir_each_scan);
+  SP_GC_ROOT(cap); cap->dir = dir; cap->children = children;
+  sp_Enumerator *e = sp_Enumerator_new_gen(sp_dir_each_gen, cap, sp_box_nil());
   SP_GC_ROOT(e);
-  e = sp_enum_with_src(e, sp_box_obj(dir, SP_BUILTIN_DIR), SPL("each"));
+  e = sp_enum_with_src(e, sp_box_obj(dir, SP_BUILTIN_DIR), children ? SPL("each_child") : SPL("each"));
   return sp_box_obj(e, SP_BUILTIN_ENUMERATOR);
 }
 

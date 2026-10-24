@@ -2481,8 +2481,23 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
   return 0;
 }
 
+/* A boxed Dir's children and blockless each_child (an_boxed_dir_children) */
+static int emit_boxed_dir_children(Compiler *c, int id, Buf *b, const char *name, int recv, int argc) {
+  if (recv < 0 || repr_of(c, recv).as_ty != TY_POLY) return 0;
+  TyKind dk = an_boxed_dir_children(c, id, name, argc);
+  if (dk == TY_UNKNOWN) return 0;
+  int tv = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = sp_poly_dir_children(", tv);
+  emit_boxed(c, recv, b);
+  buf_printf(b, ", \"%s\", %d); SP_GC_ROOT_RBVAL(_t%d); ", name, dk == TY_ENUMERATOR, tv);
+  emit_unbox_or_keep(c, repr_of(c, id).as_ty, tv, b);
+  buf_puts(b, "; })");
+  return 1;
+}
+
 /* ARGF's pseudo-IO methods, the Socket::Option and Addrinfo readers, and a Dir handle's methods */
 int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
+  if (emit_boxed_dir_children(c, id, b, name, recv, argc)) return 1;
   /* ARGF pseudo-IO methods: read the ARGV files (or stdin) in sequence. */
   if (recv >= 0 && comp_ntype(c, recv) == TY_ARGF) {
     if (sp_streq(name, "read")) { buf_puts(b, "sp_argf_read()"); return 1; }

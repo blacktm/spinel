@@ -481,6 +481,7 @@ int curry_apply_info(Compiler *c, int node, int *out_complete, TyKind *out_ret);
 int curry_count_max(Compiler *c, int recv);
 int an_program_builds_methods(Compiler *c);   /* the program builds Method objects at all */
 int an_program_makes_dir(Compiler *c);   /* the program names Dir anywhere */
+TyKind an_boxed_dir_children(Compiler *c, int id, const char *name, int argc);   /* a boxed Dir's children / each_child: its answer's kind, or TY_UNKNOWN */
 int an_program_makes_bsearch_enum(Compiler *c);   /* Array#bsearch without a block, anywhere */
 int an_program_makes_io(Compiler *c);   /* a boxed value may be an IO (a syntactic test) */
 int an_zero_arg_builtin_shadowed(Compiler *c, const char *name, int argc);

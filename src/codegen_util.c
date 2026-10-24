@@ -5561,6 +5561,15 @@ const char *enum_walk_name(Compiler *c, int id, int recv, const char *name) {
   if (cut) *cut = 0;
   return o[0] ? o : name;
 }
+/* The receiver check of a boxed block walk named wn: a boxed Dir walks its
+   entries under each and map (sp_poly_block_iter_check). Only a program
+   that names Dir can hold one, so any other keeps the plain check and its
+   generated C, and so does one that defines a method of that name of its
+   own, which a reopened Dir could answer. */
+const char *poly_block_walk_check(Compiler *c, const char *wn) {
+  return (is_each_name(wn) || is_map_alias(wn)) && an_program_makes_dir(c) && !an_user_recv_defines_method(c, wn)
+         ? "sp_poly_block_iter_check" : "sp_poly_iter_check";
+}
 /* The C type of class `cid`'s instances. A `native_struct` carries the name
    its declaration gave -- which need not be derived from the Ruby class name
    (`native_struct "Store", "sp_X509_Store"`) -- and every other class is the

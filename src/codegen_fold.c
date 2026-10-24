@@ -5831,7 +5831,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     emit_poly_iter_obj_reject_as(c, trecv2, name, enum_walk_name(c, id, recv, name), g_pre);
     emit_walk_arity_raise(c, id, recv, name, trecv2, g_indent, g_pre);
     emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "sp_poly_iter_check(_t%d, \"%s\");\n", trecv2, enum_walk_name(c, id, recv, name));
+    { const char *wn2 = enum_walk_name(c, id, recv, name);
+      buf_printf(g_pre, "%s(_t%d, \"%s\");\n", poly_block_walk_check(c, wn2), trecv2, wn2); }
     const char *restn2 = block_rest_name(c, block);
     int has_rest2 = restn2 && *restn2;
     int np2 = 0; while (block_param_name(c, block, np2)) np2++;

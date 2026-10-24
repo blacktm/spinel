@@ -218,6 +218,7 @@ int is_struct_constructor(const char *n); /* new [] */
 int is_attr_reader_family(const char *n); /* attr_accessor attr_reader */
 int is_range_bound_reader(const char *n); /* begin end */
 int is_directory_entries(const char *n); /* children entries */
+int is_dir_children(const char *n); /* children each_child */
 int is_exception_full_message(const char *n); /* detailed_message full_message */
 int is_each_or_index(const char *n); /* each each_with_index */
 int is_with_object_alias(const char *n); /* each_with_object with_object */

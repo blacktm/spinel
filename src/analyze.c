@@ -1618,6 +1618,16 @@ int an_program_makes_dir(Compiler *c) {
   memo_nt = nt; memo_n = nt->count;
   return memo;
 }
+/* A children or each_child call with no argument and no block on a boxed
+   receiver is Dir's (sp_poly_dir_children) where the program can make a
+   Dir and defines no method of that name, which a reopened Dir or another
+   class could answer. The answer's kind: children an Array, each_child an
+   Enumerator; TY_UNKNOWN when the call is not one. */
+TyKind an_boxed_dir_children(Compiler *c, int id, const char *name, int argc) {
+  if (argc != 0 || !is_dir_children(name) || nt_ref(c->nt, id, "block") >= 0 ||
+      !an_program_makes_dir(c) || an_user_recv_defines_method(c, name)) return TY_UNKNOWN;
+  return sp_streq(name, "children") ? TY_POLY_ARRAY : TY_ENUMERATOR;
+}
 
 /* Can the program make a bsearch Enumerator (Array#bsearch without a
    block, or a bsearch it names by Symbol)? Only then does `e.each { }` over

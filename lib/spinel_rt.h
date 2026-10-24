@@ -5027,12 +5027,13 @@ static SP_INLINE SP_UNUSED int sp_poly_no_enum(sp_RbVal v) {
    reached through a boxed receiver. The span helpers read any collection as
    its elements, so a Hash answered its [k, v] pairs and a String or Range its
    members where CRuby raises NoMethodError. `range_ok` lets a Range through
-   for the names Range defines (last, last(n)). A user object or an
+   for the names Range defines (last, last(n)). A Dir, which the helpers
+   read as its entries, defines none of them. A user object or an
    Enumerator is left to the helper. */
 static SP_INLINE sp_RbVal sp_poly_ary_chk(sp_RbVal v, const char *m, int range_ok) {
   sp_poly_coll_chk(v, m);
   if (v.tag == SP_TAG_STR || v.tag == SP_TAG_SYM || sp_poly_is_strbuf(v) ||
-      (v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id)) ||
+      (v.tag == SP_TAG_OBJ && (sp_poly_is_hash_kind(v.cls_id) || v.cls_id == SP_BUILTIN_DIR)) ||
       (!range_ok && v.tag == SP_TAG_OBJ &&
        (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE ||
         v.cls_id == SP_BUILTIN_FLOAT_RANGE)))
@@ -8339,14 +8340,32 @@ static void sp_poly_arr_writeback(sp_RbVal orig, sp_PolyArray *work) {
 }
 static sp_PolyArray *sp_enum_items_from(sp_RbVal v);   /* fwd: hash -> [key, value] pairs */
 static sp_PolyArray *sp_enum_to_a_boxed(sp_RbVal v);   /* fwd: drain an enumerator */
+sp_RbVal sp_dir_each_enumerator(sp_Dir *dir, int children);   /* lib/sp_cold.c */
+/* A boxed Dir's entries, as its each walk (or, for children, its each_child
+   walk) reads them: from the start, all of them before any block runs,
+   leaving the handle at its end. */
+static sp_PolyArray *sp_poly_dir_items(sp_RbVal v, int children) {
+  SP_GC_ROOT_RBVAL(v);
+  return sp_enum_to_a_boxed(sp_dir_each_enumerator((sp_Dir *)v.v.p, children));
+}
+/* Dir#children, and Dir#each_child without a block (an Enumerator that reads
+   the entries when it is walked), on a boxed receiver: anything else is m's
+   NoMethodError. */
+static sp_RbVal sp_poly_dir_children(sp_RbVal v, const char *m, int lazy) SP_UNUSED;
+static sp_RbVal sp_poly_dir_children(sp_RbVal v, const char *m, int lazy) {
+  if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_DIR && v.v.p)) sp_raise_poly_nomethod(m, v);
+  if (lazy) return sp_dir_each_enumerator((sp_Dir *)v.v.p, 1);
+  return sp_box_poly_array(sp_poly_dir_items(v, 1));
+}
 static sp_PolyArray *sp_poly_arr_recv(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ && sp_poly_is_array_kind(v.cls_id)) return sp_poly_to_poly_array(v);
   /* An Enumerator walks the items it yields, a multi-value step as the
-     packed Array a one-param block of select/find/reduce takes. Array's own
-     mutators and each_index are not Enumerable, and still raise. */
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p &&
+     packed Array a one-param block of select/find/reduce takes, and a Dir
+     its entries. Array's own mutators and each_index are not Enumerable,
+     and still raise. */
+  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_ENUMERATOR || v.cls_id == SP_BUILTIN_DIR) && v.v.p &&
       m[0] && m[strlen(m) - 1] != '!' && strcmp(m, "each_index") != 0)
-    return sp_enum_to_a_boxed(v);
+    return v.cls_id == SP_BUILTIN_DIR ? sp_poly_dir_items(v, 0) : sp_enum_to_a_boxed(v);
   /* an Integer or String Range enumerates its members: select / filter /
      reject on a boxed one raised NoMethodError naming Range (#4837) */
   if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE))
@@ -11837,6 +11856,9 @@ static sp_PolyPolyHash *sp_PolyPolyHash_from_poly(sp_RbVal src);
    rather than loop forever (#4837). */
 static sp_PolyArray *sp_enum_items_from(sp_RbVal v);
 static sp_RbVal sp_poly_iter_subject(sp_RbVal v) {
+  /* a Dir as its entries (map's walk; sp_poly_block_iter_check admits it) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_DIR && v.v.p)
+    return sp_box_poly_array(sp_poly_dir_items(v, 0));
   /* an Enumerator too: it has no length or element read of its own, so a
      boxed `h.each_pair` (or a boxed Struct's) walked zero elements and
      `.map { |k, v| k }` answered [] */
@@ -11865,10 +11887,9 @@ static sp_bool sp_poly_range_walks(sp_RbVal v) {
   sp_Range *r = (sp_Range *)v.v.p;
   return !r->nobeg && r->step == 0 && !r->fe;
 }
-sp_RbVal sp_dir_each_enumerator(sp_Dir *dir);
 static sp_RbVal sp_poly_iter_walk(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_DIR && v.v.p)
-    return sp_enum_walker_boxed(sp_dir_each_enumerator((sp_Dir *)v.v.p));
+    return sp_enum_walker_boxed(sp_dir_each_enumerator((sp_Dir *)v.v.p, 0));
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p) {
     sp_RbVal w = sp_enum_walker_boxed(v);
     if (w.tag != SP_TAG_NIL) return w;
@@ -11895,8 +11916,9 @@ static void sp_poly_iter_check(sp_RbVal v, const char *m) {
     return;
   sp_raise_poly_nomethod(m, v);
 }
-/* Dir is streamed by the block walk of `each` (codegen emits this check
-   for that walk only); the blockless constructor is unchanged. */
+/* Dir is streamed by the block walk of `each` and read whole by map's
+   (sp_poly_iter_subject); codegen emits this check for those walks only
+   (poly_block_walk_check), and the blockless constructor is unchanged. */
 static void sp_poly_block_iter_check(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_DIR && v.v.p)
     return;
@@ -18547,10 +18569,11 @@ static sp_bool sp_range_overlap_v(sp_RbVal a, sp_RbVal o) {
 }
 /* Enumerable#entries on a boxed receiver: an Array's elements, a Hash's
    [key, value] pairs, an Integer or String Range's members, an Enumerator's
-   values and a Struct's members, always in a new Array (an Array's to_a
-   answers the Array itself); anything else raises NoMethodError naming
+   values, a Dir's entries and a Struct's members, always in a new Array (an
+   Array's to_a answers the Array itself); anything else raises NoMethodError naming
    entries, nil among them, which has to_a but not entries. */
 static sp_PolyArray *sp_poly_entries(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_DIR && v.v.p) return sp_poly_dir_items(v, 0);
   if (v.tag == SP_TAG_OBJ &&
       (sp_poly_is_array_kind(v.cls_id) || sp_poly_is_hash_kind(v.cls_id) ||
        v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE ||
@@ -19709,11 +19732,12 @@ static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
   { sp_Enumerator *e = sp_Enumerator_new_from_items(idx); e->source = arr; e->meth = SPL("each_index"); return e; }
 }
 /* Time#to_a on a boxed receiver: [sec, min, hour, mday, mon, year, wday,
-   yday, isdst, zone], as the typed Time#to_a answers; any other value's to_a
-   is sp_poly_to_a_arr's. Only the `to_a` call itself answers through here --
+   yday, isdst, zone], as the typed Time#to_a answers, and a Dir's entries;
+   any other value's to_a is sp_poly_to_a_arr's. Only the `to_a` call itself answers through here --
    the other callers of sp_poly_to_a_arr (a `for` loop, `deconstruct`, the
    Enumerable names) keep a Time's NoMethodError, as CRuby raises. */
 static sp_PolyArray *sp_poly_to_a_call(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_DIR && v.v.p) return sp_poly_dir_items(v, 0);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_to_a((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_frange_iter_raise((*(sp_FloatRange *)v.v.p), 1); return NULL; }
   if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p)) return sp_poly_to_a_arr(v);
