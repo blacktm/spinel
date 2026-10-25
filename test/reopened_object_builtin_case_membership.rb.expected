@@ -1,0 +1,24 @@
+1 o-obj
+2 o-w-obj
+3 o-basic
+4 o-w-basic
+5 o-kernel
+0 when:obj in:obj
+1 when:obj in:obj
+2 when:obj in:obj
+3 when:obj in:obj
+4 when:obj in:obj
+5 when:obj in:obj
+6 when:obj in:obj
+7 when:obj in:obj
+8 when:obj in:obj
+9 when:obj in:obj
+10 when:obj in:obj
+11 when:obj in:obj
+12 when:obj in:obj
+13 when:obj in:obj
+14 when:not-obj in:not-obj
+15 when:not-obj in:not-obj
+16 when:not-obj in:not-obj
+no
+no

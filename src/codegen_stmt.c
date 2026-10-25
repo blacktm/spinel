@@ -7210,6 +7210,54 @@ void emit_class_val_when(const char *cn, int t, Buf *b) {
                     sp_streq(cn, "BasicObject") || sp_streq(cn, "Kernel")) ? "1" : "0");
 }
 
+/* Whether constant `name` may hold BasicObject: one of its writes names
+   BasicObject, or a constant that may (`A = BasicObject; B = A`, also a
+   reassigned constant), at most `depth` links. */
+static int const_may_name_basic_object(Compiler *c, const char *name, int depth) {
+  const NodeTable *nt = c->nt;
+  if (!name || depth < 0) return 0;
+  NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) {
+    const char *n = nt_str(nt, w, "name");
+    int v = nt_ref(nt, w, "value");
+    NodeKind vk = v >= 0 ? nt_kind(nt, v) : NK_NONE;
+    if (!n || !sp_streq(n, name) || (vk != NK_ConstantReadNode && vk != NK_ConstantPathNode)) continue;
+    const char *vn = nt_str(nt, v, "name");
+    if (vn && (sp_streq(vn, "BasicObject") || const_may_name_basic_object(c, vn, depth - 1))) return 1;
+  }
+  return 0;
+}
+
+/* Whether class k's chain names BasicObject through a constant alias
+   (`BO = BasicObject; class Bare < BO`), which class_is_blank_slate, reading
+   the literal name, does not see; such an instance is no Object either.
+   Erring towards "no Object" keeps master's answer for this arm. */
+static int class_aliases_basic_object(Compiler *c, int k) {
+  for (; k >= 0; k = c->classes[k].parent) {
+    int sc = nt_ref(c->nt, c->classes[k].def_node, "superclass");
+    const char *sn = sc >= 0 ? nt_str(c->nt, sc, "name") : NULL;
+    if (sn && const_may_name_basic_object(c, sn, c->nconsts)) return 1;
+  }
+  return 0;
+}
+
+/* `when Object` / `in Object` once the program reopens Object: the
+   reopening gives Object a program class id, but Object.new and every other
+   builtin value carry a builtin one, so those answer from the root check. A
+   program object is an Object unless its class descends from an explicit
+   `< BasicObject`; the class-table test alone missed every class whose
+   superclass is left implicit. */
+static void emit_reopened_object_when(Compiler *c, const char *tmp, Buf *b) {
+  buf_printf(b, "(%s.tag == SP_TAG_OBJ && %s.cls_id >= 0 ? !(", tmp, tmp);
+  int first = 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!class_is_blank_slate(c, k) && !class_aliases_basic_object(c, k)) continue;
+    buf_printf(b, "%s%s.cls_id == %d", first ? "" : " || ", tmp, k);
+    first = 0;
+  }
+  if (first) buf_puts(b, "0");
+  buf_printf(b, ") : sp_poly_kind_of_builtin(%s, \"Object\"))", tmp);
+}
+
 int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *cty = nt_type(nt, cond_id);
@@ -7272,6 +7320,8 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
     buf_printf(b, "(%s.tag == SP_TAG_OBJ && sp_poly_is_array_kind(%s.cls_id))", tmp, tmp);
   else if (sp_streq(cn, "Hash"))
     buf_printf(b, "(%s.tag == SP_TAG_OBJ && ((%s.cls_id <= -13 && %s.cls_id >= -20) || %s.cls_id == -34))", tmp, tmp, tmp, tmp);
+  else if (sp_streq(cn, "Object") && !comp_const(c, cn) && comp_class_index(c, cn) >= 0)
+    emit_reopened_object_when(c, tmp, b);
   else {
     int cid = comp_class_index(c, cn);
     if (cid >= 0) {
