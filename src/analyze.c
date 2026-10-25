@@ -47461,6 +47461,7 @@ static void an_phase_desugar_register(Compiler *c) {
   desugar_builtin_kwsplat(c);
   desugar_rightward_pattern(c);          /* `x => pat` -> one-arm case/in */
   desugar_match_predicate(c);            /* `x in pat` -> case/in true/else false */
+  desugar_pattern_parens(c);             /* `in (pat)` -> `in pat` (not inside a container pattern) */
   desugar_sort_by_with_index(c);         /* sort_by.with_index -> each_with_index.sort_by */
   desugar_forwarding_to_rest_callee(c);  /* def m(...) = f(*a, **k) -> anon *, ** */
   desugar_anon_block_param(c);           /* def m(&) = f(&) -> &__anon_block */

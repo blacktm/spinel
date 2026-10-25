@@ -4469,6 +4469,88 @@ int desugar_match_predicate(Compiler *c) {
   return changed;
 }
 
+/* A parenthesized pattern (`in (1..3)`, `in (Integer => n)`) is the
+   pattern it wraps, and is replaced by it where it stands, so every reader
+   of a pattern (the matcher, the binder, the NoMatchingPatternError
+   message, capture typing) sees the pattern itself. Only the `in` pattern
+   and what it reaches through an alternation or a capture are peeled: a
+   parenthesized element of an Array, Find or Hash pattern stays refused,
+   as it was. A value pattern (a lambda, a pinned expression) is an
+   expression, whose parentheses stay. */
+static int unparen_pattern(NodeTable *nt, int pat);
+static int unparen_pattern_ref(NodeTable *nt, int id, const char *key) {
+  int ch = nt_ref(nt, id, key);
+  if (ch < 0) return 0;
+  int p = unparen_pattern(nt, ch);
+  if (p == ch) return 0;
+  nt_node_set_ref(nt, id, key, p);
+  return 1;
+}
+/* Does an Array, Find or Hash pattern under pat hold a parenthesized
+   element (`([(1..3), _])`)? The matcher refuses that element. */
+static int pattern_holds_paren_elem(const NodeTable *nt, int pat, int in_container) {
+  if (pat < 0) return 0;
+  NodeKind k = nt_kind(nt, pat);
+  if (k == NK_ParenthesesNode) return in_container || pattern_holds_paren_elem(nt, nt_pattern_inner(nt, pat), 0);
+  if (k == NK_CapturePatternNode) return pattern_holds_paren_elem(nt, nt_ref(nt, pat, "value"), in_container);
+  if (k == NK_AlternationPatternNode)
+    return pattern_holds_paren_elem(nt, nt_ref(nt, pat, "left"), in_container) ||
+           pattern_holds_paren_elem(nt, nt_ref(nt, pat, "right"), in_container);
+  const char *ty = nt_type(nt, pat);
+  if (k != NK_ArrayPatternNode && k != NK_HashPatternNode && !(ty && sp_streq(ty, "FindPatternNode"))) return 0;
+  static const char *const keys[] = { "requireds", "posts", "elements", NULL };
+  for (int j = 0; keys[j]; j++) {
+    int n = 0; const int *el = nt_arr(nt, pat, keys[j], &n);
+    for (int i = 0; i < n; i++) {
+      int el_pat = el[i] >= 0 && nt_kind(nt, el[i]) == NK_AssocNode ? nt_ref(nt, el[i], "value") : el[i];
+      if (pattern_holds_paren_elem(nt, el_pat, 1)) return 1;
+    }
+  }
+  return 0;
+}
+static int unparen_pattern(NodeTable *nt, int pat) {
+  /* ...and one around such a pattern keeps its parentheses: the matcher
+     knows no parenthesized pattern and matched every subject, which the
+     peel would turn into a refusal of a program that built */
+  if (nt_kind(nt, pat) == NK_ParenthesesNode && pattern_holds_paren_elem(nt, nt_pattern_inner(nt, pat), 0)) return pat;
+  pat = nt_pattern_inner(nt, pat);
+  switch (nt_kind(nt, pat)) {
+  case NK_CapturePatternNode: unparen_pattern_ref(nt, pat, "value"); break;
+  case NK_AlternationPatternNode: unparen_pattern_ref(nt, pat, "left"); unparen_pattern_ref(nt, pat, "right"); break;
+  default: break;
+  }
+  return pat;
+}
+int desugar_pattern_parens(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_InNode) continue;
+    int pat = nt_ref(nt, id, "pattern");
+    if (pat < 0) continue;
+    /* `in PATTERN if GUARD`: the pattern is the guard's one statement */
+    int k = nt_kind(nt, pat);
+    if (k == NK_IfNode || k == NK_UnlessNode) {
+      int st = nt_ref(nt, pat, "statements");
+      int n = 0;
+      const int *body = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+      if (n >= 1 && body[0] >= 0) {
+        int p = unparen_pattern(nt, body[0]);
+        if (p != body[0]) {
+          int *ids = malloc(sizeof(int) * (size_t)n);
+          memcpy(ids, body, sizeof(int) * (size_t)n);
+          ids[0] = p;
+          nt_node_set_arr(nt, st, "body", ids, n);
+          free(ids);
+          changed = 1;
+        }
+      }
+    }
+    else changed |= unparen_pattern_ref(nt, id, "pattern");
+  }
+  return changed;
+}
+
 static int step_kw_tmp(NodeTable *nt, Scope *sc, const char *nm, int value) {
   scope_local_intern(sc, nm);
   int n = nt_new_node(nt, value >= 0 ? "LocalVariableWriteNode" : "LocalVariableReadNode");

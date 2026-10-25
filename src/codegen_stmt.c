@@ -7697,6 +7697,7 @@ static int case_oint_labels_typed(Compiler *c, const int *whens, int nw) {
   return 1;
 }
 static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b);
+static void emit_when_value_test(Compiler *c, int cond, int t, TyKind pt, int typed_t, TyKind typed_pt, int pred, Buf *b);
 /* One such label against the typed subject `_tN` beside its flag `_oN` */
 static void case_oint_label(Compiler *c, int cond, int t, Buf *b) {
   const NodeTable *nt = c->nt;
@@ -8131,27 +8132,17 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
     buf_puts(b, ")");
     return 1;
   }
-  /* pin `^var` / `^@ivar` / `^(expr)`: scrutinee == the pinned value */
+  /* pin `^var` / `^@ivar` / `^(expr)`: the pinned value's ===, as the same
+     value in a `when` (a Range by membership, a class by instance, a Proc by
+     its call, a Regexp by a match) */
   if (sp_streq(pty, "PinnedVariableNode") || sp_streq(pty, "PinnedExpressionNode")) {
     int ex = nt_ref(nt, pat, "expression");
     if (ex < 0) return 0;
-    /* A pinned Regexp matches via === (Regexp#===), not equality: the pinned
-       expression is an mrb_regexp_pattern*, so run it against the scrutinee
-       string (a poly scrutinee matches only when it holds a string). */
-    if (comp_ntype(c, ex) == TY_REGEX && (pt == TY_STRING || pt == TY_POLY)) {
-      if (pt == TY_POLY) {
-        buf_puts(b, "sp_re_case_eq(");
-        emit_expr(c, ex, b);
-        buf_printf(b, ", _t%d)", t);
-      }
-      else {
-        buf_puts(b, "(sp_re_match(");
-        emit_expr(c, ex, b);
-        buf_printf(b, ", _t%d) >= 0)", t);
-      }
-      return 1;
-    }
-    emit_pm_eq(c, t, pt, ex, b);
+    /* an Array or a Hash subject: the value's ==, the pinned value rooted
+       across it (emit_pm_eq), where the `when` test leaves a fresh one
+       (`^(mk(i))`) unrooted across a user == that allocates */
+    if (ty_is_array(pt) || ty_is_hash(pt)) emit_pm_eq(c, t, pt, ex, b);
+    else emit_when_value_test(c, ex, t, pt, t, pt, subj >= 0 ? subj : -1, b);
     return 1;
   }
   /* range pattern `lo..hi` / `lo...hi` (and beginless/endless): membership via
@@ -8175,7 +8166,21 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
       return 1;
     }
     if (pt == TY_POLY) {
-      /* numeric membership only: the scrutinee must be an int in range. */
+      /* a boxed subject: the Range's ===, as `when lo..hi` asks it (an
+         Integer or a Float Range), else the boxed Range's own === (a String
+         or a Symbol Range). A Bignum bound builds no Range, and a Range#===
+         the program defines is called by neither, so both keep the Integer
+         compare. */
+      int rci = comp_class_index(c, "Range"), rdc = -1;
+      int big = (lo >= 0 && comp_ntype(c, lo) == TY_BIGINT) || (hi >= 0 && comp_ntype(c, hi) == TY_BIGINT) ||
+                (rci >= 0 && comp_method_in_chain(c, rci, "===", &rdc) >= 0);
+      if (!big && emit_when_typed_test(c, pat, t, pt, b)) return 1;
+      if (!big) {
+        int tr = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", tr); emit_boxed(c, pat, b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_case_eq(_t%d, _t%d); })", tr, tr, t);
+        return 1;
+      }
       buf_printf(b, "(_t%d.tag == SP_TAG_INT", t);
       if (lo >= 0) { buf_printf(b, " && _t%d.v.i >= ", t); emit_int_expr_nilable(c, lo, b); }
       if (hi >= 0) { buf_printf(b, " && _t%d.v.i %s ", t, cmp); emit_int_expr_nilable(c, hi, b); }
@@ -11304,6 +11309,44 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
   emit_case_expr_in(c, id, b);
   g_case_res_oint = sro; g_case_scrut_oint = sso;
 }
+/* `<cond> === subject` for a `when` arm (or a value pattern) that names no
+   class, against the subject in _t<t> of kind pt; typed_t/typed_pt are the
+   subject before a nilable scalar was boxed, pred its node. */
+static void emit_when_value_test(Compiler *c, int cond, int t, TyKind pt, int typed_t, TyKind typed_pt, int pred, Buf *b) {
+  if (emit_when_typed_test(c, cond, t, pt, b)) { }
+  else if (comp_ntype(c, cond) == TY_PROC &&
+           emit_when_lambda_inline(c, cond, typed_t, typed_pt, pred, b)) { /* literal lambda inlined */ }
+  /* a Proc read out of a container arrives boxed: dispatch on the tag so
+     it is CALLED and not compared (#3683) */
+  else if (repr_of(c, cond).kind == RK_BOXED) emit_when_boxed_test(c, cond, t, pt, b);
+  else if (comp_ntype(c, cond) == TY_PROC) {
+    /* `when <proc>`: Proc#=== calls the proc with the subject. The
+       subject is published both in the sp_int slot (typed callee
+       param) and boxed on the side-channel (poly callee param), like
+       the force_poly proc-call path. */
+    emit_when_proc_test(c, cond, typed_t, typed_pt, b);
+  }
+  else if (pt == TY_STRING) {
+    /* an arm of another type can never be `===` a String (see the
+       statement chain's arm): evaluate it and answer false */
+    TyKind wat2 = comp_ntype(c, cond);
+    if (wat2 != TY_STRING && wat2 != TY_STRBUF && wat2 != TY_POLY && wat2 != TY_UNKNOWN) {
+      if (!emit_when_user_eq(c, cond, t, pt, b)) {
+        buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, cond, b); buf_puts(b, "), 0)");
+      }
+    }
+    else if (!emit_str_eq_lit_tmp(c, t, cond, b)) {
+      buf_printf(b, "sp_str_eq(_t%d, ", t);
+      emit_poly_unboxed(c, cond, wat2, "sp_poly_to_s(", b);
+      buf_puts(b, ")");
+    }
+  }
+  else if (emit_case_container_eq(c, cond, t, pt, b)) { }
+  else if (emit_when_user_eq(c, cond, t, pt, b)) { }
+  else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, cond, b); buf_puts(b, ")"); }
+  else emit_case_obj_eq(c, cond, t, pt, b);
+}
+
 static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   TyKind rt = id == g_strbuf_case_node ? TY_STRBUF : repr_of(c, id).as_ty;
@@ -11438,40 +11481,7 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
         }
         else if (cn2 && emit_when_scalar_class(pt, cn2, t, b)) { }
         else if (cn2) { int yes = ty_matches_class(pt, cn2, 0); buf_printf(b, "%d", yes > 0 ? 1 : 0); }
-        else {
-        if (emit_when_typed_test(c, conds[j], t, pt, b)) { }
-        else if (comp_ntype(c, conds[j]) == TY_PROC &&
-                 emit_when_lambda_inline(c, conds[j], typed_t, typed_pt, pred, b)) { /* literal lambda inlined */ }
-        /* a Proc read out of a container arrives boxed: dispatch on the tag so
-           it is CALLED and not compared (#3683) */
-        else if (repr_of(c, conds[j]).kind == RK_BOXED) emit_when_boxed_test(c, conds[j], t, pt, b);
-        else if (comp_ntype(c, conds[j]) == TY_PROC) {
-          /* `when <proc>`: Proc#=== calls the proc with the subject. The
-             subject is published both in the sp_int slot (typed callee
-             param) and boxed on the side-channel (poly callee param), like
-             the force_poly proc-call path. */
-          emit_when_proc_test(c, conds[j], typed_t, typed_pt, b);
-        }
-        else if (pt == TY_STRING) {
-          /* an arm of another type can never be `===` a String (see the sibling
-             arm above): evaluate it and answer false */
-          TyKind wat2 = comp_ntype(c, conds[j]);
-          if (wat2 != TY_STRING && wat2 != TY_STRBUF && wat2 != TY_POLY && wat2 != TY_UNKNOWN) {
-            if (!emit_when_user_eq(c, conds[j], t, pt, b)) {
-              buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, conds[j], b); buf_puts(b, "), 0)");
-            }
-          }
-          else if (!emit_str_eq_lit_tmp(c, t, conds[j], b)) {
-            buf_printf(b, "sp_str_eq(_t%d, ", t);
-            emit_poly_unboxed(c, conds[j], wat2, "sp_poly_to_s(", b);
-            buf_puts(b, ")");
-          }
-        }
-        else if (emit_case_container_eq(c, conds[j], t, pt, b)) { }
-        else if (emit_when_user_eq(c, conds[j], t, pt, b)) { }
-        else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
-        else emit_case_obj_eq(c, conds[j], t, pt, b);
-        } /* close non-ConstantReadNode else */
+        else emit_when_value_test(c, conds[j], t, pt, typed_t, typed_pt, pred, b);
       }
       else {
         buf_puts(b, "(");

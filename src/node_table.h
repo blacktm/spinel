@@ -625,6 +625,18 @@ static inline int nt_paren_single(const NodeTable *nt, int n) {
   }
   return n;
 }
+/* The pattern a parenthesized pattern wraps: `in (-5..-1)` holds the pattern
+   itself as its body, where an expression's parentheses hold a
+   StatementsNode (nt_paren_single). Any other node comes back as it is. */
+static inline int nt_pattern_inner(const NodeTable *nt, int n) {
+  while (nt_kind(nt, n) == NK_ParenthesesNode) {
+    int body = nt_ref(nt, n, "body");
+    int inner = nt_kind(nt, body) == NK_StatementsNode ? nt_paren_single(nt, n) : body;
+    if (inner < 0 || inner == n) break;
+    n = inner;
+  }
+  return n;
+}
 const char *nt_content(const NodeTable *nt, int id);
 
 /* Generic child iteration (for structural walks that don't know field
