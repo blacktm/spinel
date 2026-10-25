@@ -7734,13 +7734,39 @@ static const char *exc_when_cls_name(Compiler *c, const char *cn) {
   return q ? q : cn;
 }
 
+/* Whether the program may give Kernel or Module a `===` of its own: a def
+   (`def Kernel.===`, `class << Kernel`, `class Module; def ===`), or a
+   Symbol or String spelling the name, which a dynamic definer can take
+   (`Kernel.send(:define_singleton_method, :===)`). The class arm does not
+   call such a method, so an answer it would change keeps master's path. */
+static int program_redefines_module_eqq(Compiler *c) {
+  static const char *const owners[] = { "Kernel", "Module" };
+  for (size_t i = 0; i < sizeof owners / sizeof owners[0]; i++) {
+    int ci = comp_class_index(c, owners[i]);
+    if (ci >= 0 && (comp_method_in_chain(c, ci, "===", NULL) >= 0 ||
+                    comp_cmethod_in_chain(c, ci, "===", NULL) >= 0)) return 1;
+  }
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, k) {
+    const char *v = nt_str(nt, k, "value");
+    if (v && sp_streq(v, "===")) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_StringNode, k) {
+    const char *v = nt_str(nt, k, "content");
+    if (v && sp_streq(v, "===")) return 1;
+  }
+  return 0;
+}
+
 /* A user object is a BasicObject, and an Object and a Kernel unless its class
    descends from an explicit `< BasicObject` (#2703) or is a reopened
-   `class BasicObject` itself. */
+   `class BasicObject` itself. An explicit Kernel include still matches. */
 static int obj_is_root_class(Compiler *c, int cid, const char *cn) {
   if (comp_const(c, cn)) return 0;   /* the program reassigns the name */
   if (sp_streq(cn, "BasicObject")) return 1;
-  if (!sp_streq(cn, "Object") && !sp_streq(cn, "Kernel")) return 0;
+  if (!sp_streq(cn, "Object") && !is_kernel_module_name(cn)) return 0;
+  if (is_kernel_module_name(cn) && class_includes_module_named(c, cid, cn) &&
+      !program_redefines_module_eqq(c)) return 1;
   const char *rn = class_ruby_name(c, cid);
   if (rn && sp_streq(rn, "BasicObject")) return 0;
   return !class_is_blank_slate(c, cid);
