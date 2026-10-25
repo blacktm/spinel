@@ -13671,6 +13671,12 @@ static int (*sp_poly_is_a_hook)(sp_RbVal, sp_Class) = NULL;
 static sp_bool sp_poly_kind_of_builtin(sp_RbVal v, const char *cn) {
   if (!cn) return FALSE;
   if (strcmp(cn, "BasicObject") == 0) return TRUE;
+#ifdef SP_TU_BLANK_SLATE
+  /* A boxed user instance follows its own ancestry, including blank slates. */
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && sp_poly_is_a_hook &&
+      (strcmp(cn, "Object") == 0 || strcmp(cn, "Kernel") == 0))
+    return (sp_bool)(sp_poly_is_a_hook(v, (sp_Class){strcmp(cn, "Object") == 0 ? -116 : -119, NULL}) != 0);
+#endif
   /* a BasicObject.new is no Object and no Kernel */
   if (strcmp(cn, "Object") == 0 || strcmp(cn, "Kernel") == 0)
     return !(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BASIC_OBJECT);

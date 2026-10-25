@@ -18923,6 +18923,11 @@ static int program_reopens_builtin_class(Compiler *c) {
   return 0;
 }
 
+static int program_has_blank_slate(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++) if (class_is_blank_slate(c, i)) return 1;
+  return 0;
+}
+
 /* Whether builtin module `mod` is already on builtin class `bid`'s own
    chain, as the ancestors walk's builtin arm emits it (Numeric, String and
    Symbol include Comparable; Array, Hash, Range, Enumerator and Struct
@@ -20958,6 +20963,10 @@ char *codegen_program(const NodeTable *nt) {
   /* a reopened builtin class: sp_class_eq maps its id to the builtin's */
   if (g_needs_class_machinery && program_reopens_builtin_class(c))
     buf_puts(&b, "#define SP_TU_REOPENS_BUILTIN_CLASS 1\n");
+  /* a class below an explicit `< BasicObject`: a boxed user instance asks its
+     own ancestry for Object and Kernel */
+  if (g_needs_class_machinery && program_has_blank_slate(c))
+    buf_puts(&b, "#define SP_TU_BLANK_SLATE 1\n");
   if (c->n_cext_extensions) buf_puts(&b, "#define SP_CEXT 1\n/* SPINEL_USES_CEXT */\n");
   emit_runtime_include(c, &b, 0);
   if (c->n_cext_extensions) {
