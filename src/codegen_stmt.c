@@ -10873,7 +10873,8 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
       if (j) buf_puts(b, " || ");
       if (oint_typed) { case_oint_label(c, conds[j], t, b); continue; }
       if (pred >= 0) {
-        /* `when *arr` -- array membership test */
+        /* `when *arr`: a typed array tests membership; a poly array asks each
+           element's === on the subject's temp, as the value form does */
         if (nt_type(nt, conds[j]) && sp_streq(nt_type(nt, conds[j]), "SplatNode")) {
           int inner = nt_ref(nt, conds[j], "expression");
           TyKind at = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
@@ -10914,10 +10915,8 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             buf_printf(b, "; _t%d && sp_FloatArray_include(_t%d, _t%d); })", ta, ta, t);
             break;
           case TY_POLY_ARRAY:
-            buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, inner, b);
-            buf_printf(b, "; _t%d && sp_PolyArray_include(_t%d, ", ta, ta);
-            emit_boxed(c, pred, b);
-            buf_puts(b, "); })");
+            /* each element's ===, as the value form tests it, on the subject's temp */
+            emit_when_splat_test(c, conds[j], t, pt, b);
             break;
           default:
             buf_puts(b, "0 /* unsupported splat type */");

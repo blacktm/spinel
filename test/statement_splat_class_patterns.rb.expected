@@ -1,0 +1,17 @@
+splat-shape
+splat-lit-shape
+splat-object
+splat-lit-kernel
+mixed-splat-basic
+expr-splat-object
+stmt-splat-basic
+stmt-splat-miss
+regexp b
+range
+nilclass
+symbol
+numeric
+module
+equal-element
+str
+[1, :s, 2.5]
