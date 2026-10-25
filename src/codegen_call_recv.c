@@ -328,13 +328,13 @@ static void emit_str_elem_param(Compiler *c, int blk, const char *bp, const char
   else
     buf_printf(b, " const char *lv_%s = sp_StrArray_get(_t%d, _t%d);", bpn, ta, ti);
 }
-static int value_kind_misses(Compiler *c, int node, TyKind ek) {
-  TyKind t = comp_ntype(c, node);
+/* See analyze_internal.h. */
+int value_kind_meets(Compiler *c, TyKind t, TyKind ek) {
   if (t == ek || t == TY_POLY || t == TY_UNKNOWN) return 0;
   int num = ek == TY_INT || ek == TY_FLOAT || ek == TY_BIGINT;
   if (num && (t == TY_INT || t == TY_FLOAT || (t == TY_BIGINT && ek != TY_INT))) return 0;
   if (ek == TY_STRING && (t == TY_STRING || t == TY_STRBUF)) return 0;
-  if (!num && ek != TY_STRING) return 0;
+  if (!num && ek != TY_STRING) return -1;
   if (ty_is_object(t)) {
     /* a Comparable includer with <=> has the == the module supplies (the
        same reading as respond_to?'s); one without the module compares by
@@ -348,7 +348,10 @@ static int value_kind_misses(Compiler *c, int node, TyKind ek) {
   return t == TY_NIL || t == TY_BOOL || t == TY_INT || t == TY_BIGINT || t == TY_FLOAT ||
          t == TY_SYMBOL || t == TY_STRING || t == TY_STRBUF || t == TY_RANGE ||
          t == TY_FLOAT_RANGE || t == TY_STR_RANGE || t == TY_TIME || t == TY_REGEX ||
-         ty_is_array(t) || ty_is_hash(t);
+         ty_is_array(t) || ty_is_hash(t) ? 1 : -1;
+}
+static int value_kind_misses(Compiler *c, int node, TyKind ek) {
+  return value_kind_meets(c, comp_ntype(c, node), ek) == 1;
 }
 
 /* An Integer or Float array whose elements can be nil: the array keeps a

@@ -893,6 +893,43 @@ void refuse_unredirected_output(Compiler *c, int id) {
   unsupported(c, id, msg);
 }
 
+/* See codegen_internal.h. */
+int verbose_nil_state(Compiler *c) {
+  LocalVar *verb = comp_gvar(c, "VERBOSE");
+  return !verb ? 0 : verb->type == TY_POLY ? 1 : verb->type == TY_NIL ? 2 : 0;
+}
+
+/* See codegen_internal.h. */
+const char *warn_stream(Compiler *c, int id, const char *refusal, int *sio) {
+  LocalVar *serr = comp_gvar(c, "stderr");
+  *sio = -1;
+  if (std_stream_boxed(c, "$stderr")) {
+    int k = comp_class_index(c, "StringIO");
+    if (std_stream_foreign_writer(c, NULL)) {
+      if (!refusal) return NULL;
+      unsupported(c, id, refusal);
+    }
+    else if (k >= 0) *sio = k;
+  }
+  /* ...and to the handle it holds when that is an IO (`$stderr = $stdout`,
+     a File): the stream its own puts writes to */
+  return serr && serr->type == TY_IO ? "(gv_stderr ? gv_stderr->fp : stderr)" : "stderr";
+}
+
+/* See codegen_internal.h. */
+void emit_warn_text(Buf *b, const char *guard, int sio, const char *wfp, const char *text) {
+  if (guard[0]) buf_printf(b, "if (%s) ", guard);
+  if (sio >= 0) {
+    buf_printf(b, "{ sp_RbVal _ge = gv_stderr; if (_ge.tag == SP_TAG_OBJ && _ge.cls_id == %d)"
+                  " sp_StringIO_write((sp_StringIO *)_ge.v.p, ", sio);
+    emit_str_literal(b, text);
+    buf_puts(b, "); else fputs(");
+    emit_str_literal(b, text);
+    buf_puts(b, ", sp_poly_warn_fp(_ge)); }");
+  }
+  else { buf_puts(b, "fputs("); emit_str_literal(b, text); buf_printf(b, ", %s);", wfp); }
+}
+
 int emit_output_call(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -1174,26 +1211,16 @@ else {
        write, whose own write warn would have to call: the plain calls reach
        it through desugar_std_stream_bare_warn, and what reaches here with a
        message (keywords, a splat) is refused. No message writes nothing. */
-    LocalVar *serr = comp_gvar(c, "stderr");
-    int redirect_boxed = -1;
-    if (std_stream_boxed(c, "$stderr")) {
-      int sio = comp_class_index(c, "StringIO");
-      if (std_stream_foreign_writer(c, NULL)) {
-        if (argc > 0) unsupported(c, id, "warn while $stderr can hold an object whose class has its own write");
-      }
-      else if (sio >= 0) redirect_boxed = sio;
-    }
-    /* ...and to the handle it holds when that is an IO (`$stderr = $stdout`,
-       a File): the stream its own puts writes to */
-    const char *wfp = serr && serr->type == TY_IO ? "(gv_stderr ? gv_stderr->fp : stderr)" : "stderr";
+    int redirect_boxed;
+    const char *wfp = warn_stream(c, id, argc > 0 ? "warn while $stderr can hold an object whose class has its own write" : NULL,
+                                  &redirect_boxed);
     /* the runtime gate expression, when a category was given */
     char guard[96]; guard[0] = 0;
     if (cat_guard) snprintf(guard, sizeof guard, "sp_warning_enabled(\"%s\")", cat_guard);
     else if (cat_dyn) snprintf(guard, sizeof guard, "sp_warning_aref(_t%d)", cat_dyn);
     /* A nil `$VERBOSE` (ruby -W0) silences warn, whatever the category. Only
        a program that can set it nil has the boxed slot to test. */
-    LocalVar *verb = comp_gvar(c, "VERBOSE");
-    if (verb && verb->type == TY_POLY) {
+    if (verbose_nil_state(c) == 1) {
       size_t gl = strlen(guard);
       snprintf(guard + gl, sizeof guard - gl, "%s!sp_poly_nil_p(gv_VERBOSE)", gl ? " && " : "");
     }
@@ -1244,16 +1271,8 @@ else {
       if (bad_cat[0]) { emit_indent(b, indent); buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, ");\n"); continue; }
       if (up_pre[0]) {
         emit_indent(b, indent);
-        if (guard[0]) buf_printf(b, "if (%s) ", guard);
-        if (redirect_boxed >= 0) {
-          buf_printf(b, "{ sp_RbVal _ge = gv_stderr; if (_ge.tag == SP_TAG_OBJ && _ge.cls_id == %d)"
-                        " sp_StringIO_write((sp_StringIO *)_ge.v.p, ", redirect_boxed);
-          emit_str_literal(b, up_pre);
-          buf_puts(b, "); else fputs(");
-          emit_str_literal(b, up_pre);
-          buf_puts(b, ", sp_poly_warn_fp(_ge)); }\n");
-        }
-        else { buf_puts(b, "fputs("); emit_str_literal(b, up_pre); buf_printf(b, ", %s);\n", wfp); }
+        emit_warn_text(b, guard, redirect_boxed, wfp, up_pre);
+        buf_puts(b, "\n");
         up_pre[0] = 0;
       }
       TyKind at = comp_ntype(c, argv[k]);

@@ -1,0 +1,15 @@
+test/array_argument_ignores_block.rb:6: warning: given block not used
+test/array_argument_ignores_block.rb:7: warning: given block not used
+test/array_argument_ignores_block.rb:8: warning: given block not used
+test/array_argument_ignores_block.rb:9: warning: given block not used
+test/array_argument_ignores_block.rb:10: warning: given block not used
+test/array_argument_ignores_block.rb:11: warning: given block not used
+test/array_argument_ignores_block.rb:12: warning: given block not used
+test/array_argument_ignores_block.rb:13: warning: given block not used
+test/array_argument_ignores_block.rb:22: warning: given block not used
+test/array_argument_ignores_block.rb:24: warning: given block not used
+test/array_argument_ignores_block.rb:37: warning: given block not used
+test/array_argument_ignores_block.rb:38: warning: given block not used
+test/array_argument_ignores_block.rb:40: warning: given block not used
+test/array_argument_ignores_block.rb:41: warning: given block not used
+test/array_argument_ignores_block.rb:42: warning: given block not used

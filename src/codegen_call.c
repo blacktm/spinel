@@ -27518,6 +27518,52 @@ static int emit_call_bool_sides(Compiler *c, int id, Buf *b) {
 }
 
 static void emit_call_lifted(Compiler *c, int id, Buf *b);
+
+/* Array pattern/value arguments take precedence over a literal block. The
+   receiver and the argument run, either of which may raise, then the
+   warning is written where warn writes it, and the block never runs. */
+static int emit_unused_pattern_block(Compiler *c, int id, Buf *b) {
+  if (!nt_int(c->nt, id, "unused_pattern_block", 0)) return 0;
+  /* a `&.` call is re-entered inside its nil test (emit_call_safe_nav_arms):
+     the warning is that emission's, for a receiver that is not nil */
+  if (sn_guard_pending(c, id)) return 0;
+  int argc = 0; const int *argv = call_args(c->nt, id, &argc);
+  int recv = nt_ref(c->nt, id, "receiver"), saved = g_n_argov;
+  Buf pre = {0}, value = {0}; Buf *sv_pre = g_pre; g_pre = &pre;
+  Repr rr = repr_of(c, recv);
+  int tr = hold_operand(c, recv, rr.as_ty, rr.kind == RK_BOXED, ++g_tmp, 1, " ", &pre);
+  view_bind(recv, "_t%d", tr);
+  int held = view_push_repr(c, recv, VR_HEAD_HELD, 1), aheld = -1;
+  if (argc == 1) {
+    Repr ar = repr_of(c, argv[0]);
+    int ta = hold_operand(c, argv[0], ar.as_ty, ar.kind == RK_BOXED, ++g_tmp, 1, " ", &pre);
+    view_bind(argv[0], "_t%d", ta);
+    aheld = view_push_repr(c, argv[0], VR_HEAD_HELD, 1);
+  }
+  int ea = emit_env_args_before(c, id);
+  emit_call_unwrapped(c, id, &value);
+  if (ea >= 0) view_unbind(ea);
+  if (aheld >= 0) view_pop(c, aheld);
+  view_pop(c, held);
+  g_pre = sv_pre; view_unbind(saved);
+  buf_printf(b, "({ %s ", pre.p ? pre.p : "");
+  int vn = verbose_nil_state(c);
+  int sio;
+  /* (not written where $stderr may hold an object with its own write) */
+  const char *wfp = vn != 2 ? warn_stream(c, id, NULL, &sio) : NULL;
+  if (wfp) {
+    const char *file = nt_file_path(c->nt, (int)nt_int(c->nt, id, "node_file", 0));
+    if (!file || !*file) file = c->nt->source_file;
+    Buf msg = {0}; buf_printf(&msg, "%s:%lld: warning: given block not used\n", file ? file : "-",
+                             (long long)nt_int(c->nt, id, "node_line", 0));
+    emit_warn_text(b, vn == 1 ? "!sp_poly_nil_p(gv_VERBOSE)" : "", sio, wfp, msg.p);
+    free(msg.p);
+  }
+  buf_printf(b, " %s; })", value.p ? value.p : "0");
+  free(pre.p); free(value.p);
+  return 1;
+}
+
 void emit_call(Compiler *c, int id, Buf *b) {
   int lk = an_push_lifts_boxed(c, id);
   if (lk) {
@@ -27677,6 +27723,7 @@ static void emit_call_inner(Compiler *c, int id, Buf *b) {
   if (emit_splat_to_a_check_wrap(c, id, b)) return;
   /* a flagged constant read through a receiver that runs: once, whatever the lowering does with it */
   if (emit_const_recv_wrap(c, id, b)) return;
+  if (emit_unused_pattern_block(c, id, b)) return;
   int env_args = emit_env_args_before(c, id);
   emit_call_unwrapped(c, id, b);
   if (env_args >= 0) view_unbind(env_args);

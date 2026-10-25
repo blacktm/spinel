@@ -2721,6 +2721,20 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent);
 void emit_print_one(Compiler *c, int arg, Buf *b, int indent);
 void emit_p_one(Compiler *c, int arg, Buf *b, int indent);
 int emit_output_call(Compiler *c, int id, Buf *b, int indent);
+/* How a nil `$VERBOSE` (ruby -W0) silences a warning: 0 it cannot (the
+   program never sets it nil), 1 at run time (the boxed slot,
+   `sp_poly_nil_p(gv_VERBOSE)`), 2 always (nil is all it is set to). */
+int verbose_nil_state(Compiler *c);
+/* Where a warning is written: the stream expression for `$stderr` (an IO
+   slot's handle, else the process's stderr), and in *sio the StringIO class
+   index when the slot is boxed and may hold one (-1 otherwise; #3113). A
+   slot that may hold an object whose class has its own write is refused
+   with `refusal` for call `id`, or, with no `refusal`, answers NULL: there
+   is no stream to write to. */
+const char *warn_stream(Compiler *c, int id, const char *refusal, int *sio);
+/* The fixed line `text` written where warn_stream says, under the C
+   condition `guard` when it is not empty: one statement, no newline. */
+void emit_warn_text(Buf *b, const char *guard, int sio, const char *wfp, const char *text);
 void refuse_unredirected_output(Compiler *c, int id);   /* a bare print past a reassigned $stdout */
 void system_refuse_unsupported(Compiler *c, int id, const int *argv, int argc);
 int emit_system_splat(Compiler *c, int id, const int *argv, int argc, Buf *b);

@@ -7330,6 +7330,18 @@ static int unused_block_read(TyKind rt, const char *nm) {
   for (int k = 0; t && t[k]; k++) if (sp_streq(nm, t[k])) return 1;
   return 0;
 }
+/* Does the blockless form of a typed Array's quantifier, count or
+   find_index take `arg` in place of its block? A poly Array's arm boxes any
+   argument; a typed one's compares it as the element's own kind, boxed, or
+   ruled out by its kind (value_kind_meets), and a Class through the
+   quantifiers' Class arm. Any other kind (a Proc, a Method, a Rational)
+   would land in the element's C slot: the block form is left to the call. */
+static int pattern_arg_fits(Compiler *c, TyKind rt, const char *nm, int arg) {
+  if (rt == TY_POLY_ARRAY) return 1;
+  TyKind at = infer_type(c, arg);
+  if (at == TY_CLASS) return is_quantifier_or_count(nm);
+  return value_kind_meets(c, at, ty_array_elem(rt)) >= 0;
+}
 int desugar_unused_block_arg(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -7345,12 +7357,18 @@ int desugar_unused_block_arg(Compiler *c) {
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
     TyKind rt = infer_type(c, recv);
-    if (!unused_block_read(rt, nm)) continue;
+    int ac = 0, pa = nt_ref(nt, id, "arguments");
+    const int *av0 = pa >= 0 ? nt_arr(nt, pa, "arguments", &ac) : NULL;
+    int pattern = ty_is_array(rt) && nt_kind(nt, blk) == NK_BlockNode && ac == 1 &&
+                  nt_kind(nt, av0[0]) != NK_SplatNode && nt_kind(nt, av0[0]) != NK_KeywordHashNode &&
+                  is_pattern_arg_query(nm) && pattern_arg_fits(c, rt, nm, av0[0]);
+    if (!pattern && !unused_block_read(rt, nm)) continue;
     const char *cn = ty_is_array(rt) ? "Array" : ty_is_hash(rt) ? "Hash" : "String";
     int ci = comp_class_index(c, cn);
     int mi = ci >= 0 ? comp_method_in_chain(c, ci, nm, NULL) : -1;
     if (mi >= 0 && mi < c->nscopes && c->scopes[mi].def_node >= 0 &&
         !nt_int(nt, c->scopes[mi].def_node, "node_bi", 0)) continue;
+    if (pattern) nt_node_set_int(nt, id, "unused_pattern_block", 1);
     nt_node_set_ref(nt, id, "block", -1);
     /* a splat the expansion left whole for the block (splat_dispatch_on_length)
        is expanded now, as the blockless call's is */

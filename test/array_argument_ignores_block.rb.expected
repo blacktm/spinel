@@ -1,0 +1,22 @@
+true
+true
+1
+0
+true
+true
+nil
+2
+recv
+arg
+2
+1
+nil
+ZeroDivisionError
+2
+1
+1
+true
+1
+1
+"warning: given block not used\n"
+true

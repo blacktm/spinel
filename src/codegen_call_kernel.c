@@ -942,9 +942,9 @@ int emit_call_kernel_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     /* nil while $VERBOSE is nil (warn_text 2: the program assigns it),
        once the messages have run */
-    LocalVar *verb = nt_int(nt, id, "warn_text", 0) == 2 ? comp_gvar(c, "VERBOSE") : NULL;
-    if (verb && verb->type == TY_POLY) buf_printf(b, "if (sp_poly_nil_p(gv_VERBOSE)) _t%d = NULL; ", ta);
-    else if (verb && verb->type == TY_NIL) buf_printf(b, "_t%d = NULL; ", ta);
+    int vn = nt_int(nt, id, "warn_text", 0) == 2 ? verbose_nil_state(c) : 0;
+    if (vn == 1) buf_printf(b, "if (sp_poly_nil_p(gv_VERBOSE)) _t%d = NULL; ", ta);
+    else if (vn == 2) buf_printf(b, "_t%d = NULL; ", ta);
     buf_printf(b, "_t%d; })", ta);
     return 1;
   }

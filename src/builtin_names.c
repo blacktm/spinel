@@ -291,6 +291,10 @@ int is_quantifier_or_count(const char *n) {
          sp_streq(n, "one?") || sp_streq(n, "count");
 }
 
+int is_pattern_arg_query(const char *n) {
+  return is_quantifier_or_count(n) || sp_streq(n, "find_index");
+}
+
 int is_push_unshift(const char *n) {
   return sp_streq(n, "<<") || sp_streq(n, "push") || sp_streq(n, "append") ||
          sp_streq(n, "unshift");
