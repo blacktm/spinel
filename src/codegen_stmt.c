@@ -10206,6 +10206,40 @@ static int subtree_has_loop_break(Compiler *c, int root) {
   return 0;
 }
 
+/* A bound of a literal String range in a String-subject `when`: absent, a
+   String the arm compares inline (a nilable one is NULL, an open bound),
+   nil, a boxed value, or anything else (the arm keeps its false). */
+enum { SRE_STRING, SRE_NIL, SRE_BOXED, SRE_OTHER };
+static int when_srange_end(Compiler *c, int n) {
+  if (n < 0) return SRE_STRING;
+  if (repr_of(c, n).kind == RK_BOXED) return SRE_BOXED;
+  TyKind k = comp_ntype(c, n);
+  return k == TY_STRING ? SRE_STRING : k == TY_NIL ? SRE_NIL : SRE_OTHER;
+}
+
+/* Whether the program gives Range a `===` of its own (a reopen, a prepended
+   module): the String-range arms do not call it, so an answer it would
+   change keeps master's path. */
+static int program_redefines_range_eqq(Compiler *c) {
+  int ci = comp_class_index(c, "Range");
+  return ci >= 0 && comp_method_in_chain(c, ci, "===", NULL) >= 0;
+}
+
+/* `when ("a"..b.lo)` with a bound that is nil (`"a"..nil`, a method that
+   answers nil) or boxed: the bounds run once, in order, and the runtime
+   decides the answer from their values (sp_srange_case_eq_box). A bound of
+   another type keeps the caller's false (0). */
+static int emit_when_srange_checked(Compiler *c, int left, int right, int lk, int rk, int excl, int t, Buf *b) {
+  if (lk == SRE_OTHER || rk == SRE_OTHER || program_redefines_range_eqq(c)) return 0;
+  int tf = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", tf);
+  if (left >= 0) emit_boxed(c, left, b); else buf_puts(b, "sp_box_nil()");
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_srange_case_eq_box(_t%d, ", tf, tf);
+  if (right >= 0) emit_boxed(c, right, b); else buf_puts(b, "sp_box_nil()");
+  buf_printf(b, ", %d, _t%d); })", excl, t);
+  return 1;
+}
+
 /* `when <string-range>` with a String scrutinee: Range#=== is cover?, i.e.
    lexicographic <=> against both endpoints (byte order, like String#<=>).
    Handles beginless/endless forms. Emits nothing and returns 0 when the
@@ -10234,8 +10268,9 @@ static int emit_when_string_range(Compiler *c, int cond, int t, Buf *b) {
   int left = nt_ref(nt, cond, "left");
   int right = nt_ref(nt, cond, "right");
   if (left < 0 && right < 0) return 0;
-  if (left >= 0 && comp_ntype(c, left) != TY_STRING) return 0;
-  if (right >= 0 && comp_ntype(c, right) != TY_STRING) return 0;
+  int lk = when_srange_end(c, left), rk = when_srange_end(c, right);
+  if (lk != SRE_STRING || rk != SRE_STRING)
+    return emit_when_srange_checked(c, left, right, lk, rk, nt_range_excl(nt, cond), t, b);
   int excl = nt_range_excl(nt, cond);
   int tl = left >= 0 ? ++g_tmp : -1;
   int tr = right >= 0 ? ++g_tmp : -1;

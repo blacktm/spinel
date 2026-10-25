@@ -4644,6 +4644,20 @@ static SP_UNUSED sp_RbVal sp_range_new_box(sp_RbVal f, sp_RbVal l, sp_int x) {
                                          sp_poly_frange_bits(f, 1, 4) | sp_poly_frange_bits(l, 2, 8)));
   return sp_box_range(sp_range_new_pend(sp_range_lo_bound(f), l, x));
 }
+/* `when (f..l)` against the String x, with ends that are boxed or nil:
+   nil is an open end and Strings compare, as the Range CRuby builds. A
+   user object end, which CRuby compares through its own <=>, answers
+   false. Ends of other classes with no String make the Range they make
+   (sp_range_new_box, raising where CRuby does), whose === of a String is
+   false; a String beside one raises CRuby's ArgumentError
+   (sp_srange_bound). */
+static SP_UNUSED sp_bool sp_srange_case_eq_box(sp_RbVal f, sp_RbVal l, sp_int x, const char *s) {
+  if ((f.tag == SP_TAG_OBJ && f.cls_id >= 0) || (l.tag == SP_TAG_OBJ && l.cls_id >= 0)) return 0;
+  int fs = f.tag == SP_TAG_STR || sp_poly_is_strbuf(f), ls = l.tag == SP_TAG_STR || sp_poly_is_strbuf(l);
+  int fo = !fs && f.tag != SP_TAG_NIL, lo = !ls && l.tag != SP_TAG_NIL;
+  if ((fo || lo) && !fs && !ls) { (void)sp_range_new_box(f, l, x); return 0; }
+  return sp_srange_cover(sp_srange_new_box(f, l, x), s);
+}
 /* Kernel#rand / Random#rand over a Range known only at run time (a parameter,
    a boxed value), as CRuby's: an open side is Errno::EDOM, an empty range nil
    for Kernel#rand and ArgumentError for Random#rand, an end written as a
@@ -19945,8 +19959,10 @@ static sp_Enumerator *sp_poly_cycle(sp_RbVal v) {
 /* A boxed value against an Integer range: a Float compares as a Float, a
    Bignum lies past every finite bound, so only an open end can hold it, a
    Rational compares exactly against each bound, and a non-numeric value is
-   never covered. */
+   never covered. A Range open at both ends (`nil..nil`) covers every
+   value, as CRuby's. */
 static sp_bool sp_range_cover_poly(sp_Range *r, sp_RbVal x) {
+  if (r->nobeg && r->noend && !r->fe) return 1;
   if (x.tag == SP_TAG_INT) return sp_range_include(r, x.v.i);
   if (x.tag == SP_TAG_FLT) return sp_range_cover_f(r, x.v.f);
   if (x.tag == SP_TAG_BIGINT) return sp_bigint_sign((sp_Bigint *)x.v.p) > 0 ? (r->fe ? r->fend == HUGE_VAL : r->noend) : r->nobeg;

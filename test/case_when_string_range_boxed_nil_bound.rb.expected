@@ -1,0 +1,27 @@
+[:str_range_nil_begin, :no]
+[:str_range_nil_end, :open]
+:y
+:y
+:n
+:y
+:n
+:n
+:y
+:y
+:y
+[:argerr, "bad value for range"]
+1
+:y
+:y
+:y
+:n
+:y
+:y
+:one
+[:q, :lo]
+:both
+[:q]
+:n
+true
+true
+true
