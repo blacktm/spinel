@@ -7599,20 +7599,25 @@ static int emit_pm_subcond_expr(Compiler *c, int spat, const char *elem, Buf *b)
   return 1;
 }
 
+static const char *const_class_pattern_name(Compiler *c, int node, char *buf, size_t bufsz);
 /* Classify a hash-pattern value sub-node for the boolean pattern matcher:
-   returns the class ConstantReadNode id for `Class` / `Class => v`, -1 for a
+   returns the class ConstantReadNode id for `Class` / `Class => v` (a
+   constant that names a class: const_class_pattern_name), -1 for a
    presence-only value (`k:` bare or `k: v` binding, which imposes no value
    constraint), or PM_HASH_VAL_REJECT for a shape we emit no check for (a
    literal, range, pin, or nested pattern) so the caller can reject it. */
 #define PM_HASH_VAL_REJECT (-2)
-static int pm_hash_value_class(const NodeTable *nt, int vpat) {
+static int pm_hash_value_class(Compiler *c, int vpat) {
+  const NodeTable *nt = c->nt;
   if (vpat < 0 || !nt_type(nt, vpat)) return -1;
   const char *vty = nt_type(nt, vpat);
-  if (sp_streq(vty, "ConstantReadNode")) return vpat;
+  char qb[192];
+  if (sp_streq(vty, "ConstantReadNode") && const_class_pattern_name(c, vpat, qb, sizeof qb)) return vpat;
   if (sp_streq(vty, "ImplicitNode") || sp_streq(vty, "LocalVariableTargetNode")) return -1;
   if (sp_streq(vty, "CapturePatternNode")) {
     int cv = nt_ref(nt, vpat, "value");
-    if (cv >= 0 && nt_type(nt, cv) && sp_streq(nt_type(nt, cv), "ConstantReadNode")) return cv;
+    if (cv >= 0 && nt_type(nt, cv) && sp_streq(nt_type(nt, cv), "ConstantReadNode") &&
+        const_class_pattern_name(c, cv, qb, sizeof qb)) return cv;
   }
   return PM_HASH_VAL_REJECT;
 }
@@ -7793,8 +7798,10 @@ static void emit_obj_nil(Compiler *c, TyKind pt, int t, Buf *b) {
 /* 1 when exactly one `NAME = ...` writes the constant, at the top level of
    the program rather than inside a module or a class (whose constant the
    class-alias lookup, which reads names alone, would also lend to another
-   scope), and no `class NAME` or `module NAME` also names it */
-static int const_toplevel_alias(Compiler *c, const char *name) {
+   scope), and no `class NAME` or `module NAME` also names it. With nested,
+   the one write may be inside a module or a class: a path that names its
+   scope (`Mo::K`) reads it. */
+static int const_toplevel_alias(Compiler *c, const char *name, int nested) {
   const NodeTable *nt = c->nt;
   int cap = 256, sp = 0, n = 0, ok = 1;
   int *st = malloc(sizeof(int) * (size_t)cap);
@@ -7812,7 +7819,7 @@ static int const_toplevel_alias(Compiler *c, const char *name) {
     }
     if (k == NK_ConstantWriteNode) {
       const char *nm = nt_str(nt, id, "name");
-      if (nm && sp_streq(nm, name) && (inside || ++n > 1)) ok = 0;
+      if (nm && sp_streq(nm, name) && ((inside && !nested) || ++n > 1)) ok = 0;
     }
     int nr = nt_num_refs(nt, id), na = nt_num_arrs(nt, id), m = nr;
     for (int i = 0; i < na; i++) { int en = 0; nt_arr_at(nt, id, i, &en); m += en; }
@@ -7842,7 +7849,7 @@ static int emit_obj_class_when(Compiler *c, TyKind pt, const char *cn, int t, Bu
   /* a class-aliasing constant (Alias = SomeClass) tests the aliased class,
      as the poly arm does (emit_poly_class_when), when the alias is written
      once at the top level and names no class of its own */
-  if (comp_class_index(c, cn) < 0 && const_toplevel_alias(c, cn)) {
+  if (comp_class_index(c, cn) < 0 && const_toplevel_alias(c, cn, 0)) {
     const char *ra = resolve_class_alias(c, cn);
     if (ra) cn = ra;
   }
@@ -7978,6 +7985,32 @@ static int re_case_eq_obj_subject(Compiler *c, TyKind pt) {
          !comp_ty_value_obj(c, pt);
 }
 
+static int when_builtin_value_const(Compiler *c, int cond);
+static void emit_when_value_test(Compiler *c, int cond, int t, TyKind pt, int typed_t, TyKind typed_pt, int pred, Buf *b);
+/* The class a constant pattern (`when Mo::K`, `in Mo::K`) names, through
+   isa_match_name into buf, or NULL when the constant is no class pattern: a
+   node that is no constant, or a constant that holds a value -- one
+   registered in comp_const with a real type (`STATE_TITLE = :title`), an
+   `ffi_const` (its own table), a builtin's value constant (`Socket::AF_INET`,
+   `Float::INFINITY`). A value constant is an equality test. buf holds the
+   path's qualified name whenever the node has one. */
+static const char *const_class_pattern_name(Compiler *c, int node, char *buf, size_t bufsz) {
+  NodeKind k = nt_kind(c->nt, node);
+  if (k != NK_ConstantReadNode && k != NK_ConstantPathNode) return NULL;
+  const char *cn = isa_match_name(c->nt, node, buf, bufsz);
+  if (!cn) return NULL;
+  LocalVar *cv = comp_const(c, cn);
+  if (cv && cv->type != TY_UNKNOWN && cv->type != TY_CLASS) return NULL;
+  if (comp_ffi_const_at(c, node, NULL)) return NULL;
+  if (when_builtin_value_const(c, node)) return NULL;
+  /* a path to a class alias written once (`Mo::K = Foo`) names that class */
+  if (k == NK_ConstantPathNode && comp_class_index(c, cn) < 0 && const_toplevel_alias(c, cn, 1)) {
+    const char *ra = resolve_class_alias(c, cn);
+    if (ra) return ra;
+  }
+  return cn;
+}
+
 /* emit_pm_cond over the subject node `subj` that temp `t` holds (the arm's
    own subject), or -1 where the temp is another value: the node's nil fact
    (Repr.may_nil) says whether a poly-array subject can be NULL. PM_SUBJ_FRESH
@@ -7999,6 +8032,40 @@ static void pm_bind_lhs_scope(Compiler *c, Scope *s, const char *lnm, Buf *b) {
 }
 static void pm_bind_lhs(Compiler *c, int node, const char *lnm, Buf *b) {
   pm_bind_lhs_scope(c, comp_scope_of(c, node), lnm, b);
+}
+/* `in nil` against the subject in _t<t> */
+static void emit_pm_nil_test(Compiler *c, int t, TyKind pt, Buf *b) {
+  if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_NIL)", t);
+  else if (t == g_pm_sentinel_t) {
+    char ref[24]; snprintf(ref, sizeof ref, "_o%d", t);   /* the subject's oint (emit_case_match) */
+    buf_puts(b, "!"); emit_slot_truthy(pt, ref, b);
+  }
+  /* a no-match MatchData is a NULL pointer, a String slot holds nil as
+     NULL, and so does a typed Hash or Array slot; `in nil` matches it */
+  else if (pt == TY_MATCHDATA || ty_null_is_nil(pt)) buf_printf(b, "(_t%d == NULL)", t);
+  else if (ty_is_object(pt)) emit_obj_nil(c, pt, t, b);
+  else buf_puts(b, (pt == TY_NIL) ? "1" : "0");
+}
+/* A value constant as a pattern (`in Float::INFINITY`, `in Mo::LIMIT`,
+   `in RNG`) is `CONST === subject`, which the `when` arm decides. A nil
+   constant is `in nil`; a nilable scalar subject goes boxed, as the `when`
+   chain boxes it, and so does a Bignum against a value of another kind. */
+static int emit_pm_const_value_eq(Compiler *c, int pat, int t, TyKind pt, int subj, Buf *b) {
+  TyKind vt = comp_ntype(c, pat);
+  if (vt == TY_NIL) { emit_pm_nil_test(c, t, pt, b); return 1; }
+  int sentinel = t == g_pm_sentinel_t;
+  if (!sentinel && !(pt == TY_BIGINT && vt != TY_BIGINT)) {
+    emit_when_value_test(c, pat, t, pt, t, pt, subj, b);
+    return 1;
+  }
+  int bt = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", bt);
+  if (sentinel) buf_printf(b, "%s(_o%d)", oint_box(pt), t);
+  else { char sref[32]; snprintf(sref, sizeof sref, "_t%d", t); emit_boxed_text(c, pt, sref, b); }
+  buf_puts(b, "; ");
+  emit_when_value_test(c, pat, bt, TY_POLY, sentinel ? t : bt, sentinel ? pt : TY_POLY, subj, b);
+  buf_puts(b, "; })");
+  return 1;
 }
 static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, Buf *b);
 int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
@@ -8045,16 +8112,7 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
   }
   /* nil / true / false literal patterns */
   if (sp_streq(pty, "NilNode")) {
-    if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_NIL)", t);
-    else if (t == g_pm_sentinel_t) {
-      char ref[24]; snprintf(ref, sizeof ref, "_o%d", t);   /* the subject's oint (emit_case_match) */
-      buf_puts(b, "!"); emit_slot_truthy(pt, ref, b);
-    }
-    /* a no-match MatchData is a NULL pointer, a String slot holds nil as
-       NULL, and so does a typed Hash or Array slot; `in nil` matches it */
-    else if (pt == TY_MATCHDATA || ty_null_is_nil(pt)) buf_printf(b, "(_t%d == NULL)", t);
-    else if (ty_is_object(pt)) emit_obj_nil(c, pt, t, b);
-    else buf_puts(b, (pt == TY_NIL) ? "1" : "0");
+    emit_pm_nil_test(c, t, pt, b);
     return 1;
   }
   if (sp_streq(pty, "TrueNode")) {
@@ -8070,9 +8128,18 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
     return 1;
   }
   /* class pattern: runtime tag/class test for poly, compile-time fold otherwise */
-  if (sp_streq(pty, "ConstantReadNode")) {
-    const char *cn2 = nt_str(nt, pat, "name");
-    if (!cn2) return 0;
+  if (nt_kind(nt, pat) == NK_ConstantReadNode || nt_kind(nt, pat) == NK_ConstantPathNode) {
+    char qname[192];
+    qname[0] = '\0';
+    const char *cn2 = const_class_pattern_name(c, pat, qname, sizeof qname);
+    /* a class whose name the path does not give (`expr::K`) keeps no test */
+    if (!cn2 && comp_ntype(c, pat) == TY_CLASS) return 0;
+    if (!cn2) return emit_pm_const_value_eq(c, pat, t, pt, subj, b);
+    /* ...nor does a builtin's nested class the class tests do not know
+       (`File::Stat`): its qualified name is no builtin row and its leaf
+       no class of the program */
+    if (nt_kind(nt, pat) == NK_ConstantPathNode && cn2 != qname &&
+        !sp_streq(qname, cn2) && comp_class_index(c, cn2) < 0) return 0;
     if (pt == TY_POLY) {
       char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
       if (!emit_poly_class_when(c, pat, tmp, b)) buf_puts(b, "0");
@@ -8291,7 +8358,9 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
             classpat = val;
         }
         if (classpat >= 0) {
-          const char *cn2 = nt_str(nt, classpat, "name");
+          /* a value constant (`[CAP]`) is no class to mismatch */
+          char qb[192];
+          const char *cn2 = const_class_pattern_name(c, classpat, qb, sizeof qb);
           if (cn2 && ty_matches_class(et2, cn2, 0) <= 0 &&
               !(et2 == TY_STRING && sp_streq(cn2, "NilClass"))) class_mismatch = 1;
         }
@@ -8429,7 +8498,7 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
     for (int i = 0; i < en; i++) {
       if (!nt_type(nt, elms[i]) || !sp_streq(nt_type(nt, elms[i]), "AssocNode")) return 0;
       if (nt_ref(nt, elms[i], "key") < 0) return 0;
-      int classpat = pm_hash_value_class(nt, nt_ref(nt, elms[i], "value"));
+      int classpat = pm_hash_value_class(c, nt_ref(nt, elms[i], "value"));
       if (classpat == PM_HASH_VAL_REJECT) {
         /* a value sub-pattern (literal, range, alternation, pin, container):
            trial-emit the recursive condition against the fetched value's type
@@ -8459,7 +8528,7 @@ static int emit_pm_cond_subj(Compiler *c, int pat, int t, TyKind pt, int subj, B
     for (int i = 0; i < en; i++) {
       int key = nt_ref(nt, elms[i], "key");
       int vchk = nt_ref(nt, elms[i], "value");
-      int classpat = pm_hash_value_class(nt, vchk);
+      int classpat = pm_hash_value_class(c, vchk);
       emit_indent(hs, hi);
       buf_printf(hs, "_t%d = _t%d && sp_%sHash_has_key(_t%d, ", hcond, hcond, hn, t);
       emit_hash_key(c, key, ty_hash_key(pt), hs); buf_puts(hs, ");\n");
@@ -8966,7 +9035,7 @@ static int pm_diag_ok(Compiler *c, int pat) {
   static const char *const leaves[] = {
     "LocalVariableTargetNode", "ImplicitNode", "SplatNode", "ImplicitRestNode",
     "IntegerNode", "FloatNode", "StringNode", "SymbolNode", "NilNode", "TrueNode",
-    "FalseNode", "ConstantReadNode", "PinnedVariableNode", NULL };
+    "FalseNode", "ConstantReadNode", "ConstantPathNode", "PinnedVariableNode", NULL };
   for (int i = 0; leaves[i]; i++) if (sp_streq(ty, leaves[i])) return 1;
   if (re_lit_index(c, pat) >= 0) return 1;
   /* `^(expr)` is evaluated again: only a variable read can be */
@@ -9084,7 +9153,11 @@ static void emit_pm_diag(Compiler *c, int pat, const char *v, PmDiag *d, int ind
   if (!is_arr && !is_find && !is_hash) {
     Buf cb; memset(&cb, 0, sizeof cb);
     if (emit_pm_subcond_expr(c, pat, v, &cb) && cb.p) {
-      if (!sp_streq(ty, "ConstantReadNode")) emit_pm_diag_bail_obj(d, v, ind, b);
+      /* a class pattern runs no code of the program's: a bare constant, or
+         a path that names a class */
+      char qb[192];
+      if (nt_kind(nt, pat) != NK_ConstantReadNode && !const_class_pattern_name(c, pat, qb, sizeof qb))
+        emit_pm_diag_bail_obj(d, v, ind, b);
       Buf mb; memset(&mb, 0, sizeof mb);
       buf_puts(&mb, "sp_pm_eqq_msg(");
       emit_pm_diag_pat_s(c, pat, &mb);
@@ -10960,25 +11033,14 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           }
           else {
           /* when ClassName / when Mod::Klass: Module#=== via is_a? semantics */
-          const char *cty2 = nt_type(nt, conds[j]);
           /* isa_match_name: a qualified path naming a builtin exception
              matches by its FULL name ("Errno::ENOENT", the name the raised
              exception carries), the leaf otherwise */
           char cq2[192];
-          const char *cn2 = cty2 && (sp_streq(cty2, "ConstantReadNode") || sp_streq(cty2, "ConstantPathNode"))
-                           ? isa_match_name(nt, conds[j], cq2, sizeof cq2) : NULL;
-          /* a VALUE constant (`STATE_TITLE = :title`; registered in
-             comp_const with a real type) in `when` is an equality test,
-             not Module#=== -- treating it as a class name folded every
-             arm of doom's Menu#render state dispatch to `if (0)`. */
-          if (cn2 && ({ LocalVar *_wv = comp_const(c, cn2); _wv && _wv->type != TY_UNKNOWN && _wv->type != TY_CLASS; })) cn2 = NULL;
-        /* An `ffi_const` is a value too, and it lives in its own table
-           rather than the constant one: read as a class name the arm folded
-           to a constant false and the branch was never taken. */
-        if (cn2 && comp_ffi_const_at(c, conds[j], NULL)) cn2 = NULL;
-        /* ...and so is a builtin's value constant (`Socket::AF_INET`,
-           `File::SEPARATOR`): typed a number or a String, not a class */
-        if (cn2 && when_builtin_value_const(c, conds[j])) cn2 = NULL;
+          /* a VALUE constant in `when` is an equality test, not Module#===
+             -- treating it as a class name folded every arm of doom's
+             Menu#render state dispatch to `if (0)` */
+          const char *cn2 = const_class_pattern_name(c, conds[j], cq2, sizeof cq2);
           if (cn2 && pt == TY_POLY) {
             char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
             if (!emit_poly_class_when(c, conds[j], tmp, b))
@@ -11304,6 +11366,44 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
   emit_case_expr_in(c, id, b);
   g_case_res_oint = sro; g_case_scrut_oint = sso;
 }
+/* `<cond> === subject` for a `when` arm (or a value pattern) that names no
+   class, against the subject in _t<t> of kind pt; typed_t/typed_pt are the
+   subject before a nilable scalar was boxed, pred its node. */
+static void emit_when_value_test(Compiler *c, int cond, int t, TyKind pt, int typed_t, TyKind typed_pt, int pred, Buf *b) {
+  if (emit_when_typed_test(c, cond, t, pt, b)) { }
+  else if (comp_ntype(c, cond) == TY_PROC &&
+           emit_when_lambda_inline(c, cond, typed_t, typed_pt, pred, b)) { /* literal lambda inlined */ }
+  /* a Proc read out of a container arrives boxed: dispatch on the tag so
+     it is CALLED and not compared (#3683) */
+  else if (repr_of(c, cond).kind == RK_BOXED) emit_when_boxed_test(c, cond, t, pt, b);
+  else if (comp_ntype(c, cond) == TY_PROC) {
+    /* `when <proc>`: Proc#=== calls the proc with the subject. The
+       subject is published both in the sp_int slot (typed callee
+       param) and boxed on the side-channel (poly callee param), like
+       the force_poly proc-call path. */
+    emit_when_proc_test(c, cond, typed_t, typed_pt, b);
+  }
+  else if (pt == TY_STRING) {
+    /* an arm of another type can never be `===` a String (see the
+       statement chain's arm): evaluate it and answer false */
+    TyKind wat2 = comp_ntype(c, cond);
+    if (wat2 != TY_STRING && wat2 != TY_STRBUF && wat2 != TY_POLY && wat2 != TY_UNKNOWN) {
+      if (!emit_when_user_eq(c, cond, t, pt, b)) {
+        buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, cond, b); buf_puts(b, "), 0)");
+      }
+    }
+    else if (!emit_str_eq_lit_tmp(c, t, cond, b)) {
+      buf_printf(b, "sp_str_eq(_t%d, ", t);
+      emit_poly_unboxed(c, cond, wat2, "sp_poly_to_s(", b);
+      buf_puts(b, ")");
+    }
+  }
+  else if (emit_case_container_eq(c, cond, t, pt, b)) { }
+  else if (emit_when_user_eq(c, cond, t, pt, b)) { }
+  else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, cond, b); buf_puts(b, ")"); }
+  else emit_case_obj_eq(c, cond, t, pt, b);
+}
+
 static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   TyKind rt = id == g_strbuf_case_node ? TY_STRBUF : repr_of(c, id).as_ty;
@@ -11402,19 +11502,9 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
       if (oint_typed) { case_oint_label(c, conds[j], t, b); continue; }
       if (pred >= 0) {
         /* when ClassName / Mod::Klass: Module#=== via is_a? semantics */
-        const char *cty2 = nt_type(nt, conds[j]);
         char cq2[192];
-        const char *cn2 = cty2 && (sp_streq(cty2, "ConstantReadNode") || sp_streq(cty2, "ConstantPathNode"))
-                         ? isa_match_name(nt, conds[j], cq2, sizeof cq2) : NULL;
         /* value constant in `when`: equality, not a class test (see above) */
-        if (cn2 && ({ LocalVar *_wv = comp_const(c, cn2); _wv && _wv->type != TY_UNKNOWN && _wv->type != TY_CLASS; })) cn2 = NULL;
-        /* An `ffi_const` is a value too, and it lives in its own table
-           rather than the constant one: read as a class name the arm folded
-           to a constant false and the branch was never taken. */
-        if (cn2 && comp_ffi_const_at(c, conds[j], NULL)) cn2 = NULL;
-        /* ...and so is a builtin's value constant (`Socket::AF_INET`,
-           `File::SEPARATOR`): typed a number or a String, not a class */
-        if (cn2 && when_builtin_value_const(c, conds[j])) cn2 = NULL;
+        const char *cn2 = const_class_pattern_name(c, conds[j], cq2, sizeof cq2);
         if (cn2 && pt == TY_POLY) {
           char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
           if (!emit_poly_class_when(c, conds[j], tmp, b)) buf_puts(b, "0");
@@ -11438,40 +11528,7 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
         }
         else if (cn2 && emit_when_scalar_class(pt, cn2, t, b)) { }
         else if (cn2) { int yes = ty_matches_class(pt, cn2, 0); buf_printf(b, "%d", yes > 0 ? 1 : 0); }
-        else {
-        if (emit_when_typed_test(c, conds[j], t, pt, b)) { }
-        else if (comp_ntype(c, conds[j]) == TY_PROC &&
-                 emit_when_lambda_inline(c, conds[j], typed_t, typed_pt, pred, b)) { /* literal lambda inlined */ }
-        /* a Proc read out of a container arrives boxed: dispatch on the tag so
-           it is CALLED and not compared (#3683) */
-        else if (repr_of(c, conds[j]).kind == RK_BOXED) emit_when_boxed_test(c, conds[j], t, pt, b);
-        else if (comp_ntype(c, conds[j]) == TY_PROC) {
-          /* `when <proc>`: Proc#=== calls the proc with the subject. The
-             subject is published both in the sp_int slot (typed callee
-             param) and boxed on the side-channel (poly callee param), like
-             the force_poly proc-call path. */
-          emit_when_proc_test(c, conds[j], typed_t, typed_pt, b);
-        }
-        else if (pt == TY_STRING) {
-          /* an arm of another type can never be `===` a String (see the sibling
-             arm above): evaluate it and answer false */
-          TyKind wat2 = comp_ntype(c, conds[j]);
-          if (wat2 != TY_STRING && wat2 != TY_STRBUF && wat2 != TY_POLY && wat2 != TY_UNKNOWN) {
-            if (!emit_when_user_eq(c, conds[j], t, pt, b)) {
-              buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, conds[j], b); buf_puts(b, "), 0)");
-            }
-          }
-          else if (!emit_str_eq_lit_tmp(c, t, conds[j], b)) {
-            buf_printf(b, "sp_str_eq(_t%d, ", t);
-            emit_poly_unboxed(c, conds[j], wat2, "sp_poly_to_s(", b);
-            buf_puts(b, ")");
-          }
-        }
-        else if (emit_case_container_eq(c, conds[j], t, pt, b)) { }
-        else if (emit_when_user_eq(c, conds[j], t, pt, b)) { }
-        else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
-        else emit_case_obj_eq(c, conds[j], t, pt, b);
-        } /* close non-ConstantReadNode else */
+        else emit_when_value_test(c, conds[j], t, pt, typed_t, typed_pt, pred, b);
       }
       else {
         buf_puts(b, "(");
