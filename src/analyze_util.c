@@ -2864,6 +2864,10 @@ static int udm_aliased_name(Compiler *c, const char *name) {
   if (udm_sets_stale) udm_sets_fill(c);
   return udm_set_has(&udm_aliased_set, name);
 }
+/* Does an `alias` or `alias_method` of the program name a method `name`? */
+int an_user_aliases_method(Compiler *c, const char *name) {
+  return name && udm_aliased_name(c, name);
+}
 /* True if a native (C-backed) class declares `name`. Such a method is not a
    scope, so an_user_defines_method cannot see it, but it means the same thing
    to a caller: the name is not necessarily the builtin container operation. */

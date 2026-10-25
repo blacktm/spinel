@@ -12431,23 +12431,26 @@ int nested_row_iter_call(Compiler *c, int id) {
   return 0;
 }
 
-/* Does `node` hold a `break` that leaves the block it sits in, rather than a
-   loop or a block nested inside it? */
-int block_body_breaks(const NodeTable *nt, int node) {
+/* Does `node` hold a jump of kind `jump` (a `break`, a `next`) that leaves
+   the block it sits in, rather than a loop or a block nested inside it? */
+int block_body_jumps(const NodeTable *nt, int node, NodeKind jump) {
   if (node < 0) return 0;
   NodeKind k = nt_kind(nt, node);
-  if (k == NK_BreakNode) return 1;
+  if (k == jump) return 1;
   if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
       k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode ||
       k == NK_SingletonClassNode) return 0;
   int nr = nt_num_refs(nt, node);
-  for (int i = 0; i < nr; i++) if (block_body_breaks(nt, nt_ref_at(nt, node, i))) return 1;
+  for (int i = 0; i < nr; i++) if (block_body_jumps(nt, nt_ref_at(nt, node, i), jump)) return 1;
   int na = nt_num_arrs(nt, node);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
-    for (int j = 0; j < n; j++) if (block_body_breaks(nt, ids[j])) return 1;
+    for (int j = 0; j < n; j++) if (block_body_jumps(nt, ids[j], jump)) return 1;
   }
   return 0;
+}
+int block_body_breaks(const NodeTable *nt, int node) {
+  return block_body_jumps(nt, node, NK_BreakNode);
 }
 
 /* `enum.m(args) { ... break ... }` on an Enumerator -> `__enumw_m(enum, args)
@@ -15060,6 +15063,128 @@ static int sym_proc_blockify_op(Compiler *c, int id) {
   LocalVar *lv = scope_local_intern(comp_scope_of(c, blocknode), "_spx");
   if (lv) lv->is_block_param = 1;
   return 1;
+}
+
+/* Is every `===` the program defines an instance method of one of its own
+   classes (or of an object's singleton), which a pattern of that class
+   reaches through the planned call? A class method's, a top-level one's, a
+   module's (a builtin may include it, a class extend it) or a builtin's
+   reopening is not reached by a planned `pat === e` today
+   (`(1..5).select { |e| Odd === e }` answers [] beside `def self.===`). */
+static int lazy_grep_own_class(Compiler *c, int k) {
+  ClassInfo *ci = k >= 0 && k < c->nclasses ? &c->classes[k] : NULL;
+  if (!ci || !ci->name || comp_class_is_module(c, ci)) return 0;
+  return ci->is_singleton_of || (!ci->is_builtin_const && !is_builtin_reopen(ci->name));
+}
+static int lazy_grep_eqq_own_only(Compiler *c) {
+  for (int si = 1; si < c->nscopes; si++) {
+    const Scope *sc = &c->scopes[si];
+    if (is_case_eq_name(sc->name) && (sc->is_cmethod || !lazy_grep_own_class(c, sc->class_id))) return 0;
+  }
+  /* an `alias ===` / `alias_method :===` the same way */
+  for (int k = 0; k < c->nclasses; k++)
+    for (int i = 0; i < c->classes[k].naliases; i++)
+      if (is_case_eq_name(c->classes[k].alias_new[i]) && !lazy_grep_own_class(c, k)) return 0;
+  return 1;
+}
+
+/* `src.lazy.grep(pat)` and `src.lazy.grep(pat) { blk }` as the fused stages
+   the lazy pipeline already has: `select { |e| pat === e }`, then
+   `map { blk }` when grep has a block. The source runs into a temp and the
+   pattern after it, once:
+   `(__grep_src_N = src; __grep_pat_N = pat; __grep_src_N).lazy`; CRuby
+   runs a stage's argument between them, so a stage between the `lazy` and
+   the grep may have only arguments with no effect. The match
+   is then a call of `===` like any other, inferred and planned as
+   Enumerable#grep's (builtins/enumerable.rb) is. Only for a grep whose
+   receiver reaches its `lazy` through lazy stages, a `lazy` that no method
+   of the program answers for the source, in a program that defines no
+   `grep` an explicit receiver reaches (an_user_recv_defines_method), no
+   `===` (a def or an alias) but its own classes' (lazy_grep_eqq_own_only),
+   and no alias named `grep` (an_user_aliases_method). */
+int desugar_lazy_grep(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    const char *nm = nt_kind(nt, id) == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+    if (!is_grep_name(nm)) continue;
+    int args = nt_ref(nt, id, "arguments"), ac = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+    if (ac != 1 || nt_kind(nt, av[0]) == NK_SplatNode || nt_kind(nt, av[0]) == NK_KeywordHashNode) continue;
+    /* (a `&blk` maps nothing in a fused lazy map today, a `break` out of
+       one leaves it where CRuby raises LocalJumpError in a block, and a
+       `next` drops the element there) */
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0 && (nt_kind(nt, blk) != NK_BlockNode || block_body_breaks(nt, nt_ref(nt, blk, "body")) ||
+                     block_body_jumps(nt, nt_ref(nt, blk, "body"), NK_NextNode)))
+      continue;
+    int pat = av[0], lz = nt_ref(nt, id, "receiver");
+    for (; lz >= 0 && nt_kind(nt, lz) == NK_CallNode; lz = nt_ref(nt, lz, "receiver")) {
+      const char *ln = nt_str(nt, lz, "name");
+      if (!ln || !lazy_stage_name(ln)) { lz = -1; break; }
+      /* a stage's argument runs before the pattern in CRuby, and a stage's
+         `&pr` other than a Symbol's is not applied by the fused stage today */
+      int sa = nt_ref(nt, lz, "arguments"), sb = nt_ref(nt, lz, "block");
+      if (sa >= 0 && subtree_has_side_effect(c, sa)) { lz = -1; break; }
+      if (sb >= 0 && nt_kind(nt, sb) == NK_BlockArgumentNode &&
+          nt_kind(nt, nt_ref(nt, sb, "expression")) != NK_SymbolNode) { lz = -1; break; }
+      if (is_lazy_name(ln) && nt_ref(nt, lz, "block") < 0 &&
+          !chain_is_lazy_valued(c, nt_ref(nt, lz, "receiver"))) break;
+    }
+    if (lz < 0 || nt_kind(nt, lz) != NK_CallNode) continue;
+    int src = nt_ref(nt, lz, "receiver");
+    if (src < 0 || recv_may_reach_program_method(c, infer_type(c, src), "lazy")) continue;
+    if (an_user_recv_defines_method(c, "grep") || an_user_aliases_method(c, "grep") ||
+        !lazy_grep_eqq_own_only(c)) continue;
+    char sn[48], pn[48], en[48];
+    snprintf(sn, sizeof sn, "__grep_src_%s", comp_node_tag(c, id));
+    snprintf(pn, sizeof pn, "__grep_pat_%s", comp_node_tag(c, id));
+    snprintf(en, sizeof en, "__grep_e_%s", comp_node_tag(c, id));
+    /* (the program's own local of a temp's name keeps its value) */
+    Scope *own = comp_scope_of(c, id);
+    if (scope_local(own, sn) || scope_local(own, pn) || scope_local(own, en)) continue;
+    BsB b = { nt, 1 };
+    int base = nt->count;
+    int binds[3] = { bs_write(&b, sn, src), bs_write(&b, pn, pat), bs_read(&b, sn) };
+    int held = bs_stmts(&b, binds, 3), paren = bs_new(&b, "ParenthesesNode");
+    int elem = bs_read(&b, en);
+    int match = bs_call(&b, bs_read(&b, pn), "===", &elem, 1);
+    int mbody = bs_stmts(&b, &match, 1);
+    int req = bs_new(&b, "RequiredParameterNode"), params = bs_new(&b, "ParametersNode");
+    int bparams = bs_new(&b, "BlockParametersNode"), sblk = bs_new(&b, "BlockNode");
+    int sel = blk >= 0 ? bs_new(&b, "CallNode") : id;
+    if (!b.ok) { nt->count = base; continue; }
+    nt_node_set_ref(nt, paren, "body", held);
+    nt_node_set_str(nt, req, "name", en);
+    nt_node_set_arr(nt, params, "requireds", &req, 1);
+    nt_node_set_ref(nt, bparams, "parameters", params);
+    nt_node_set_ref(nt, sblk, "parameters", bparams);
+    nt_node_set_ref(nt, sblk, "body", mbody);
+    nt_node_set_ref(nt, lz, "receiver", paren);
+    long long line = nt_int(nt, id, "node_line", 0);
+    if (line) nt_node_set_int(nt, match, "node_line", line);
+    if (sel != id) {   /* grep's block maps what the select keeps */
+      nt_node_set_str(nt, sel, "name", "select");
+      nt_node_set_ref(nt, sel, "receiver", nt_ref(nt, id, "receiver"));
+      nt_node_set_ref(nt, sel, "arguments", -1);
+      if (line) nt_node_set_int(nt, sel, "node_line", line);
+      nt_node_set_ref(nt, id, "receiver", sel);
+      nt_node_set_str(nt, id, "name", "map");
+    }
+    else
+      nt_node_set_str(nt, id, "name", "select");
+    nt_node_set_ref(nt, sel, "block", sblk);
+    nt_node_set_ref(nt, id, "arguments", -1);
+    comp_grow_node_arrays(c);
+    for (int j = base; j < nt->count; j++) c->nscope[j] = c->nscope[id];
+    scope_local_intern(own, sn);
+    scope_local_intern(own, pn);
+    LocalVar *lv = scope_local_intern(comp_scope_of(c, sblk), en);
+    if (lv) lv->is_block_param = 1;
+    changed = 1;
+  }
+  return changed;
 }
 
 /* Whether some user class has a block-taking method `nm`, which a poly

@@ -306,6 +306,7 @@ int node_is_scope_tail(Compiler *c, int mi, int id);
 TyKind yield_aware_elem_ty(Compiler *c, int node);
 int an_user_defines_method(Compiler *c, const char *name);
 int an_user_recv_defines_method(Compiler *c, const char *name);
+int an_user_aliases_method(Compiler *c, const char *name);   /* an alias of the program names it */
 int an_user_define_method(Compiler *c);
 extern int g_yvt_unify_all;
 /* The return type of a call to method `mi`. A method whose body is just a
@@ -588,6 +589,7 @@ int desugar_builtin_splat_forward(Compiler *c);
 int builtin_class_arity_spec(const char *cls, const char *m, int *min, int *max,
                              const char **lo_exp, const char **hi_exp);
 int desugar_lazy_method_call(Compiler *c);
+int desugar_lazy_grep(Compiler *c);
 int desugar_value_callable_forwards(Compiler *c);
 int desugar_root_scoped_constants(Compiler *c);
 int desugar_errno_aliases(Compiler *c);
@@ -659,6 +661,7 @@ int desugar_extend_self(Compiler *c);
 int desugar_instance_eval_defs(Compiler *c);
 int enumerator_own_with_object(Compiler *c, int id);
 int block_body_breaks(const NodeTable *nt, int node);   /* a break that leaves this block */
+int block_body_jumps(const NodeTable *nt, int node, NodeKind jump);   /* ... or a jump of that kind */
 int desugar_kernel_reopen(Compiler *c);
 int desugar_singleton_class_mixin(Compiler *c);
 int desugar_explicit_receiver_mixin(Compiler *c);

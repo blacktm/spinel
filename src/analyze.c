@@ -49333,6 +49333,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
        (#3353). The mark is monotone, so repeating it only ever fills in. */
     ch |= AN_PASS("mark_empty_hash_key_ctx", mark_empty_hash_key_ctx(c));
     ch |= AN_PASS("widen_mixed_key_hash_slots", widen_mixed_key_hash_slots(c));
+    ch |= AN_PASS("desugar_lazy_grep", desugar_lazy_grep(c));                   /* src.lazy.grep(p) { } -> (s = src; q = p; s).lazy.select { |e| q === e }.map { } */
     ch |= AN_PASS("desugar_lazy_stateful_stage", desugar_lazy_stateful_stage(c));     /* arr.lazy.uniq -> arr.uniq (finite source) */
     ch |= AN_PASS("desugar_lazy_method_call", desugar_lazy_method_call(c));         /* lz.first where `def lz; ...lazy...; end` */
     ch |= AN_PASS("desugar_str_range_methods", desugar_str_range_methods(c));        /* ("a".."e").map -> .to_a.map */
