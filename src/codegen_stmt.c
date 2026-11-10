@@ -6985,7 +6985,10 @@ int static_isa_cond(Compiler *c, int pred) {
   const char *nm = nt_str(nt, pred, "name");
   if (!nm || !is_kind_query(nm)) return -1;
   int recv = nt_ref(nt, pred, "receiver");
-  if (recv < 0) return -1;
+  /* Folding the predicate discards its receiver: only one that runs and
+     raises nothing can be omitted (order_operand_inert). A call, a write or
+     an operation that can raise (`n / d`) must run even when its type is known. */
+  if (recv < 0 || !order_operand_inert(c, pred, recv, 1)) return -1;
   TyKind rt = comp_ntype(c, recv);
   int args = nt_ref(nt, pred, "arguments");
   int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;

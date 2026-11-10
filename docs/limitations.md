@@ -2038,6 +2038,11 @@ than with `true`.
 
 ## Now supported (older write-ups are stale here)
 
+Typed `is_a?`/`kind_of?`/`instance_of?` conditions only fold when evaluating
+the receiver runs and raises nothing. Effectful receivers still run once in `if`,
+`unless` and ternary expressions, including when membership is already known
+from the type; pure-read guards keep their dead-branch specialization.
+
 These were limits in an earlier (Ruby self-hosted) version of the compiler and
 now work on current master:
 

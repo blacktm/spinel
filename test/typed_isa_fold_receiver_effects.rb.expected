@@ -1,0 +1,14 @@
+in-yes
+1
+wv-yes
+2
+w-yes
+3
+true
+4
+t-yes
+5
+if-yes
+6
+[:raised, ZeroDivisionError]
+[:raised, ZeroDivisionError]
