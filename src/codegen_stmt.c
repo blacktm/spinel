@@ -11415,7 +11415,8 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           case TY_POLY_ARRAY:
             buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, inner, b);
             buf_printf(b, "; _t%d && sp_PolyArray_include(_t%d, ", ta, ta);
-            emit_boxed(c, pred, b);
+            char subject[24]; snprintf(subject, sizeof subject, "_t%d", t);
+            emit_boxed_text(c, pt, subject, b);
             buf_puts(b, "); })");
             break;
           default:

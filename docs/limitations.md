@@ -2038,6 +2038,10 @@ than with `true`.
 
 ## Now supported (older write-ups are stale here)
 
+A statement `case subject; when *poly_list` reuses its evaluated subject
+temporary for the membership test. An effectful subject runs once, as in
+the value form; the splatted list is then evaluated in source order.
+
 These were limits in an earlier (Ruby self-hosted) version of the compiler and
 now work on current master:
 
