@@ -2038,6 +2038,12 @@ than with `true`.
 
 ## Now supported (older write-ups are stale here)
 
+Typed literal and pin patterns in `case/in` compare through boxed Ruby
+`===` when their native C representations are incompatible. Range-valued
+subjects/pins also use Range matching rather than C struct equality; a
+String-range pattern against a native numeric subject rejects by membership.
+Compatible String and numeric scalar comparisons retain their native paths.
+
 These were limits in an earlier (Ruby self-hosted) version of the compiler and
 now work on current master:
 

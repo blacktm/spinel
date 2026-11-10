@@ -7587,32 +7587,27 @@ static int emit_poly_class_when_value(Compiler *c, int cond_id, const char *tmp,
 /* Emit the match condition for a pattern into buf as a C boolean expression.
    Returns 1 if a condition was emitted (requires a runtime check),
    0 if the pattern always matches (no condition needed). */
-/* Emit `_t<scrut> == <value-node>` as a C boolean, dispatching on the
-   scrutinee's static type (poly: sp_poly_eq with the value boxed). */
+/* The pattern's === on boxed values, as a `when` asks it: a Proc's and a
+   user class's own === first, the pattern rooted while the subject boxes. */
+static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b);
+
+/* Emit `value-node === _t<scrut>` as a C boolean, retaining compatible
+   native scalar comparisons and boxing other representations. */
 void emit_pm_eq(Compiler *c, int t, TyKind pt, int valnode, Buf *b) {
+  TyKind value_type = comp_ntype(c, valnode);
   if (pt == TY_POLY) {
-    buf_printf(b, "sp_poly_eq(_t%d, ", t);
-    if (repr_of(c, valnode).kind != RK_BOXED) emit_boxed(c, valnode, b);
-    else emit_expr(c, valnode, b);
-    buf_puts(b, ")");
+    emit_when_boxed_test(c, valnode, t, pt, b);
   }
-  else if (pt == TY_STRING) {
+  else if (pt == TY_STRING && value_type == TY_STRING) {
     if (!emit_str_eq_lit_tmp(c, t, valnode, b)) {
       buf_printf(b, "sp_str_eq(_t%d, ", t); emit_expr(c, valnode, b); buf_puts(b, ")");
     }
   }
-  /* an Array, a Hash or a Bignum subject is matched by the value's ===,
-     which for those is ==, not by the pointers both sides hold; the value
-     is rooted across the comparison, whose == may allocate */
-  else if (ty_is_array(pt) || ty_is_hash(pt) || pt == TY_BIGINT) {
-    char sn[24]; snprintf(sn, sizeof sn, "_t%d", t);
-    int tp = ++g_tmp;
-    buf_printf(b, "({ sp_RbVal _t%d = ", tp);
-    if (repr_of(c, valnode).kind != RK_BOXED) emit_boxed(c, valnode, b);
-    else emit_expr(c, valnode, b);
-    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_eq(", tp);
-    emit_boxed_text(c, pt, sn, b);
-    buf_printf(b, ", _t%d); })", tp);
+  /* Containers and Range structs need Ruby comparison, as do incompatible
+     native kinds: a String helper or C operator cannot compare those. */
+  else if (ty_is_array(pt) || ty_is_hash(pt) || pt == TY_BIGINT || ty_is_struct_valued(pt) ||
+           (pt != value_type && !(ty_is_numeric(pt) && ty_is_numeric(value_type)))) {
+    emit_when_boxed_test(c, valnode, t, pt, b);
   }
   /* an Integer scrutinee against a Float value, or the reverse, is equal
      exactly, as == is (#7505); a literal within 2^53 keeps the plain C
@@ -8558,6 +8553,10 @@ static int emit_pm_cond_value(Compiler *c, int pat, int t, TyKind pt, int subj, 
     int lo = nt_ref(nt, pat, "left"), hi = nt_ref(nt, pat, "right");
     int excl = nt_range_excl(nt, pat);
     const char *cmp = excl ? "<" : "<=";
+    if (ty_is_numeric(pt) && comp_ntype(c, pat) == TY_STR_RANGE) {
+      emit_when_boxed_test(c, pat, t, pt, b);
+      return 1;
+    }
     if (pt == TY_INT || pt == TY_FLOAT) {
       buf_puts(b, "(");
       int wrote = 0;
